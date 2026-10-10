@@ -724,7 +724,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``ouroboros/store_import.py``; the same section-3 row) and the reconciliation's copy of a row
 # whose file an older body deleted, ``task_results/quarantine/<id>.deleted-<UTC>.json`` (the
 # quarantine row).
-EXPECTED_SCAN_PATHS = 356
+# 356 -> 359 (storage on SQLite, S0): the dormant authority switch's intent, receipt and
+# progress files ``state/switch_intent.json``, ``state/switch_receipt.json``,
+# ``state/switch_progress.json`` (``ouroboros/store_switch.py``; three section-2 rows).
+EXPECTED_SCAN_PATHS = 359
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

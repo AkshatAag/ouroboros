@@ -301,10 +301,18 @@ STORE_MODULES = ("ouroboros/store.py", "ouroboros/store_import.py", "ouroboros/s
 
 
 def _string_literals(source: str):
+    """Every string literal except docstrings (prose, not SQL)."""
     import ast
 
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+    tree = ast.parse(source)
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                docstrings.add(id(first.value))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
             yield node.value
 
 
@@ -314,6 +322,7 @@ def test_nothing_above_sqlite_3_24_in_the_store_modules():
     assert _ABOVE_3_24.search("SELECT body ->> '$.x' FROM t")  # the guard fires
     assert _ABOVE_3_24.search("CREATE TABLE t (a) STRICT")
     assert [s for s in _string_literals("x = 'SELECT a -> b'\ndef f() -> str: pass") if _ABOVE_3_24.search(s)]
+    assert not [s for s in _string_literals('"""a -> b docstring"""\ndef f():\n    """c -> d"""\n') if _ABOVE_3_24.search(s)]
     for rel in STORE_MODULES:
         path = REPO / rel
         if path.exists():
