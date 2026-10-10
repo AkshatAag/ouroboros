@@ -155,9 +155,10 @@ def test_api_conversion_binding_overrides_old_result_scope_on_restore(host, tmp_
     prepared = copy.deepcopy(host.pending[0])
     assert queue.persist_queue_snapshot()
     if stale:
-        snapshot = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        alive = queue.QUEUE_SNAPSHOT_PATH.with_name("queue.alive")
+        snapshot = json.loads(alive.read_text(encoding="utf-8"))
         snapshot["ts"] = "2000-01-01T00:00:00Z"
-        queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snapshot), encoding="utf-8")
+        alive.write_text(json.dumps(snapshot), encoding="utf-8")
     host.pending.clear()
     assert queue.restore_pending_from_snapshot() == 1
     assert bool(host.pending[0].get("_project_admission_restore_hold")) is stale

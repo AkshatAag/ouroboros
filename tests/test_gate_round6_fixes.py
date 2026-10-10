@@ -44,6 +44,7 @@ from ouroboros.task_results import (
     load_task_result,
     write_task_result,
 )
+from tests._shared import write_queue_document
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -181,11 +182,11 @@ def test_gr6_1_live_ownership_predicates(qenv, tmp_path):
     snap = tmp_path / "state" / "queue_snapshot.json"
     snap.parent.mkdir(parents=True, exist_ok=True)
     # A FRESH snapshot (GR7-1a): only a fresh one may prove a dead worker.
-    snap.write_text(json.dumps({
+    write_queue_document(snap, {
         "ts": utc_now_iso(),
         "running": [{"id": "own-s", "task": {"id": "own-s"}}],
         "pending": [{"id": "own-p", "task": {"id": "own-p"}}],
-    }), encoding="utf-8")
+    })
     assert task_has_live_queue_ownership(tmp_path, "own-s") is True
     assert task_has_live_queue_ownership(tmp_path, "own-p") is False, (
         "a queued row is not physical ownership (no process to kill)"

@@ -250,9 +250,10 @@ def test_stop_during_project_hold_wins_recovery(host, tmp_path, monkeypatch):  #
 def test_first_restore_of_old_project_row_keeps_original_custody(host, tmp_path, monkeypatch, stamp):  # noqa: F811
     accepted(host, tmp_path)
     assert queue.persist_queue_snapshot()
-    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    alive = queue.QUEUE_SNAPSHOT_PATH.with_name("queue.alive")
+    snap = json.loads(alive.read_text(encoding="utf-8"))
     snap["ts"] = stamp
-    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap), encoding="utf-8")
+    alive.write_text(json.dumps(snap), encoding="utf-8")
     host.pending.clear()
     assert queue.restore_pending_from_snapshot() == 1
     assert host.pending[0]["_project_admission_restore_hold"]

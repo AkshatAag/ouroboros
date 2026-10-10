@@ -46,6 +46,7 @@ from ouroboros.task_results import (
     write_task_result,
 )
 from ouroboros.utils import utc_now_iso
+from tests._shared import write_queue_document
 
 
 class _CaptureQueue:
@@ -97,7 +98,7 @@ def _write_snapshot(drive, *, ts=None, running=(), pending=()):
     payload = {"running": list(running), "pending": list(pending)}
     if ts is not None:
         payload["ts"] = ts
-    snap.write_text(json.dumps(payload), encoding="utf-8")
+    write_queue_document(snap, payload)
     return snap
 
 

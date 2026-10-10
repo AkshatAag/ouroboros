@@ -443,14 +443,19 @@ def test_boot_recovery_resumes_a_resolver_restored_from_its_claimed_handoff_once
     assert update_merge.finalize_managed_update_on_boot(supervisor_ready=True)["resumed"] is True
     receipt = load_task_result(pool.root, RESOLVER, strict=True)["host_admission"]
     claimed, put = [], pool.slot.in_q.put
-    pool.slot.in_q.put = lambda row, *a, **k: (claimed.append(queue.QUEUE_SNAPSHOT_PATH.read_bytes()), put(row, *a, **k))
+    def capture_claim(row, *args, **kwargs):
+        claimed.append({name: queue.QUEUE_SNAPSHOT_PATH.with_name(name).read_bytes()
+                        for name in ("queue_snapshot.json", "direct_roots.json", "queue.alive")})
+        return put(row, *args, **kwargs)
+    pool.slot.in_q.put = capture_claim
     workers.assign_tasks()
     assert _drain(pool.slot) == [RESOLVER] and len(claimed) == 1
     write_task_result(pool.root, RESOLVER, "running", started_at="2026-01-01T00:00:00Z")  # the worker ran
     queue.RUNNING.clear()
     pool.slot.busy_task_id = None
     queue.PENDING.clear()
-    queue.QUEUE_SNAPSHOT_PATH.write_bytes(claimed[0])  # the post-handoff snapshot never landed
+    for name, data in claimed[0].items():  # the post-handoff publication never landed
+        queue.QUEUE_SNAPSHOT_PATH.with_name(name).write_bytes(data)
     assert queue.restore_pending_from_snapshot() == 1
     [held] = queue.PENDING
     assert held["_project_admission_restore_hold"] and held["admitted_dispatch"] == "possible"

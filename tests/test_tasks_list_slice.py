@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from ouroboros.gateway.tasks import api_task_get, api_tasks_list
 from ouroboros.task_results import write_task_result
 from ouroboros.utils import utc_now_iso
+from tests._shared import write_queue_document
 
 
 def _request(data, **params):
@@ -42,13 +43,11 @@ def _write_raw(data, task_id, **fields):
 
 
 def _seed_queue_snapshot(data):
-    # A FRESH ``ts``: an empty snapshot only proves a running row is orphaned
+    # A FRESH liveness stamp: an empty snapshot only proves a running row is orphaned
     # while it is still current — an undated or out-of-date snapshot fails open
     # toward liveness (GR7-1a), and the orphan projection would never run.
     (data / "state").mkdir(parents=True, exist_ok=True)
-    (data / "state" / "queue_snapshot.json").write_text(
-        json.dumps({"ts": utc_now_iso(), "pending": [], "running": []}), encoding="utf-8"
-    )
+    write_queue_document(data / "state" / "queue_snapshot.json", {"ts": utc_now_iso(), "pending": [], "running": []})
 
 
 def test_default_limit_50_cap_500_and_limit_0_returns_all(tmp_path):
@@ -230,7 +229,7 @@ def test_unfiltered_list_slice_is_admission_aware_with_one_batched_event(tmp_pat
 
 
 def test_queue_only_returns_queue_without_scanning_task_results(tmp_path, monkeypatch):
-    import ouroboros.gateway.tasks as gateway_tasks
+    from ouroboros import queue_observation
 
     data = tmp_path / "data"
     _write_raw(data, "t1", status="completed", result="ok", ts="2026-01-01T01:00:00Z")
@@ -240,16 +239,16 @@ def test_queue_only_returns_queue_without_scanning_task_results(tmp_path, monkey
     )
 
     reads = []
-    real = gateway_tasks.read_json_dict
+    real = queue_observation.read_json_dict
     monkeypatch.setattr(
-        gateway_tasks, "read_json_dict", lambda path: reads.append(str(path)) or real(path)
+        queue_observation, "read_json_dict", lambda path: reads.append(str(path)) or real(path)
     )
 
     payload = _get_tasks(data, queue_only=1)
 
     assert payload["tasks"] == []
     assert payload["queue"]["pending"][0]["id"] == "queued-task"
-    assert reads == [str(data / "state" / "queue_snapshot.json")]  # no task-results scan
+    assert reads == [str(data / "state" / name) for name in ("queue_snapshot.json", "queue.alive")]  # no task-results scan
 
 
 def test_list_rows_are_compact_while_detail_keeps_bulk_fields(tmp_path):

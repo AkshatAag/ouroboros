@@ -761,9 +761,10 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
         monkeypatch.setattr(state_mod, name, noop)
     monkeypatch.setattr(state_mod, "rotate_chat_log_if_needed", _tick_head)
     for name in ("enqueue_task", "enforce_task_timeouts", "enqueue_evolution_task_if_needed",
-                 "persist_queue_snapshot", "cancel_task_by_id", "queue_deep_self_review_task",
+                 "cancel_task_by_id", "queue_deep_self_review_task",
                  "sort_pending", "check_scheduled_tasks"):
         monkeypatch.setattr(queue_pkg, name, noop)
+    monkeypatch.setattr(queue_pkg, "persist_queue_snapshot", lambda **_k: True)
     monkeypatch.setattr(queue_pkg, "restore_pending_from_snapshot", rec.restore)
     for name in ("init", "spawn_workers", "kill_workers", "assign_tasks", "ensure_workers_healthy",
                  "auto_resume_after_restart"):

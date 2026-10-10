@@ -254,9 +254,9 @@ def _spy_effective_reads(monkeypatch) -> list:
     flags: list = []
     real = task_status.effective_task_result
 
-    def _spy(drive_root, tid, materialize_artifacts=True):
+    def _spy(drive_root, tid, materialize_artifacts=True, _boot=False):
         flags.append(bool(materialize_artifacts))
-        return real(drive_root, tid, materialize_artifacts=materialize_artifacts)
+        return real(drive_root, tid, materialize_artifacts=materialize_artifacts, _boot=_boot)
 
     monkeypatch.setattr(task_status, "effective_task_result", _spy)
     return flags

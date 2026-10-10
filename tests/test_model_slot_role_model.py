@@ -747,12 +747,10 @@ def test_the_scheduling_intent_survives_a_queue_snapshot(tmp_path, monkeypatch):
 
     import json as _json
 
-    captured = {}
-    monkeypatch.setattr(q, "atomic_write_text",
-                        lambda path, text: captured.update(_json.loads(text)))
     monkeypatch.setattr(q, "PENDING", [task], raising=False)
     monkeypatch.setattr(q, "RUNNING", {}, raising=False)
     assert q.persist_queue_snapshot(reason="test") is True
+    captured = _json.loads(q.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
 
     rows = captured.get("pending") or []
     assert rows, captured

@@ -72,7 +72,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     "supervisor/worker_pool_lifecycle.py": ("supervisor/workers.py", "_pool", frozenset({
         # Runtime676: execution reader/disable moved from the facade; RUNNING
         # and patched sibling calls must remain late-bound through that facade.
-        "DRIVE_ROOT", "MAX_WORKERS", "REPO_DIR", "RUNNING", "WORKERS", "Worker", "_WORKER_PIDS_FILENAME",
+        "DRIVE_ROOT", "MAX_WORKERS", "REPO_DIR", "RUNNING", "WORKERS", "Worker",
         "_WORKER_POOL_DISABLED_REASON", "_worker_pool_execution_state", "disable_exhausted_worker_pool",
         "_get_ctx",
         "_verify_worker_sha_after_spawn", "get_event_q", "kill_workers", "load_state",
@@ -94,7 +94,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # them. Sets are the tool-derived exact read sets on these bytes.
     "supervisor/queue_snapshot.py": ("supervisor/queue.py", "_queue", frozenset({
         "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "PENDING", "PRIOR_DIRECT_ROOTS",
-        "QUEUE_SEQ_COUNTER_REF", "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock",
+        "QUEUE_PUBLICATION", "QUEUE_SEQ_COUNTER_REF", "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock",
         "append_jsonl", "atomic_write_text", "enqueue_task", "parse_iso_to_ts",
         "persist_queue_snapshot", "restore_invalid_depth_admission", "sort_pending",
     })),
