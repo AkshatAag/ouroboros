@@ -34,9 +34,9 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
 - **`archive/` is durable history, never GC'd** (BIBLE P1): readers backfill
   from rotated segments; no retention sweep touches `archive/` and none may be
   added.
-- **Atomic writes** — `atomic_write_json`/`atomic_write_text` (tmp+rename) and
-  `update_json_locked` (sidecar `<file>.lock`); JSONL appends go through
-  `append_jsonl` (O_APPEND + sidecar lock) unless noted.
+- **Atomic writes** — `utils.atomic_write_json`: compact JSON (`settings.json`: indent 2),
+  tmp+rename; `update_json_locked`: sidecar lock; `append_jsonl`: O_APPEND
+  plus sidecar lock unless noted.
 
 ## 1. Root files
 

@@ -363,8 +363,8 @@ def write_text_atomic(path: pathlib.Path, content: str, *, fsync: bool = False) 
 
 def atomic_write_json(path: pathlib.Path, payload: Any, *, trailing_newline: bool = False,
                       fsync: bool = False) -> None:
-    """Atomically persist a JSON value (object or list) via a sibling temp file."""
-    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    """Atomically persist compact JSON; keep settings.json human-readable."""
+    content = json.dumps(payload, ensure_ascii=False, **({"indent": 2} if pathlib.Path(path).name == "settings.json" else {"separators": (",", ":")}))
     if trailing_newline:
         content += "\n"
     write_text_atomic(pathlib.Path(path), content, fsync=fsync)
