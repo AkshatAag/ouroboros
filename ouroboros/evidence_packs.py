@@ -645,31 +645,55 @@ def task_settlement_facts(root: Any, task_id: str) -> Dict[str, Any]:
     """The facts the settle predicate reads, through the CURRENT file readers: terminal status,
     every obligation flag, open review operations / undischarged acceptance debt, and unresolved
     money attempts (``None`` = unknown, which never settles). No timer anywhere."""
-    from ouroboros.obligations import result_memberships
+    from ouroboros import obligations
     from ouroboros.review_operation import _OPEN_STATES
+    from ouroboros.review_projection import _actor_pending
     from ouroboros.task_results import load_task_result
     from ouroboros.task_status import SETTLED_STATUSES
+    from supervisor.terminal_delivery import pending_deliveries, terminal_answer_receipts
 
     root = pathlib.Path(root)
     row = load_task_result(root, task_id) or {}
+    owed = obligations.result_memberships(row)
+    try:
+        marker = root / "state" / "migrations.json"
+        if ((marker.exists() and json.loads(marker.read_text()).get("obligations_available") is False)
+                or (root / "state" / "obligations" / obligations.REBUILD_MARK).exists()):
+            owed.add("unknowns")
+        with obligations.locked(root):
+            for path in sorted((root / "state" / "obligations").glob("*.json")):
+                if path.stem in obligations.RECEIPT_SETS:
+                    continue  # discharged chat receipts, not open obligations
+                entries = obligations._read(root, path.stem)
+                if any(identity == str(task_id) or any(str(f.get("task_id") or "") == str(task_id)
+                       for f in (entry, entry.get("custody") or {}, entry.get("request") or {}))
+                       for identity, entry in entries.items()):
+                    owed.add(path.stem)
+    except (OSError, ValueError, TypeError, AttributeError):
+        owed.add("unknowns")
     operations = row.get("review_operations") if isinstance(row.get("review_operations"), dict) else {}
     debt = row.get("acceptance_debt") if isinstance(row.get("acceptance_debt"), dict) else {}
+    projection = row.get("review_projection") or {}
+    panels = [p for p in projection.get("panels") or [] if isinstance(p, dict)]
     open_debt = False
     if debt.get("debt_id"):
         wanted = "task_acceptance:" + hashlib.sha256(str(debt["debt_id"]).encode()).hexdigest()
-        panels = (row.get("review_projection") or {}).get("panels") or []
-        settled = any(((p.get("late_settlement") or {}).get("reviewed_subject") or {}).get("retry_key") == wanted
-                      for p in panels if isinstance(p, dict))
-        if not settled:
-            from supervisor.terminal_delivery import pending_deliveries
-
-            open_debt = any(str(owed.get("task_id") or "") == str(task_id) for owed in pending_deliveries(root))
+        open_debt = not any(((p.get("late_settlement") or {}).get("reviewed_subject") or {}).get("retry_key") == wanted
+                            for p in panels)
+    late_open = any(_actor_pending(actor) for p in panels for actor in p.get("actors") or [] if isinstance(actor, dict))
+    for receipt in (projection.get("late_notice_receipts") or {}).values():
+        panel = next((p for p in panels if p.get("panel_id") == receipt.get("panel_id")), {})
+        late_open |= (receipt.get("custody") != "terminal_outbox"
+                      or receipt.get("settled_at") != (panel.get("late_settlement") or {}).get("settled_at"))
+    late_open |= (terminal_answer_receipts(root, task_id).get("registry") == "unreadable"
+                  or any(str(event.get("task_id") or "") == str(task_id) for event in pending_deliveries(root)))
     return {
         "status": str(row.get("status") or ""),
         "terminal": bool(row) and str(row.get("status") or "") in SETTLED_STATUSES,
-        "obligations": sorted(result_memberships(row)) if row else [],
+        "obligations": sorted(owed),
         "open_operations": any(isinstance(e, dict) and e.get("state") in _OPEN_STATES for e in operations.values()),
         "open_acceptance": open_debt,
+        "open_late_receipts": late_open,
         "money_open": _money_open(root, str(task_id)),
     }
 
@@ -691,7 +715,7 @@ def _money_open(root: pathlib.Path, task_id: str) -> Optional[bool]:
 
 def facts_settled(facts: Dict[str, Any]) -> bool:
     return bool(facts["terminal"] and not facts["obligations"] and not facts["open_operations"]
-                and not facts["open_acceptance"] and facts["money_open"] is False)
+                and not facts["open_acceptance"] and not facts["open_late_receipts"] and facts["money_open"] is False)
 
 
 def task_settled(root: Any, task_id: str) -> bool:

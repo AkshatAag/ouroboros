@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import os
 import pathlib
@@ -13,7 +14,7 @@ from ouroboros import evidence_packer as packer
 from ouroboros import evidence_packs as packs
 from ouroboros import observability as obs
 from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
-from tests.test_evidence_packs import _blob, _handle_path, _loose, _task
+from tests.test_evidence_packs import _blob, _handle_path, _loose, _result, _task
 from tests.test_evidence_packs import root as root
 
 
@@ -217,3 +218,58 @@ def test_corrupt_loose_handle_falls_back_to_verified_pack(root, reader):
         read()
     loose.write_bytes(raw)
     assert read() == raw
+
+
+@pytest.mark.parametrize("name,entry", [
+    ("pending_drives", {}), ("synthesis", {}), ("unknowns", {"task_id": "owed"}),
+    ("custody_open", {"custody": {"task_id": "owed"}}),
+    ("custody_open", {"request": {"task_id": "owed"}}),
+    ("local_custody_witnesses", {"task_id": "owed"}),
+])
+def test_settlement_waits_for_owner_held_obligation(root, name, entry):
+    from ouroboros import obligations
+
+    refs, handle = _task(root, "owed", blobs=1)
+    identity = "run:child" if entry else "owed"
+    obligations.add(root, name, identity, entry)
+    assert not packs.task_settled(root, "owed")
+    assert name in packs.task_settlement_facts(root, "owed")["obligations"]
+    assert packer.run_pass(root)["packed"] == 0
+    assert _loose(refs[0]) and _handle_path(root, "owed", handle).exists()
+    obligations.remove(root, name, identity)
+    assert packs.task_settled(root, "owed")
+
+
+def test_acceptance_debt_blocks_without_delivery_and_late_notice_requires_receipt(root):
+    from supervisor import terminal_delivery
+
+    _task(root, "debt", blobs=1, acceptance_debt={"debt_id": "debt"})
+    assert not packs.task_settled(root, "debt")
+    wanted = "task_acceptance:" + hashlib.sha256(b"debt").hexdigest()
+    panel = {"panel_id": "p", "late_settlement": {"settled_at": "revision-1", "reviewed_subject": {"retry_key": wanted}}}
+    projection = {"panels": [panel], "late_notice_receipts": {"acceptance-late:" + wanted: {
+        "panel_id": "p", "settled_at": "revision-1", "custody": "publication"}}}
+    _result(root, "debt", acceptance_debt={"debt_id": "debt"}, review_projection=projection)
+    assert not packs.task_settled(root, "debt")
+    receipt = projection["late_notice_receipts"]["acceptance-late:" + wanted]
+    receipt["custody"] = "terminal_outbox"
+    _result(root, "debt", acceptance_debt={"debt_id": "debt"}, review_projection=projection)
+    event = {"delivery_id": "acceptance-late:" + wanted, "task_id": "debt", "chat_id": 1}
+    assert terminal_delivery.register_pending_delivery(root, event)
+    assert not packs.task_settled(root, "debt")
+    assert terminal_delivery.register_delivery(root, event["delivery_id"])
+    assert packs.task_settled(root, "debt")
+    panel["actors"] = [{"operation_state": "in_flight"}]
+    _result(root, "debt", acceptance_debt={"debt_id": "debt"}, review_projection=projection)
+    assert not packs.task_settled(root, "debt")
+
+
+@pytest.mark.parametrize("source", ["obligations", "terminal_deliveries"])
+def test_unknown_settlement_sources_block_until_repaired(root, source):
+    _task(root, "unknown", blobs=1)
+    path = root / "state" / ("obligations/pending_drives.json" if source == "obligations" else "terminal_deliveries.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{", encoding="utf-8")
+    assert not packs.task_settled(root, "unknown")
+    path.write_text("{}", encoding="utf-8")
+    assert packs.task_settled(root, "unknown")

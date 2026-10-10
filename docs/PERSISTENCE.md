@@ -38,8 +38,8 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
   tmp+rename; `update_json_locked`: sidecar lock; `append_jsonl`: O_APPEND
   plus sidecar lock unless noted.
 - **Evidence pack** — `ouroboros/evidence_packs.py`: once a task is SETTLED
-  (terminal status, every obligation flag clear, no open review operation or
-  undischarged acceptance debt, no unresolved money attempt; no timer), the
+  (terminal, result-derived and owner-held obligations clear, review/debt/late receipts
+  closed, money attempts resolved and known; no timer), the
   packer child (`ouroboros/evidence_packer.py`, spawned from the maintenance
   sweep, never at boot) copies its context-checkpoint handles and the blobs its
   call manifests reference into one xz stream under `observability/packs/`,
