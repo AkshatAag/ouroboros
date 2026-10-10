@@ -310,10 +310,12 @@ def test_stale_snapshot_keeps_only_verified_planned_owner_handoff(pool, monkeypa
                 "_attempt": 3, "_owner_wait_resume": {**pool.wait, "restart_transaction_id": "tx"}}
     workers.PENDING.extend([selected, {"id": "old", "chat_id": 1, "type": "task", "text": "old"}])
     assert queue.persist_queue_snapshot()
-    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())
+    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
     assert snap["pending"][0]["task"]["_owner_wait_resume"] == selected["_owner_wait_resume"]
-    snap["ts"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat()
-    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap))
+    stamp_path = queue.QUEUE_SNAPSHOT_PATH.with_name("queue.alive")
+    stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+    stamp["ts"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat()
+    stamp_path.write_text(json.dumps(stamp), encoding="utf-8")
     workers.PENDING.clear()
     monkeypatch.setattr(owner_wait, "restore_owner_wait_allowed", lambda root, task: task["id"] == "resume")
     monkeypatch.setattr(queue, "enqueue_task", lambda task, **kwargs: workers.PENDING.append(task))
