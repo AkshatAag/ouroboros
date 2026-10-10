@@ -34,7 +34,6 @@ import logging
 import os
 import pathlib
 import sqlite3
-import threading
 import time
 import uuid
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
@@ -45,6 +44,11 @@ from ouroboros._usage_money import (
 )
 from ouroboros._usage_rows import (
     BINDING_KEYS, REVIEW_ATTRIBUTION_KEYS, _BINDING_CAPS, BindingIndex, Bucket, row_ts_epoch, summary_delta,
+)
+from ouroboros import store as _core
+from ouroboros.store import (
+    TIER_ENFORCED, TIER_NAME, busy as _busy, file_identity as _identity, fsync_directory as _fsync_directory,
+    process_lock as _process_lock,
 )
 from ouroboros.usage_ledger import (
     LEDGER_REL, LOCK_REL, QUARANTINE_REL, USAGE_LOCK_TIMEOUT_SEC, UsageAccountingError, UsageLedgerCorrupt,
@@ -58,10 +62,10 @@ log = logging.getLogger(__name__)
 STORE_REL = pathlib.Path("state/usage.sqlite")
 IMPORT_LOCK_NAME = "usage_import.lock"
 SCHEMA_VERSION = 1
-TIER_ENFORCED, TIER_NAME = "enforced", "name"
 # The database header's application id names the lock protocol every process
 # must use, so a process selects it BEFORE opening (``meta.lock_tier`` is the
-# same fact, recorded by the import that chose it).
+# same fact, recorded by the import that chose it). The connection, tier and
+# transaction core is ``ouroboros.store``, shared with the current-facts store.
 _APPLICATION_ID = {TIER_ENFORCED: 0x4F555345, TIER_NAME: 0x4F55534E}
 _OPEN_STATES = ("reserved", "dispatched", "unresolved")
 _OPEN_PREDICATE = ("(state IN ('reserved','dispatched','unresolved') "
@@ -320,11 +324,6 @@ def _derived(row: Dict[str, Any], previous: Optional[Dict[str, Any]], revision: 
     }
 
 
-def _busy(exc: BaseException) -> bool:
-    code = getattr(exc, "sqlite_errorcode", None)
-    return code in {5, 6} or "locked" in str(exc).lower()
-
-
 class Txn:
     """One store transaction: reads, the cash view the admission rules use
     (``summary``/``exceeds_limit``, the historical writer-view API) and writes.
@@ -569,61 +568,26 @@ class Txn:
             self.committed = True
 
 
-# ---- connection, lock tiers, holds -------------------------------------------
+# ---- connection, lock tiers, holds (the SQLite core is ouroboros.store) ------
 _READY: Dict[str, Tuple[tuple, str]] = {}  # store path -> (file identity, lock tier)
-_PROCESS_LOCKS: Dict[str, threading.RLock] = {}
-_PROCESS_LOCKS_GUARD = threading.Lock()
-
-
-def _process_lock(path: pathlib.Path) -> threading.RLock:
-    with _PROCESS_LOCKS_GUARD:
-        return _PROCESS_LOCKS.setdefault(str(path), threading.RLock())
-
-
-def _identity(path: pathlib.Path) -> Optional[tuple]:
-    try:
-        info = os.stat(path)
-    except FileNotFoundError:
-        return None
-    return info.st_ino, info.st_dev
 
 
 def _header_tier(path: pathlib.Path) -> Optional[str]:
-    try:
-        with open(path, "rb") as handle:
-            header = handle.read(100)
-    except FileNotFoundError:
-        return None
-    if len(header) < 100 or not header.startswith(b"SQLite format 3\x00"):
-        return None
-    application_id = int.from_bytes(header[68:72], "big")
-    return next((tier for tier, value in _APPLICATION_ID.items() if value == application_id), None)
+    return _core.header_tier(path, _APPLICATION_ID)
 
 
 def _connect(path: pathlib.Path, tier: str, *, create: bool = False, wait_sec: float = 0.0) -> sqlite3.Connection:
-    """A connection with the tier's lock protocol. ``wait_sec`` is SQLite's busy
-    wait for the enforced tier (the name tier never waits inside SQLite: its
-    one lock is the name protocol the caller already holds). No statement runs
-    here: the first one may wait on a commit and belongs to the caller's
-    contention handling."""
-    query = "mode=rwc" if create else "mode=rw"
-    if tier == TIER_NAME:
-        query += "&vfs=" + ("win32-none" if os.name == "nt" else "unix-none")
+    """The shared connection with the money error vocabulary (``ouroboros.store.connect``)."""
     try:
-        conn = sqlite3.connect(f"{path.as_uri()}?{query}", uri=True, isolation_level=None,
-                               timeout=max(0.0, wait_sec) if tier == TIER_ENFORCED else 0.0)
+        return _core.connect(path, tier, create=create, wait_sec=wait_sec)
     except sqlite3.Error as exc:
         raise UsageAccountingError(f"usage store unavailable: {path}: {exc}") from exc
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 def _commit(conn: sqlite3.Connection) -> None:
     try:
-        conn.execute("COMMIT")
+        _core.commit(conn)
     except sqlite3.OperationalError as exc:
-        with contextlib.suppress(sqlite3.Error):
-            conn.execute("ROLLBACK")
         if _busy(exc):
             raise UsageLockUnavailable(f"usage store commit did not complete: {exc}", reason="contention") from exc
         raise UsageAccountingError(f"usage store commit failed: {exc}") from exc
@@ -689,29 +653,13 @@ def hold(root: pathlib.Path | str, *, timeout_sec: float = USAGE_LOCK_TIMEOUT_SE
             stack.enter_context(_named_lock(root, LOCK_REL.name, timeout_sec=timeout_sec, stale_sec=90.0))
         conn = _connect(root / STORE_REL, tier, wait_sec=timeout_sec)
         stack.callback(conn.close)
-        try:
-            conn.execute("PRAGMA synchronous = FULL")
-            conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-            if not write:  # take the read lock now: a read's only wait is here
-                conn.execute("SELECT 1 FROM meta LIMIT 1").fetchone()
-        except sqlite3.Error as exc:
-            with contextlib.suppress(sqlite3.Error):
-                conn.execute("ROLLBACK")
-            raise _typed(exc) from exc
-        if tier == TIER_ENFORCED:  # a COMMIT waits for readers to drain
-            conn.execute(f"PRAGMA busy_timeout = {int(USAGE_LOCK_TIMEOUT_SEC * 1000)}")
         txn = Txn(conn, root, write=write)
-        try:
-            yield txn
-        except BaseException as exc:
-            if not txn.committed:
-                with contextlib.suppress(sqlite3.Error):
-                    conn.execute("ROLLBACK")
-            if isinstance(exc, sqlite3.Error):
-                raise _typed(exc) from exc
-            raise
-        if not txn.committed:
-            txn.commit()
+        try:  # the enforced tier's COMMIT waits for readers to drain
+            with _core.transaction(conn, write=write, finish=txn.commit,
+                                   commit_wait_sec=USAGE_LOCK_TIMEOUT_SEC if tier == TIER_ENFORCED else None):
+                yield txn
+        except sqlite3.Error as exc:
+            raise _typed(exc) from exc
 
 
 def _typed(exc: sqlite3.Error) -> UsageAccountingError:
@@ -926,22 +874,7 @@ def _retire_journal(root: pathlib.Path, status: Dict[str, Any]) -> Dict[str, Any
     return {"journal": "changed_after_import", "journal_size": size, "imported_size": imported}
 
 
-def _fsync_directory(directory: pathlib.Path) -> None:
-    if os.name == "nt":
-        return
-    try:
-        fd = os.open(str(directory), os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
-
-
-def export_journal(root: pathlib.Path | str) -> Dict[str, Any]:
+def export_journal(root: pathlib.Path | str, *, own_journal_sha256: Optional[str] = None) -> Dict[str, Any]:
     """Write ``state/usage_attempts.jsonl`` from the store as a journal an older
     release accepts (``usage_journal.export_rows``), then retire the store.
 
@@ -952,7 +885,10 @@ def export_journal(root: pathlib.Path | str) -> Dict[str, Any]:
     freshness marker with the journal's own ``[epoch, seq]`` (the store's
     marker is higher, and an older release refuses a lower one); finally
     renames the store aside (``usage.sqlite.exported-<UTC>``) so a later
-    upgrade imports the journal again, including what the older release adds."""
+    upgrade imports the journal again, including what the older release adds.
+    ``own_journal_sha256`` names the journal an interrupted run of this export
+    wrote before the store was set aside: a kept journal with that digest is
+    this export's own and is rewritten identically, never refused."""
     from ouroboros import usage_journal as journal
     from ouroboros.utils import atomic_write_json
 
@@ -963,7 +899,8 @@ def export_journal(root: pathlib.Path | str) -> Dict[str, Any]:
         raise UsageAccountingError(f"refusing to overwrite an existing journal: {kept}")
     with hold(root, migrate=False) as txn:
         provenance = txn.meta("import") or {}
-        if kept.exists():
+        if kept.exists() and not (own_journal_sha256
+                                  and hashlib.sha256(kept.read_bytes()).hexdigest() == own_journal_sha256):
             if kept.stat().st_size != (provenance.get("source") or {}).get("size"):
                 raise UsageAccountingError(f"refusing to overwrite a journal that changed after the import: {kept}; "
                                            "move it aside to export (its rows after the import are not in the store)")

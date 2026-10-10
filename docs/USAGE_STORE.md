@@ -102,7 +102,9 @@ restored from quarantine) is projected on a later pass without a new receipt.
 One configuration per installation, decided by the import with
 `platform_layer.kernel_file_locks_enforced` on the lock directory, recorded in
 `meta.lock_tier` and in the database header's `application_id`, so every
-process chooses the protocol before it opens the file.
+process chooses the protocol before it opens the file. The connection, tier,
+file-identity and transaction core is `ouroboros/store.py`, shared with the
+current-facts store; `usage_store` keeps the money error vocabulary over it.
 
 - `enforced`: SQLite's own file locks. `usage_store.hold` is the acquisition
   primitive the existing waits slice (`_usage_wait`): sends retry it in short
