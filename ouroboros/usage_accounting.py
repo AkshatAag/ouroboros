@@ -674,14 +674,13 @@ def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path) -> None:
         raise DispatchFenced(
             f"model dispatch fenced: task {scope.task_id} is entering an exact budget pause",
             limit_scope="pausing", root_task_id=scope.root_task_id)
-    from ouroboros.queue_observation import load_queue_document
-    from ouroboros.task_status import queue_snapshot_observation
+    from ouroboros.queue_observation import published_dispatch
 
     root_task_id = str(scope.root_task_id or "").strip()
     snapshot_path = root / "state" / "queue_dispatch.json"
     if root_task_id and any((root / "state" / name).exists() for name in ("queue_dispatch.json", "queue_snapshot.json", "queue.alive")):
-        snapshot = load_queue_document(root, "queue_dispatch.json")
-        if not queue_snapshot_observation(snapshot)["fresh"]:
+        snapshot = published_dispatch(root)
+        if snapshot is None:
             raise UsageAccountingError(f"root budget fence authority unavailable: {snapshot_path}")
         rows = snapshot.get("budget_root_fences")
         if not isinstance(rows, list):

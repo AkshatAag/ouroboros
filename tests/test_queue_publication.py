@@ -24,6 +24,7 @@ def published(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_snapshot, "utc_now_iso", lambda: datetime.fromtimestamp(now[0], timezone.utc).isoformat())
     for module in (queue_observation, task_status):
         monkeypatch.setattr(module, "time", SimpleNamespace(time=lambda: now[0]))
+    monkeypatch.setattr(queue_observation, "_sleep", lambda _sec: None)  # the fence's in-flight re-read
     return tmp_path, now
 
 

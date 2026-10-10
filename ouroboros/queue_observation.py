@@ -5,6 +5,8 @@ import time
 
 from ouroboros.utils import read_json_dict
 
+_sleep = time.sleep  # the in-flight re-read's pause, kept apart from frozen test clocks
+
 
 def queue_stamp(document: dict, *, boot: bool = False) -> dict:
     # Boot can recover an older release's snapshot; live readers need its publisher.
@@ -35,3 +37,16 @@ def load_queue_document(drive_root, name="queue_snapshot.json") -> dict:
                        quota_wait_sec=quota_waited_seconds(row, now), execution_sec=execution_elapsed_seconds(row, now),
                        heartbeat_lag_sec=round(max(0.0, now - heartbeat), 2) if isinstance(heartbeat, (int, float)) and heartbeat > 0 else None)
     return document
+
+
+def published_dispatch(drive_root, *, attempts=20, pause_sec=0.05):
+    """The dispatch document of the last successful publication: its generation certified by
+    queue.alive, whatever its age (a stalled tick never stops a send). A publication in flight
+    (the stamp is unlinked first) is re-read briefly; None when it stays uncertified."""
+    for attempt in range(attempts):
+        document = load_queue_document(drive_root, "queue_dispatch.json")
+        if queue_stamp(document):
+            return document
+        if attempt + 1 < attempts:
+            _sleep(pause_sec)
+    return None
