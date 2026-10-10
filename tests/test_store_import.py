@@ -305,23 +305,26 @@ def test_a_changed_file_replaces_its_row_and_a_touched_file_does_not(tmp_path):
     assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
 
 
-def test_a_file_rewritten_with_the_same_size_and_mtime_is_still_reconciled_by_content(tmp_path):
+def test_the_reconciliation_reads_only_stat_changed_files_and_compares_them_by_content(tmp_path, monkeypatch):
     root = fixture_root(tmp_path)
     ensure_current_store(root, with_children=False)
+    read: list = []
+    real_read = store_import._read_result
+    monkeypatch.setattr(store_import, "_read_result", lambda path: read.append(path.stem) or real_read(path))
+    assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
+    assert read == []  # the budget: one listing plus one stat per file, no reads while nothing moved
     path = task_result_path(root, "done1")
-    before = meta(root, "baseline")["done1"]
+    os.utime(path, ns=(5, 5))  # touched, same bytes: read once, compared by digest, the stored stat refreshed
+    assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
+    assert read == ["done1"] and meta(root, "baseline")["done1"]["mtime_ns"] == 5
+    read.clear()
+    assert ensure_current_store(root, with_children=False)["status"] == "unchanged" and read == []
     text = path.read_text(encoding="utf-8")
     assert '"status": "failed"' in text
-    path.write_text(text.replace('"status": "failed"', '"status": "passed"'), encoding="utf-8")  # same length
-    os.utime(path, ns=(before["mtime_ns"], before["mtime_ns"]))
-    assert path.stat().st_size == before["size"] and path.stat().st_mtime_ns == before["mtime_ns"]
+    path.write_text(text.replace('"status": "failed"', '"status": "passed"'), encoding="utf-8")  # same length, new mtime
     report = ensure_current_store(root, with_children=False)
-    assert report["status"] == "reconciled" and report["changed"] == 1
+    assert report["status"] == "reconciled" and report["changed"] == 1 and read == ["done1"]
     assert load(root, "done1")["status"] == "passed"
-    # the quiet direction stays quiet: a touch with the same bytes refreshes the baseline, nothing else
-    os.utime(path, ns=(5, 5))
-    assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
-    assert meta(root, "baseline")["done1"]["mtime_ns"] == 5
 
 
 def test_a_read_error_aborts_the_import_typed_and_stamps_nothing(tmp_path, monkeypatch):
@@ -341,7 +344,8 @@ def test_a_read_error_aborts_the_import_typed_and_stamps_nothing(tmp_path, monke
     monkeypatch.setattr(pathlib.Path, "read_bytes", real_read_bytes)
     report = ensure_current_store(root, with_children=False)
     assert report["status"] == "completed" and report["results"] == 3 and report["refused"] == 1  # only the schema refusal
-    # the same on a published store: the reconciliation aborts typed and the store keeps its rows
+    # the same on a published store (the file touched, so it is read): the reconciliation aborts typed, the rows stay
+    os.utime(task_result_path(root, "done1"), ns=(7, 7))
     monkeypatch.setattr(pathlib.Path, "read_bytes", exhausted)
     with pytest.raises(store.StoreBusy):
         ensure_current_store(root, with_children=False)

@@ -12,8 +12,10 @@ Reconciliation (a published store found at boot) is per row against the baseline
 changed file replaces its row, a deleted file moves its row to quarantine, a new file is
 imported, an untouched row keeps the DB version, a row changed on both sides lets the
 file win and keeps the DB version in ``meta.conflicts``; a full rebuild happens ONLY
-after a proven complete export. Timestamps alone never prove origin (a touched file
-with the same bytes is untouched); edits to obligation set files alone are not detected.
+after a proven complete export. A file whose size and mtime_ns equal its baseline is
+untouched without being read (one listing plus one stat per boot; a rewrite that preserves
+both is the disclosed residual); a stat-changed file is compared by sha256, so a touch with
+the same bytes stays untouched; edits to obligation set files alone are not detected.
 ``export_facts(root)`` is the inverse: every row to its byte-equivalent file, every
 obligation set file in FULL, fsync.
 """
@@ -193,9 +195,24 @@ def _read_result(path: pathlib.Path) -> Optional[bytes]:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        name = errno.errorcode.get(exc.errno, str(exc.errno))
-        kind = store.StoreBusy if exc.errno in (errno.EMFILE, errno.ENFILE) else store.StoreError
-        raise kind(f"task result not readable ({name}), import aborted: {path}") from exc
+        raise _unreadable(exc, path) from exc
+
+
+def _stat_result(path: pathlib.Path) -> Optional[Tuple[int, int]]:
+    """``(size, mtime_ns)``, ``None`` when the file is gone; other errors typed as for a read."""
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _unreadable(exc, path) from exc
+    return info.st_size, info.st_mtime_ns
+
+
+def _unreadable(exc: OSError, path: pathlib.Path) -> store.StoreError:
+    name = errno.errorcode.get(exc.errno, str(exc.errno))
+    kind = store.StoreBusy if exc.errno in (errno.EMFILE, errno.ENFILE) else store.StoreError
+    return kind(f"task result not readable ({name}), import aborted: {path}")
 
 
 def _read_results(root: pathlib.Path):
@@ -276,24 +293,34 @@ def _quarantine_copy(root: pathlib.Path, task_id: str, body: str) -> None:
 
 
 def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
-    """Per-row reconciliation of an out-of-band change against the content baseline (P6')."""
+    """Per-row reconciliation of an out-of-band change against the content baseline (P6').
+
+    The budget is one listing plus one stat per file: a file whose ``(size, mtime_ns)``
+    equals its baseline is untouched WITHOUT being read (no supported actor rewrites a
+    result while preserving both — the one disclosed residual). Only a stat-changed file is
+    read: the same sha256 is a touch (the stored stat is refreshed, nothing else), a different
+    one is a change."""
     baseline: Dict[str, Dict[str, Any]] = txn.meta("baseline") or {}
-    present: Dict[str, Tuple[pathlib.Path, bytes]] = {}
+    present: Dict[str, Tuple[pathlib.Path, Optional[bytes]]] = {}
     changed: List[str] = []
     for path in sorted(task_results_dir(root, create=False).glob("*.json")):
+        entry = baseline.get(path.stem)
+        stat = _stat_result(path)
+        if stat is None:
+            continue
+        if entry is not None and stat == (entry["size"], entry["mtime_ns"]):
+            present[path.stem] = (path, None)  # untouched: not read
+            continue
         raw = _read_result(path)
         if raw is None:
             continue
         present[path.stem] = (path, raw)
-        entry = baseline.get(path.stem)
         if entry is None:
             continue  # new: imported below
-        if sha256_hex(raw) != entry["sha256"]:  # content decides; size and mtime prove nothing either way
+        if sha256_hex(raw) != entry["sha256"]:
             changed.append(path.stem)
-            continue
-        info = path.stat()
-        if (info.st_size, info.st_mtime_ns) != (entry["size"], entry["mtime_ns"]):
-            baseline[path.stem] = {**entry, "size": info.st_size, "mtime_ns": info.st_mtime_ns}  # touched, same bytes
+        else:
+            baseline[path.stem] = {**entry, "size": stat[0], "mtime_ns": stat[1]}  # touched, same bytes
     fresh = sorted(task_id for task_id in present if task_id not in baseline)
     deleted = sorted(task_id for task_id in baseline if task_id not in present)
     counts = {"changed": len(changed), "new": len(fresh), "deleted": len(deleted), "results": len(baseline)}
