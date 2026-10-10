@@ -291,7 +291,7 @@ def write_blob(drive_root: pathlib.Path, payload: Any, *, kind: str = "json") ->
     if not path.exists():
         tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
         try:
-            with gzip.open(tmp, "wb") as fh:
+            with gzip.open(tmp, "wb", compresslevel=1) as fh:
                 fh.write(raw)
             _chmod_private(tmp)
             replace_atomic(tmp, path)
