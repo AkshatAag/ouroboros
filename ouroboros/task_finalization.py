@@ -479,16 +479,19 @@ def focus_source_projection(
     if wanted and (not isinstance(handle, dict) or str(handle.get("sha256") or "") != wanted):
         if len(wanted) != 64 or any(c not in "0123456789abcdef" for c in wanted):
             return {**unavailable, "reason": "source_ref_invalid"}
-        try:
+        from fnmatch import fnmatch
+        from ouroboros.evidence_packs import handle_info, packed_handle_names
+        try:  # loose handles and this task's packed ones answer the same selector
             store = task_artifact_dir_path(drive_root, str(task_id), create=False) / "source_handles" / "context_checkpoints"
-            matches = sorted(p for p in store.glob(f"focus_source_*-{wanted}.md") if not p.is_symlink())
+            matches = {p.name for p in store.glob(f"focus_source_*-{wanted}.md") if not p.is_symlink()}
+            matches.update(n for n in packed_handle_names(drive_root, str(task_id)) if fnmatch(n, f"focus_source_*-{wanted}.md"))
         except (OSError, ValueError):
-            matches = []
+            matches = set()
         if len(matches) != 1:
             return {**unavailable, "reason": "source_unavailable", "requested_sha256": wanted}
-        handle = {"kind": "task_source", "root": "artifact_store",
-                  "path": f"source_handles/context_checkpoints/{matches[0].name}",
-                  "size": matches[0].stat().st_size, "sha256": wanted}
+        rel = f"source_handles/context_checkpoints/{matches.pop()}"
+        handle = {"kind": "task_source", "root": "artifact_store", "path": rel,
+                  "size": (handle_info(drive_root, str(task_id), rel) or {}).get("size", 0), "sha256": wanted}
         focus = None  # a historical selector carries no current source_ref/authored_at claim
     if not isinstance(handle, dict):
         return {**unavailable, "reason": "source_unavailable"}
@@ -519,7 +522,7 @@ def host_acceptance_source(drive_root: Any, task_id: str, digest: str) -> tuple:
     or this raises. The model's ``review_source_sha256`` reader and the owner's
     record download (``gateway.task_archive.serve_task_source``) share it.
     """
-    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+    from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.source_retention import retained_task_roots
 
     if len(digest) != 64 or digest.strip("0123456789abcdef"):
@@ -527,13 +530,13 @@ def host_acceptance_source(drive_root: Any, task_id: str, digest: str) -> tuple:
     path = f"source_handles/context_checkpoints/acceptance-{digest}.json"
     # The selector addresses exact bytes, not their current placement. Only
     # this author's known retained drives can supply a not-yet-canonical file.
+    from ouroboros.evidence_packs import handle_info
+
     roots = [drive_root, *retained_task_roots(drive_root, task_id)]
-    stored = next((candidate for root in roots
-                   if (candidate := task_artifact_dir_path(root, task_id, create=False) / path).exists()), None)
+    stored = next((info for root in roots if (info := handle_info(root, task_id, path)) is not None), None)
     if stored is None:
         raise FileNotFoundError(path)
-    ref = {"kind": "task_source", "root": "artifact_store", "path": path,
-           "size": stored.stat().st_size, "sha256": digest}
+    ref = {"kind": "task_source", "root": "artifact_store", "path": path, "size": stored["size"], "sha256": digest}
     raw = read_actor_source_bytes(drive_root, task_id, ref)
     run = json.loads(raw)
     request = run.get("request") if isinstance(run, dict) else None

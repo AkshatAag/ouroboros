@@ -330,39 +330,15 @@ def read_blob_ref(
     *,
     expected_kind: str = "json",
 ) -> Any:
-    """Read and verify one content-addressed blob below this drive root."""
-    if not isinstance(ref, dict):
-        raise ValueError("observability blob ref must be an object")
-    kind = str(ref.get("kind") or "")
-    if kind != expected_kind or ref.get("encoding") != "gzip":
+    """Read and verify one content-addressed blob below this drive root (loose, else its
+    evidence pack; retained child roots the ref names are tried the same way)."""
+    from ouroboros.evidence_packs import blob_bytes, blob_ref_fields
+
+    kind = blob_ref_fields(ref)[1] if isinstance(ref, dict) else ""
+    if kind != expected_kind:
         raise ValueError("observability blob ref has an unexpected kind or encoding")
-    expected_sha = str(ref.get("sha256") or "")
-    try:
-        expected_size = int(ref["size"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("observability blob ref has no valid size") from exc
-    if not expected_sha:
-        raise ValueError("observability blob ref has no sha256")
-
-    path = _blob_ref_path(drive_root, ref)
-    def read(candidate):
-        with gzip.open(candidate, "rb") as handle:
-            raw = handle.read()
-        if len(raw) != expected_size or hashlib.sha256(raw).hexdigest() != expected_sha:
-            raise ValueError("observability blob ref failed size or sha256 verification")
-        return json.loads(raw.decode("utf-8")) if kind == "json" else raw.decode("utf-8", errors="replace")
-    try:
-        return read(path)
-    except (OSError, ValueError) as original_error:
-        from ouroboros.source_retention import retained_child_root
-
-        original = pathlib.Path(str(ref.get("path") or ""))
-        suffix = (OBSERVABILITY_DIR, "blobs", f"{expected_sha}.{kind}.gz")
-        if original.is_absolute() and original.parts[-3:] == suffix:
-            child = pathlib.Path(*original.parts[:-3])
-            if original != path and retained_child_root(pathlib.Path(drive_root), child):
-                return read(_blob_ref_path(child, ref))
-        raise original_error
+    raw = blob_bytes(drive_root, ref)
+    return json.loads(raw.decode("utf-8")) if kind == "json" else raw.decode("utf-8", errors="replace")
 
 
 def _ref_path(drive_root: pathlib.Path, ref: dict, relative: pathlib.Path) -> pathlib.Path:
@@ -1259,11 +1235,11 @@ def latest_llm_response_text(drive_root: pathlib.Path, task_id: str) -> str:
     for manifest_path in manifests:
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            blob_path = pathlib.Path(str((manifest.get("full_payload_ref") or {}).get("path") or ""))
-            if not blob_path.is_file():
+            from ouroboros.evidence_packs import blob_bytes
+            try:
+                payload = json.loads(blob_bytes(drive_root, manifest.get("full_payload_ref")).decode("utf-8", errors="replace"))
+            except (OSError, ValueError):
                 continue
-            with gzip.open(blob_path, "rb") as fh:
-                payload = json.loads(fh.read().decode("utf-8", errors="replace"))
             message = payload.get("message") if isinstance(payload, dict) else None
             content = message.get("content") if isinstance(message, dict) else None
             text = str(content or "").strip()

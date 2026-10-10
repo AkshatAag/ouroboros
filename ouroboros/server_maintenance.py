@@ -889,6 +889,11 @@ def _run_periodic_reconcile_sweep(marker: list, stop_event: Any = None, latch: A
         if _stop_requested(stop_event):
             return
         _run_drive_custody_pass(stop_event)
+        if not _stop_requested(stop_event):  # settled evidence packs: a supervised child, never at boot
+            from ouroboros.config import REPO_DIR
+            from ouroboros.evidence_packer import packer
+
+            packer.tick(pathlib.Path(DATA_DIR), pathlib.Path(REPO_DIR))
         _step_recovered("reconcile_sweep")
     except Exception:
         _step_failed("reconcile_sweep", "Periodic %s failed")

@@ -698,41 +698,27 @@ def store_actor_source_bytes(
         f"{safe_id}-{digest}.{safe_extension}",
     )
     target = artifact_dir.joinpath(*relative.parts)
-    # WRITE-ONCE. The name carries the digest, so an existing file with exactly
-    # these bytes IS this handle: rewriting it would only republish identical
-    # content while racing another writer for the same path (on Windows an
-    # os.replace over a destination a concurrent reader holds open is a sharing
-    # violation, which is how a second copy-back of the same handle used to fail).
+    # WRITE-ONCE. The name carries the digest, so an existing file (loose or a pack member) with
+    # these bytes IS this handle: rewriting would republish identical content while racing another
+    # writer for the path (a Windows os.replace over a file a reader holds open is a sharing violation).
     try:
         already_stored = not target.is_symlink() and target.read_bytes() == bytes(data)
     except OSError:
-        already_stored = False
+        from ouroboros.evidence_packs import handle_info
+        already_stored = handle_info(drive_root, task_id, relative.as_posix()) is not None
     if not already_stored:
         fence_publication()  # a closed publication generation writes no new source
         write_bytes_atomic(target, bytes(data))
-    return {
-        "kind": "task_source",
-        "root": "artifact_store",
-        "path": relative.as_posix(),
-        "size": len(data),
-        "sha256": digest,
-        "read": {
-            "tool": "read_file",
-            "arguments": {
-                "root": "artifact_store",
-                "path": relative.as_posix(),
-                "start_line": 1,
-                "max_lines": 2000,
-                "start_char": 0,
-            },
-        },
-    }
+    read = {"root": "artifact_store", "path": relative.as_posix(), "start_line": 1, "max_lines": 2000, "start_char": 0}
+    return {"kind": "task_source", "root": "artifact_store", "path": relative.as_posix(), "size": len(data),
+            "sha256": digest, "read": {"tool": "read_file", "arguments": read}}
 
 
 def read_actor_source_bytes(
-    drive_root: Union[pathlib.Path, str], task_id: str, ref: Any,
+    drive_root: Union[pathlib.Path, str], task_id: str, ref: Any, *, retained: bool = True,
 ) -> bytes:
-    """Resolve and verify one task-local actor source ref or raise explicitly."""
+    """Resolve and verify one task-local actor source ref (loose, else this root's evidence pack,
+    else the retained placements unless ``retained`` is off) or raise explicitly."""
 
     if not isinstance(ref, dict) or ref.get("kind") != "task_source":
         raise ValueError("actor source ref has an unexpected kind")
@@ -748,12 +734,18 @@ def read_actor_source_bytes(
     try:
         target = target.resolve(strict=True)
         target.relative_to(base)
+        raw = target.read_bytes()
     except FileNotFoundError:
-        from ouroboros.source_retention import read_retained_task_source
-        return read_retained_task_source(drive_root, task_id, ref)
+        from ouroboros.evidence_packs import handle_bytes
+        try:
+            raw = handle_bytes(drive_root, task_id, rel.as_posix())
+        except FileNotFoundError:
+            if not retained:
+                raise
+            from ouroboros.source_retention import read_retained_task_source
+            return read_retained_task_source(drive_root, task_id, ref)
     except ValueError as exc:
         raise ValueError("actor source ref escapes its task artifact root") from exc
-    raw = target.read_bytes()
     try:
         expected_size = int(ref["size"])
     except (KeyError, TypeError, ValueError) as exc:

@@ -10,6 +10,7 @@ never write into a published inode. Every link failure keeps the copy path.
 from __future__ import annotations
 
 import contextvars
+import gzip
 import hashlib
 import json
 import os
@@ -20,6 +21,8 @@ import zlib
 from collections import deque
 from contextlib import contextmanager
 from typing import Any
+
+from ouroboros import evidence_packs as packs
 
 _WALK = contextvars.ContextVar("immutable_source_retention", default=None)
 # Negative observations belong only to this maintenance process/generation.
@@ -72,12 +75,12 @@ def retained_task_roots(canonical: pathlib.Path, task_id: str) -> list[pathlib.P
 def read_retained_task_source(root, task_id, ref):
     """Resolve retained execution or retry-predecessor bytes with the same verifier."""
     from ouroboros.artifacts import read_actor_source_bytes
-    from ouroboros.artifacts import task_artifact_dir_path
 
     for source_root, owner in _source_locations(root, task_id):
-        path = task_artifact_dir_path(source_root, owner, create=False) / ref["path"]
-        if path.exists() or path.is_symlink():
-            return read_actor_source_bytes(source_root, owner, ref)
+        try:  # loose or packed at this placement; damage is explicit, absence tries the next one
+            return read_actor_source_bytes(source_root, owner, ref, retained=False)
+        except FileNotFoundError:
+            continue
     raise FileNotFoundError(f"actor source unavailable: {ref['path']}")
 
 
@@ -116,11 +119,12 @@ def retained_actor_source_read_target(root, task_id, relative):
         return None
     for source_root, owner in _source_locations(root, task_id):
         path = task_artifact_dir_path(source_root, owner, create=False) / relative
-        if path.exists() or path.is_symlink():
-            ref = {"kind": "task_source", "root": "artifact_store", "path": relative,
-                   "size": path.stat().st_size, "sha256": match[1]}
-            read_actor_source_bytes(source_root, owner, ref)
-            return path.resolve(strict=True)
+        if not (path.exists() or path.is_symlink()) and packs.materialize_handle(source_root, owner, relative) is None:
+            continue  # a packed handle is written back beside its name first
+        ref = {"kind": "task_source", "root": "artifact_store", "path": relative,
+               "size": path.stat().st_size, "sha256": match[1]}
+        read_actor_source_bytes(source_root, owner, ref)
+        return path.resolve(strict=True)
     return None
 
 
@@ -135,14 +139,7 @@ def manifest_version_ref(root: pathlib.Path, digest: str) -> dict:
 
 
 def read_manifest_version(root: pathlib.Path, digest: str) -> bytes:
-    import gzip
-
-    ref = manifest_version_ref(root, digest)
-    with gzip.open(ref["path"], "rb") as stream:
-        raw = stream.read()
-    if hashlib.sha256(raw).hexdigest() != digest:
-        raise ValueError("observability call manifest ref failed sha256 verification")
-    return raw
+    return packs.blob_bytes(root, manifest_version_ref(root, digest))  # loose or packed, sha-verified
 
 
 def _check_open():
@@ -362,16 +359,9 @@ class RetentionWalk:
                     except (OSError, ValueError):
                         raw = read_manifest_version(root, ref["sha256"])
                     return (raw, manifest), root
-                path = obs._blob_ref_path(root, ref)
-                import gzip
-                with gzip.open(path, "rb") as stream:
-                    raw = stream.read()
-                if len(raw) != int(ref["size"]) or hashlib.sha256(raw).hexdigest() != ref["sha256"]:
-                    raise ValueError("observability blob ref failed size or sha256 verification")
-                return (raw, path), root
+                return (packs.blob_bytes(root, ref), obs._blob_ref_path(root, ref)), root  # loose or packed
             except (OSError, ValueError, KeyError, TypeError, EOFError, zlib.error) as exc:
                 failures.append(exc)
-        import gzip
 
         # A missing fallback cannot prove an earlier eligible source absent.
         # In particular, transient I/O may recover without a metadata change.
@@ -450,7 +440,6 @@ class RetentionWalk:
         target = self.parent / "observability" / "blobs" / source_path.name
         _check_open()
         def verified_destination():
-            import gzip
             from ouroboros.task_custody import PublicationClosed
 
             digest, size = hashlib.sha256(), 0
@@ -463,7 +452,10 @@ class RetentionWalk:
             except PublicationClosed:
                 raise
             except (OSError, EOFError, zlib.error):
-                return False
+                try:  # the parent may already hold these bytes as a pack member
+                    return packs.blob_bytes(self.parent, {**ref, "path": str(target)}) == raw
+                except (OSError, ValueError):
+                    return False
             return digest.hexdigest() == ref["sha256"] and size == int(ref["size"])
 
         if source_path.resolve() != target.resolve():
@@ -474,7 +466,11 @@ class RetentionWalk:
                     try:
                         os.link(source_path, temporary)
                     except OSError:
-                        shutil.copyfile(source_path, temporary)
+                        if source_path.is_file():
+                            shutil.copyfile(source_path, temporary)
+                        else:  # the child's copy is a pack member: write the verified bytes as a loose blob
+                            with gzip.open(temporary, "wb", compresslevel=1) as stream:
+                                stream.write(raw)
                     obs._chmod_private(temporary)
                     _check_open()
                     replace_atomic(temporary, target)
@@ -483,7 +479,7 @@ class RetentionWalk:
             if not verified_destination():
                 raise OSError("retained blob destination failed verification")
         self.state["promoted_ref_count"] += 1
-        return {**ref, "path": str(target), "compressed_size": target.stat().st_size}
+        return {**ref, "path": str(target), "compressed_size": target.stat().st_size if target.is_file() else 0}
 
     def _manifest(self, node, data):
         from ouroboros import observability as obs
