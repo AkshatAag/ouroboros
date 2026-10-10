@@ -387,3 +387,23 @@ def test_stop_latches_and_signals_without_waiting_for_candidate_walk(root, monke
         if unit._thread is not None:
             unit._thread.join(3)
     assert not tick.is_alive() and not stop.is_alive()
+
+
+def test_restore_and_preflight_cover_all_descendants_but_not_symlink_drives(root):
+    outer = root / "task_drives/outer"
+    inner = outer / "state/headless_tasks/inner/data"
+    raw = b"nested retained checkpoint"
+    _, handle = _task(inner, "inner", blobs=1, handle=raw)
+    assert packer.run_pass(inner)["faults"] == 0
+    loose = _handle_path(inner, "inner", handle)
+    assert not loose.exists()
+    outside = root.parent / "outside"
+    _, outside_handle = _task(outside, "outside", blobs=1, handle=b"outside bytes")
+    packer.run_pass(outside)
+    (root / "task_drives/linked").symlink_to(outside, target_is_directory=True)
+    assert packs.pending_restore_bytes(root) == len(raw)
+    assert packs.restore_checkpoint_handles(root)["handles"] == 1
+    assert loose.read_bytes() == raw
+    assert not _handle_path(outside, "outside", outside_handle).exists()
+    assert packs.pending_restore_bytes(root) == 0
+    assert packs.restore_checkpoint_handles(root)["handles"] == 0

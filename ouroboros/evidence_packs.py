@@ -585,13 +585,9 @@ def materialize_tree(path: pathlib.Path) -> None:
 # ---- A+ restore and the preflight ------------------------------------------
 
 def _pack_roots(root: pathlib.Path) -> List[pathlib.Path]:
-    from ouroboros.source_retention import retained_child_root
+    from ouroboros.store_import import descendant_drives
 
-    roots = [root]
-    for child in (*sorted((root / "state" / "headless_tasks").glob("*/data")), *sorted((root / "task_drives").glob("*"))):
-        if retained_child_root(root, child) and packs_dir(child).is_dir():
-            roots.append(child)
-    return roots
+    return [root, *(child for child in descendant_drives(root) if packs_dir(child).is_dir())]
 
 
 def _checkpoint_prefix(sidecar: Dict[str, Any]) -> List[Dict[str, Any]]:
