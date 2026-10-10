@@ -348,8 +348,8 @@ def test_the_reconciliation_reads_only_stat_changed_files_and_compares_them_by_c
     read.clear()
     assert ensure_current_store(root, with_children=False)["status"] == "unchanged" and read == []
     text = path.read_text(encoding="utf-8")
-    assert '"status": "failed"' in text
-    path.write_text(text.replace('"status": "failed"', '"status": "passed"'), encoding="utf-8")  # same length, new mtime
+    assert json.loads(text)["status"] == "failed" and text.count('"failed"') == 1
+    path.write_text(text.replace('"failed"', '"passed"'), encoding="utf-8")  # same length, new mtime, any JSON layout
     report = ensure_current_store(root, with_children=False)
     assert report["status"] == "reconciled" and report["changed"] == 1 and read == ["done1"]
     assert load(root, "done1")["status"] == "passed"
