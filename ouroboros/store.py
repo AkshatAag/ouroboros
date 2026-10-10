@@ -26,6 +26,8 @@ import sqlite3
 import threading
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
+from ouroboros.utils import machine_json  # one compact JSON text: key order kept, facts round-trip
+
 STORE_REL = pathlib.Path("state/current.sqlite")
 LOCK_NAME = "current.lock"  # the name-tier lock around every access
 IMPORT_LOCK_NAME = "current_import.lock"
@@ -283,14 +285,10 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC) -> I
             raise _typed(exc) from exc
 
 
-def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))  # key order kept: facts round-trip
-
-
 def document_text(document: Dict[str, Any]) -> str:
     """The whole document serialized exactly as the result writer serializes a file: what an
     export writes (the exact inverse of ``load``), what the content baseline hashes."""
-    return json.dumps(document, ensure_ascii=False, indent=2)
+    return machine_json(document)
 
 
 def encode_document(document: Dict[str, Any]) -> str:
@@ -327,7 +325,7 @@ class Txn:
         return None if record is None else json.loads(record["value"])
 
     def set_meta(self, key: str, value: Any) -> None:
-        self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, _json(value)))
+        self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, machine_json(value)))
 
     def phase(self) -> str:
         return str(self.meta("phase") or PUBLISHED)
@@ -377,7 +375,7 @@ class Txn:
     def replace_set(self, set_name: str, rows: Dict[str, Dict[str, Any]]) -> None:
         self.conn.execute("DELETE FROM obligations WHERE set_name=?", (set_name,))
         self.conn.executemany("INSERT INTO obligations (set_name, id, facts) VALUES (?, ?, ?)",
-                              [(set_name, str(identity), _json(facts)) for identity, facts in rows.items()])
+                              [(set_name, str(identity), machine_json(facts)) for identity, facts in rows.items()])
 
     def flagged(self, set_name: str) -> List[str]:
         """Task ids whose flag column says they belong to a derived set."""

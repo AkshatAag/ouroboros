@@ -4,7 +4,6 @@ round trip and the SQLite 3.24 floor the CI floor job proves on a 3.37 system en
 from __future__ import annotations
 
 import errno
-import json
 import os
 import pathlib
 import re
@@ -14,6 +13,7 @@ import pytest
 
 from ouroboros import platform_layer, store, usage_store
 from ouroboros.store import StoreBusy, StoreLost, StoreMigrating, StoreRetired
+from ouroboros.utils import machine_json
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -252,7 +252,7 @@ def test_update_task_round_trips_the_document_and_projects_the_typed_columns(tmp
         assert (row["status"], row["parent_task_id"], row["root_task_id"], row["delegation_role"]) == (
             "running", "root", "root", "child")
         assert row["pending_drive"] == 1 and row["owes_synthesis"] == 0
-        assert txn.body_text("t1") == json.dumps(updated, ensure_ascii=False, indent=2)
+        assert txn.body_text("t1") == machine_json(updated)  # the result writer's one compact format
     store.update_task(tmp_path, "t1", lambda current: {**current, "status": "completed", "pause_notices": [{"n": 1}]},
                       pending_drive=True)
     with store.open_store(tmp_path, write=False) as txn:

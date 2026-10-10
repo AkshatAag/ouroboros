@@ -46,7 +46,7 @@ from ouroboros.task_result_schema import (
     TASK_RESULT_QUARANTINE_DIR, emit_quarantine_event, quarantine_task_result, task_result_schema_refusal,
 )
 from ouroboros.task_results import task_result_path, task_results_dir
-from ouroboros.utils import append_jsonl, atomic_write_json, utc_now_iso, write_text_atomic
+from ouroboros.utils import append_jsonl, atomic_write_json, machine_json, utc_now_iso, write_text_atomic
 
 Record = Tuple[str, Dict[str, Any]]
 
@@ -414,7 +414,7 @@ def export_facts(root: Any) -> Dict[str, Any]:
                        if path.stem not in task_ids and not (baseline.get(path.stem) or {}).get("refused"))
         manifest = {"status": "writing", "started_at": utc_now_iso(),
                     "results": {task_id: _identity(document_text(txn.load(task_id))) for task_id in task_ids},
-                    "sets": {name: _identity(json.dumps(_set_rows_in_full(txn, name), ensure_ascii=False, indent=2))
+                    "sets": {name: _identity(machine_json(_set_rows_in_full(txn, name)))  # what atomic_write_json writes
                              for name in names},
                     "removed": stale}
         txn.set_meta("export_manifest", manifest)
