@@ -784,13 +784,11 @@ def restore_pending_from_snapshot(
     if _queue().PENDING:
         return 0
     try:
-        if not _queue().QUEUE_SNAPSHOT_PATH.exists():
-            return 0
         from ouroboros.queue_observation import load_queue_document, queue_stamp
         snap = load_queue_document(_queue().DRIVE_ROOT)
         if snap.get("_snapshot_invalid") or snap.get("_snapshot_missing"):
             return 0
-        ts = str(queue_stamp(snap).get("ts") or "")
+        ts = str(queue_stamp(snap, boot=True).get("ts") or "")
         ts_unix = _queue().parse_iso_to_ts(ts)
         # Timestamp validity and freshness gate ORDINARY rows only (#1196): a
         # readable snapshot whose stamp is missing or malformed is treated as

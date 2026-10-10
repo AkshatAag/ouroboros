@@ -6,7 +6,10 @@ import time
 from ouroboros.utils import read_json_dict
 
 
-def queue_stamp(document: dict) -> dict:
+def queue_stamp(document: dict, *, boot: bool = False) -> dict:
+    # Boot can recover an older release's snapshot; live readers need its publisher.
+    if boot and "generation" not in document:
+        return document
     stamp = document.get("_queue_alive") or {}
     return stamp if document.get("generation") and document["generation"] == stamp.get("generation") else {}
 

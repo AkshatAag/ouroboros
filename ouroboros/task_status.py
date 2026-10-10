@@ -238,14 +238,14 @@ def _load_queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
 _SNAPSHOT_OWNERSHIP_FRESH_SEC = 10.0
 
 
-def queue_snapshot_observation(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def queue_snapshot_observation(snapshot: Dict[str, Any], *, boot: bool = False) -> Dict[str, Any]:
     """Date the existing queue observation, without asserting current capacity.
 
     Context, scheduling receipts and cancellation observations share the same
     freshness bound as live ownership. Counts belong to the captured snapshot;
     even a fresh observation is not a reservation or a continuously live view.
     """
-    stamp = queue_stamp(snapshot)
+    stamp = queue_stamp(snapshot, boot=boot)
     observation = {"source": "state/queue_snapshot.json", "ts": stamp.get("ts"),
                    "age_sec": None, "freshness": "unknown", "fresh": False}
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
@@ -514,6 +514,7 @@ def _is_stale_orphan_running_task(
     result: Dict[str, Any],
     events_index: Optional[_EventsTailIndex] = None,
     queue_snapshot: Optional[Dict[str, Any]] = None,
+    *, boot: bool = False,
 ) -> bool:
     observation = task_execution_observation(
         drive_root, {**result, "task_id": task_id}, queue_snapshot=queue_snapshot,
@@ -560,9 +561,7 @@ def _is_stale_orphan_running_task(
             queue_snapshot if isinstance(queue_snapshot, dict)
             else _load_queue_snapshot(pathlib.Path(drive_root))
         )
-        if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
-            return False
-        if _snapshot_is_stale(snapshot):
+        if not queue_snapshot_observation(snapshot, boot=boot)["fresh"]:
             return False
     except Exception:
         return False
@@ -689,7 +688,7 @@ def load_effective_task_result(
 def reconcile_orphaned_running_tasks(
     drive_root: Any, *, exclude_task_ids: frozenset[str] = frozenset(),
     expired_quizzes: Optional[List[Any]] = None,
-    write_guard: Optional[Callable[[str], Any]] = None,
+    write_guard: Optional[Callable[[str], Any]] = None, boot: bool = True,
 ) -> int:
     """Durably finalize on-disk RUNNING task results the effective-status
     projection already considers terminal.
@@ -700,10 +699,9 @@ def reconcile_orphaned_running_tasks(
     terminal status, but never persists it, so a headless/no-UI run that never
     re-reads the result keeps the stale ``running`` on disk.
 
-    This sweep persists that projection and inherits ALL of its liveness gates:
-    the grace window, the worker-boot-after-task evidence, and the refusal to
-    reconcile when the queue snapshot is missing. It decides and persists on the
-    status-only (``materialize_artifacts=False``) projection, so no child file is
+    Boot accepts legacy snapshot timestamps; periodic callers pass ``boot=False``.
+    Grace, worker-boot-after-task and readable/fresh snapshot gates still apply.
+    The status-only (``materialize_artifacts=False``) projection means no child file is
     listed or copied here: the child store stays served read-only from its drive
     and reaches the canonical store through ``task_custody.settle_child_drive``
     before that drive can go. The write is fenced by the row's attempt basis and
@@ -746,7 +744,7 @@ def reconcile_orphaned_running_tasks(
             log.debug("Orphan reconcile skipped %s: cancel authority unreadable", task_id, exc_info=True)
             continue
         try:
-            effective = effective_task_result(root, row, materialize_artifacts=False)
+            effective = effective_task_result(root, row, materialize_artifacts=False, _boot=boot)
         except Exception:
             continue
         eff_status = str(effective.get("status") or "").strip().lower()
@@ -843,6 +841,7 @@ def effective_task_result(
     materialize_artifacts: bool = True,
     _seen: frozenset[str] = frozenset(),
     _events_index: Optional[_EventsTailIndex] = None,
+    _boot: bool = False,
 ) -> Dict[str, Any]:
     """Merge parent result, child-drive result, and active queue state.
 
@@ -878,7 +877,7 @@ def effective_task_result(
                 retry_result,
                 materialize_artifacts=materialize_artifacts,
                 _seen=frozenset(set(_seen) | {task_id}),
-                _events_index=_events_index,
+                _events_index=_events_index, _boot=_boot,
             )
             if effective_retry:
                 merged_retry = dict(effective_retry)
@@ -1029,7 +1028,7 @@ def effective_task_result(
                     )
             elif _is_stale_orphan_running_task(
                 pathlib.Path(drive_root), task_id, merged, _events_index,
-                queue_snapshot=queue_snapshot,
+                queue_snapshot=queue_snapshot, boot=_boot,
             ):
                 terminal_projection = "pooled_worker_restart"
                 orphan_reason = (

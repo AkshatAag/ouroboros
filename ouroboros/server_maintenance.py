@@ -968,7 +968,7 @@ def _periodic_zombie_reconcile(*, on_orphans_healed: Any = None, stop_event: Any
 
         expired_quizzes: list = []
         healed = reconcile_orphaned_running_tasks(
-            DATA_DIR, expired_quizzes=expired_quizzes,
+            DATA_DIR, expired_quizzes=expired_quizzes, boot=False,
             write_guard=lambda task_id: orphan_reconcile_write_guard(task_id, stop_event=stop_event),
         )
         _publish_expired_quiz_frames(expired_quizzes)
