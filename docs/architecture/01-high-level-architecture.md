@@ -125,7 +125,7 @@ ouroboros/ — agent core and shared runtime (§6)
   ui_language.py, i18n_memory.py — the interface-language fact (an open BCP-47 tag; `""` is not chosen) and the per-language translation memory under `state/i18n/<tag>.json`, provenance owner > imported > generated (§7 `OUROBOROS_UI_LANGUAGE`)
   loop_tool_execution.py, tool_call_log.py — tool dispatch, results, per-invocation counting
   deadline_utils.py — deadline parsing and the transport-vs-logical wait seam
-  observability.py, source_retention.py — private gzip CAS; reads restore omitted equal send histories (§10)
+  observability.py, source_retention.py — private CAS: equal histories stored once, gzip-1, hardlinks (§10)
   finalization_timing.py — final-event phase fields and `task_finalization_timing` (§6)
   process_logging.py — per-process logging bootstrap; the server is the sole `server.log` writer; the launcher's byte-capped copy of the server pipe into `agent_stdout.log`
   model_send_seal.py — the invariant `model-visible ⟺ logged` for `model_send`: a mismatch is a typed durable fact, not a blocked call (docs/MODEL_SEND_OBSERVABILITY.md)

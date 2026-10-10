@@ -239,6 +239,8 @@ def test_imported_version_never_hides_native_seal_under_same_call_id(tmp_path, m
 
 
 def test_exact_local_blob_wins_old_locator_and_own_retained_copy_repairs_corruption(tmp_path):
+    from ouroboros.utils import write_bytes_atomic
+
     parent, task = tmp_path / "canonical", "blob-resolution"
     parent.mkdir()
     child = headless.prepare_task_drive(parent, task, "empty")
@@ -248,10 +250,12 @@ def test_exact_local_blob_wins_old_locator_and_own_retained_copy_repairs_corrupt
     body = {"review_evidence": {"source_ref": original}}
     copied, _state = observability.promote_child_task_refs(parent, child, task, body)
     target = Path(copied["review_evidence"]["source_ref"]["path"])
-    source_path.write_bytes(b"corrupt former locator")
+    # Runtime repairs replace a placement; in-place writes would damage every
+    # hardlink to this immutable inode, not just the selected locator.
+    write_bytes_atomic(source_path, b"corrupt former locator")
     assert observability.read_blob_ref(parent, original) == {"text": "exact retained payload"}
-    source_path.write_bytes(compressed)
-    target.write_bytes(b"corrupt canonical copy")
+    write_bytes_atomic(source_path, compressed)
+    write_bytes_atomic(target, b"corrupt canonical copy")
     assert observability.read_blob_ref(parent, original) == {"text": "exact retained payload"}
     _copied, state = observability.promote_child_task_refs(parent, child, task, body)
     assert state["status"] == "complete" and not state["unavailable_refs"]

@@ -4,12 +4,15 @@ The existing call-id file is a marked accounting projection. Historical manifest
 versions are exact UTF-8 objects in the existing CAS, addressed by their original
 digest. Captured sources keep their bytes; readers resolve placement separately.
 The worklist owns only references and file identities, never decoded history.
+Immutable files share hardlinks where supported; repairs replace their names,
+never write into a published inode. Every link failure keeps the copy path.
 """
 from __future__ import annotations
 
 import contextvars
 import hashlib
 import json
+import os
 import pathlib
 import shutil
 import uuid
@@ -394,6 +397,18 @@ class RetentionWalk:
             raise ValueError("immutable source retention changed captured bytes")
         _check_open()
         try:
+            destination = artifacts.task_artifact_dir_path(self.parent, task) / ref["path"]
+            if not destination.exists():
+                source = artifacts.task_artifact_dir_path(self.child, task) / ref["path"]
+                try:
+                    if artifacts.read_actor_source_bytes(self.child, task, ref) == raw:
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        _check_open()
+                        os.link(source, destination)
+                except PublicationClosed:
+                    raise
+                except (OSError, ValueError):
+                    pass  # Copy the verified bytes below if no direct immutable file can be linked.
             stored = artifacts.store_actor_source_bytes(self.parent, task, category=rel.parts[1],
                 source_id=source_id, data=raw, extension=extension)
         except PublicationClosed:
@@ -442,7 +457,10 @@ class RetentionWalk:
             if not verified_destination():
                 temporary = target.with_name(f".{target.name}.tmp.{uuid.uuid4().hex}")
                 try:
-                    shutil.copyfile(source_path, temporary)
+                    try:
+                        os.link(source_path, temporary)
+                    except OSError:
+                        shutil.copyfile(source_path, temporary)
                     obs._chmod_private(temporary)
                     _check_open()
                     replace_atomic(temporary, target)
