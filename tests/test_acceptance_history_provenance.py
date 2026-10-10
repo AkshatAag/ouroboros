@@ -136,6 +136,7 @@ def test_partial_copyback_retry_retains_exact_history_without_replacing_subject(
         return store(root, *args, **kwargs)
 
     with monkeypatch.context() as fail:
+        fail.setattr("ouroboros.source_retention.os.link", lambda *_a, **_k: (_ for _ in ()).throw(OSError("link unavailable")))
         fail.setattr(artifacts, "store_actor_source_bytes", fail_history_destination)
         first = _finish(f)
         retry_child_task_refs(f.root, f.worker, f.tid)

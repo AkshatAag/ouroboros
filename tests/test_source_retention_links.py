@@ -63,3 +63,38 @@ def test_nested_review_inputs_share_checkpoint_or_copy_on_link_failure(tmp_path,
     assert original.stat().st_ino == inode and retained.read_bytes() == raw
     original.unlink()
     assert artifacts.read_actor_source_bytes(read_root, task, ref) == raw
+
+
+def test_failed_blob_publication_retains_child_until_retry(tmp_path, monkeypatch, link_error):
+    from ouroboros import utils
+    from ouroboros.task_results import write_task_result
+
+    parent, task = tmp_path / "canonical", "failed-placement"
+    child = headless.prepare_task_drive(parent, task, "empty")
+    payload = {"result": "exact evidence survives failed publication"}
+    observability.persist_call(child, task_id=task, call_id="call", call_type="tool", payload=payload)
+    write_task_result(child, task, "completed", result="answer", artifact_status="ready")
+    headless.copy_child_task_result(parent, {"id": task, "drive_root": str(child)})
+    replace, attempts = utils.replace_atomic, []
+
+    def fail_blob_publication(source, destination, *args, **kwargs):
+        if destination.parent == parent / "observability" / "blobs":
+            original = child / "observability" / "blobs" / destination.name
+            assert source.read_bytes() == original.read_bytes()
+            assert (source.stat().st_ino == original.stat().st_ino) is (link_error is None)
+            attempts.append(source)
+            raise OSError("blob publication failed")
+        return replace(source, destination, *args, **kwargs)
+
+    with monkeypatch.context() as failure:
+        failure.setattr(utils, "replace_atomic", fail_blob_publication)
+        copied = headless.retry_child_task_refs(parent, child, task)
+        assert copied["child_ref_promotion"]["status"] == "incomplete"
+        assert copied["child_ref_promotion"]["pending_refs"]
+        assert headless.remove_subagent_task_drive(parent, task, live=lambda _task: False) is False
+        assert child.exists() and attempts and all(not path.exists() for path in attempts)
+    copied = headless.retry_child_task_refs(parent, child, task)
+    assert copied["child_ref_promotion"]["status"] == "complete"
+    assert headless.remove_subagent_task_drive(parent, task, live=lambda _task: False) is True
+    assert not child.exists()
+    assert observability.read_call_payload(parent, task_id=task, call_id="call")[1] == payload
