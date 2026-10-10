@@ -572,6 +572,9 @@ def prepare_terminal_task_files(canonical_root: pathlib.Path, task: Dict[str, An
         report["result"] = load_task_result(root, task_id, strict=True)
         from ouroboros.obligations import drive_finished
         drive_finished(root, task, report["result"])
+        # Derived inventories need not outlive terminal file adoption.
+        if child is not None and child.resolve(strict=False) != root.resolve(strict=False):
+            shutil.rmtree(child / "state" / "code_intel", ignore_errors=True)
     except CustodyBusy as exc:
         # Another publisher (a settlement or copy-back) holds the store: the next attempt
         # completes the same work; nothing failed and no failure is stamped.
