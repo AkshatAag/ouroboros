@@ -2,8 +2,9 @@
 
 Each selected sleep frees pooled capacity for BRAVO without replacing ALPHA's
 identity. Warm sleep receives owner Pause; cold sleep crosses owner Restart.
-A typed Hurry makes the sleep ready, but owner holds still require explicit
-Resume. No short timer wakes the model. The second mock call is held while
+ALPHA explicitly selects BRAVO's mail (not its terminal); neither root has children.
+A typed Hurry makes sleep ready; owner holds still require explicit Resume.
+No short timer wakes the model. The second mock call is held while
 we inspect original started_at and accumulated sleep exclusion.
 """
 from __future__ import annotations
@@ -43,7 +44,8 @@ class SleepModel(b4._ScriptedModel):
         if main and marker == 'ALPHA' and ordinal == 1:
             message, reason = {'role': 'assistant', 'content': '', 'tool_calls': [{
                 'id': 'call_sleep', 'type': 'function', 'function': {
-                    'name': 'await_messages', 'arguments': json.dumps({'mode': self.mode})}}]}, 'tool_calls'
+                    'name': 'await_messages', 'arguments': json.dumps({'mode': self.mode,
+                        'senders': [b4.BRAVO]})}}]}, 'tool_calls'
         elif main and marker == 'ALPHA' and ordinal == 2:
             self.resumed.set()
             self.finish.wait(90)
@@ -69,6 +71,7 @@ def member(snapshot, task_id, kind):
 @pytest.mark.parametrize('mode', ['warm', 'cold'])
 def test_sleep_lends_capacity_preserves_identity_and_owner_hold(direct_server_with_data, monkeypatch, mode):
     from playwright.sync_api import expect, sync_playwright
+
     from ouroboros.budget_pause import budget_pause_row
     from ouroboros.task_results import load_task_result
 
