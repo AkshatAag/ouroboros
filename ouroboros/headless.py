@@ -1,8 +1,4 @@
-"""Headless task helpers for CLI/workspace runs.
-
-The gateway owns task transport; this module owns the small amount of local
-filesystem state needed for isolated external runs and patch artifacts.
-"""
+"""Isolated drives and patch artifacts for CLI/workspace runs; the gateway owns transport."""
 
 from __future__ import annotations
 
