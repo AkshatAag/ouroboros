@@ -988,6 +988,7 @@ def write_call_manifest(
     manifest: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Write the small per-call manifest with refs into the private ledger."""
+    from ouroboros import evidence_packs, store
 
     path = call_manifest_path(drive_root, task_id, call_id or new_call_id("call"))
     safe_call = path.stem
@@ -1002,7 +1003,8 @@ def write_call_manifest(
         "call_id": safe_call,
         **dict(manifest or {}),
     }
-    atomic_write_json(path, payload, trailing_newline=True)
+    with store.name_lock(pathlib.Path(drive_root), evidence_packs.PUBLICATION_LOCK_NAME, timeout_sec=4.0):
+        atomic_write_json(path, payload, trailing_newline=True)
     _chmod_private(path)
     try:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()

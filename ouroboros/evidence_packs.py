@@ -37,6 +37,7 @@ from ouroboros.utils import append_jsonl, atomic_write_json, replace_atomic, utc
 PACKS_REL = pathlib.Path("observability/packs")
 INDEX_NAME = "index.sqlite"
 INDEX_LOCK_NAME = "packs_index.lock"  # the name lock under state/ around every index access
+PUBLICATION_LOCK_NAME = "packs_publication.lock"  # manifest publication vs reference census + unlink
 INDEX_WAIT_SEC = 5.0
 FORMAT_VERSION = 1
 INDEX_SCHEMA_VERSION = 2
@@ -847,25 +848,48 @@ def _member_key(member: Dict[str, Any]) -> tuple:
     return member["kind"], member["sha256"], str(member.get("path") or "")
 
 
-def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set) -> Dict[str, int]:
+def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set, revision: str) -> Dict[str, int]:
     """Remove loose files whose bytes a VERIFIED pack holds; a blob some non-settled task's
     manifests still reference (``keep_shas``) stays loose. A busy file is retried next pass."""
+    from ouroboros.evidence_packer import live_manifest_shas, task_stamps
+    from ouroboros.task_custody import task_custody_lock
+    from ouroboros.task_results import task_result_path
+    from ouroboros.utils import update_json_locked
+
     root = pathlib.Path(root)
     packed = {_member_key(m) for s in sidecars for m in s["members"]}
-    report = {"unlinked": 0, "kept": 0, "busy": 0}
-    for member in loose_members(root, task_id):
-        if _member_key(member) not in packed or not member["source"].is_file():
-            continue
-        if member["kind"] != CHECKPOINT and member["sha256"] in keep_shas:
-            report["kept"] += 1
-            continue
-        try:
-            os.unlink(member["source"])
-            report["unlinked"] += 1
-        except FileNotFoundError:
-            pass
-        except PermissionError:
-            report["busy"] += 1
+    report = {"unlinked": 0, "kept": 0, "busy": 0, "deferred": 1}
+
+    def remove(_current):
+        if task_stamps(root, task_id) != revision or not task_settled(root, task_id):
+            return
+        keep = keep_shas | live_manifest_shas(root)
+        members = loose_members(root, task_id)
+        if task_stamps(root, task_id) != revision:
+            return
+        report["deferred"] = 0
+        for member in members:
+            if _member_key(member) not in packed or not member["source"].is_file():
+                continue
+            if member["kind"] != CHECKPOINT and member["sha256"] in keep:
+                report["kept"] += 1
+                continue
+            try:
+                os.unlink(member["source"])
+                report["unlinked"] += 1
+            except FileNotFoundError:
+                pass
+            except PermissionError:
+                report["busy"] += 1
+
+    def locked_remove(current):
+        with store.name_lock(root, PUBLICATION_LOCK_NAME, timeout_sec=INDEX_WAIT_SEC):
+            return remove(current)
+
+    # Compression precedes custody -> result -> manifest publication locks.
+    with task_custody_lock(root, task_id) as acquired:
+        if acquired:
+            update_json_locked(task_result_path(root, task_id, create=False), locked_remove, strict_existing_dict=True)
     return report
 
 
@@ -874,6 +898,9 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
     """The per-task steps, each idempotent: new loose members -> next generation (write, publish,
     re-read + verify every member, index), then unlink loose files held by verified packs."""
     root = pathlib.Path(root)
+    from ouroboros.evidence_packer import task_stamps
+
+    revision = task_stamps(root, task_id)
     generations = published_generations(root, task_id, listing)
     already = {_member_key(m) for s in generations for m in s["members"]}
     fresh = [m for m in loose_members(root, task_id) if _member_key(m) not in already]
@@ -892,7 +919,7 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
         pack_path = packs_dir(root) / pack_name(task_id, sidecar["generation"])
         verify_pack(pack_path, sidecar)  # from disk, EVERY member, before any unlink
         index_upsert(root, pack_path, {**sidecar, "verified_at": utc_now_iso()})
-    report.update(unlink_loose(root, task_id, generations, keep_shas=keep_shas))
+    report.update(unlink_loose(root, task_id, generations, keep_shas=keep_shas, revision=revision))
     record(phase="packed", **report)
     return report
 

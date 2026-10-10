@@ -273,3 +273,48 @@ def test_unknown_settlement_sources_block_until_repaired(root, source):
     assert not packs.task_settled(root, "unknown")
     path.write_text("{}", encoding="utf-8")
     assert packs.task_settled(root, "unknown")
+
+
+@pytest.mark.parametrize("change", ["resume", "new_reference"])
+def test_unlink_rereads_facts_and_references_after_compression(root, monkeypatch, change):
+    refs, handle = _task(root, "packing", blobs=1)
+    _task(root, "other", status="running", blobs=1)
+    write = packs.write_pack
+
+    def publish(*args, **kwargs):
+        result = write(*args, **kwargs)
+        if change == "resume":
+            _result(root, "packing", "running")
+        else:
+            path = root / "observability/calls/other/new.json"
+            path.write_text(json.dumps(refs[0]), encoding="utf-8")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(packs, "write_pack", publish)
+        report = packer.run_pass(root)
+    assert report["faults"] == 0 and _loose(refs[0])
+    if change == "resume":
+        assert _handle_path(root, "packing", handle).exists()
+        assert "packing" in packer.changed_tasks(root)
+    _result(root, "packing")
+    _result(root, "other")
+    assert packer.run_pass(root)["faults"] == 0
+    assert not _loose(refs[0]) and not _handle_path(root, "packing", handle).exists()
+
+
+def test_compression_is_outside_result_and_publication_locks(root, monkeypatch):
+    from ouroboros import task_custody, utils
+    from ouroboros.task_results import task_result_path
+
+    _task(root, "unlocked", blobs=1)
+    write = packs.write_pack
+
+    def compress(*args, **kwargs):
+        with task_custody.task_custody_lock(root, "unlocked", timeout_sec=0) as acquired:
+            assert acquired
+            utils.update_json_locked(task_result_path(root, "unlocked"), lambda current: None, timeout_sec=0)
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(packs, "write_pack", compress)
+    assert packer.run_pass(root)["faults"] == 0

@@ -76,14 +76,14 @@ def swept_stamps(root: pathlib.Path) -> Optional[Dict[str, str]]:
         return None
 
 
-def record_swept(root: pathlib.Path, task_id: str) -> None:
+def record_swept(root: pathlib.Path, task_id: str, stamps: str) -> None:
     import sqlite3
 
     from ouroboros import store
 
     with contextlib.suppress(store.StoreError, sqlite3.Error, OSError):
         with packs.open_index(root, write=True) as conn:
-            conn.execute("INSERT OR REPLACE INTO swept VALUES (?,?)", (task_id, task_stamps(root, task_id)))
+            conn.execute("INSERT OR REPLACE INTO swept VALUES (?,?)", (task_id, stamps))
 
 
 def changed_tasks(root: pathlib.Path) -> List[str]:
@@ -118,11 +118,12 @@ def ordered_candidates(root: pathlib.Path, settled: List[str]) -> List[Tuple[str
     return [(task, raw) for task, raw, _ in recent + backfill]
 
 
-def live_manifest_shas(root: pathlib.Path, settled: set) -> set:
+def live_manifest_shas(root: pathlib.Path) -> set:
     """Shas any NON-settled task's manifests reference: those loose blobs stay."""
     keep: set = set()
-    for task in _loose_task_ids(root) - settled:
-        keep.update(sha256 for _, sha256, _ in packs.manifest_blob_refs(root, task))
+    for task in _loose_task_ids(root):
+        if not packs.task_settled(root, task):
+            keep.update(sha256 for _, sha256, _ in packs.manifest_blob_refs(root, task))
     return keep
 
 
@@ -133,21 +134,21 @@ def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
     root = pathlib.Path(root)
     report: Dict[str, Any] = {"status": "completed", "packed": 0, "candidates": 0, "raw": 0, "compressed": 0,
                               "unlinked": 0, "kept": 0, "busy": 0, "faults": 0, "archived": 0}
-    facts = {task: packs.task_settlement_facts(root, task) for task in changed_tasks(root)}
+    revisions = {task: task_stamps(root, task) for task in changed_tasks(root)}
+    facts = {task: packs.task_settlement_facts(root, task) for task in revisions}
     settled = {task for task, fact in facts.items() if packs.facts_settled(fact)}
     for task, fact in facts.items():
         if task not in settled and fact["money_open"] is False:
-            record_swept(root, task)  # blocked by status, obligations or open work: re-read when it changes
+            record_swept(root, task, revisions[task])
     candidates = ordered_candidates(root, sorted(settled))
     report["candidates"] = len(candidates)
-    keep = live_manifest_shas(root, settled) if candidates else set()
     listing = packs.list_sidecars(root)
     for task, raw in candidates:
         if stop():
             report["status"] = "unknown"
             break
         try:
-            outcome = packs.pack_task(root, task, keep_shas=keep, listing=listing,
+            outcome = packs.pack_task(root, task, keep_shas=set(), listing=listing,
                                       record=lambda **facts: packs.record_storage_pack(root, **facts))
         except Exception as exc:
             report["faults"] += 1
@@ -159,8 +160,8 @@ def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
         report["compressed"] += int(outcome.get("packed") or 0)
         for key in ("unlinked", "kept", "busy"):
             report[key] += int(outcome.get(key) or 0)
-        if not outcome.get("busy"):
-            record_swept(root, task)
+        if not outcome.get("busy") and not outcome.get("deferred"):
+            record_swept(root, task, revisions[task])
     try:
         report["archived"] = packs.archive_usage_segments(root)["archived"]
     except Exception as exc:

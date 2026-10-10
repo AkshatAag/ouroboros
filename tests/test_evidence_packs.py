@@ -262,6 +262,7 @@ def test_no_unlink_before_on_disk_reverify(root, monkeypatch):
     monkeypatch.setattr(os, "unlink", unlink)
     _run(root)
     assert order and order[0] == "verify" and order.count("unlink") == 3
+    _run(root)  # acknowledge our handle-directory deletion, without stamping an unseen revision
     # and a failing verification keeps every loose file
     refs2, handle2 = _task(root, "task-b", blobs=1)
     monkeypatch.setattr(packs, "verify_pack", lambda *a: (_ for _ in ()).throw(packs.EvidenceCorrupt("evidence_corrupt: test")))
