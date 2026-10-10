@@ -204,6 +204,34 @@ def test_the_name_tier_is_recorded_from_the_boot_probe(tmp_path, monkeypatch):
     assert load(root, "done1")["status"] == "failed"  # readable through the name lock
 
 
+def test_the_boot_probe_retiers_an_existing_store_both_ways(tmp_path, monkeypatch):
+    """The tier the kernel enforces today governs a store built under the other one: the
+    header and ``meta.lock_tier`` follow it in place, the rows stay, the open mode follows."""
+    from ouroboros import platform_layer
+
+    root = fixture_root(tmp_path)
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path: True)
+    assert ensure_current_store(root, with_children=False)["lock_tier"] == store.TIER_ENFORCED
+    store.update_task(root, "done1", lambda current: {**current, "db_era": True})
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path: False)  # the directory moved to NFS
+    report = ensure_current_store(root, with_children=False)
+    assert (report["status"], report["lock_tier"], report["retiered_from"]) == ("unchanged", store.TIER_NAME, store.TIER_ENFORCED)
+    assert store.probe(root) == ("present", store.TIER_NAME) and meta(root, "lock_tier") == store.TIER_NAME
+    assert load(root, "done1")["db_era"] is True and meta(root, "phase") == store.PUBLISHED
+    locks: list = []
+    real_name_lock = store.name_lock
+    monkeypatch.setattr(store, "name_lock", lambda root_, name, **kw: locks.append(name) or real_name_lock(root_, name, **kw))
+    store.update_task(root, "done1", lambda current: {**current, "name_era": True})
+    assert locks == [store.LOCK_NAME]  # the write went through the name lock: the open mode followed the tier
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path: True)  # and back
+    report = ensure_current_store(root, with_children=False)
+    assert (report["lock_tier"], report["retiered_from"]) == (store.TIER_ENFORCED, store.TIER_NAME)
+    assert store.probe(root) == ("present", store.TIER_ENFORCED) and meta(root, "lock_tier") == store.TIER_ENFORCED
+    locks.clear()
+    assert load(root, "done1")["name_era"] is True and locks == []  # kernel locks again: no name lock taken
+    assert "retiered_from" not in ensure_current_store(root, with_children=False)
+
+
 # ---- export -------------------------------------------------------------------------
 
 def test_the_export_reproduces_every_file_byte_for_byte(tmp_path):

@@ -5,7 +5,10 @@ the sibling build with ``synchronous=FULL``, ``meta`` (provenance, counts, the f
 instant, the per-file content baseline: size, mtime_ns and sha256 of every frozen
 ``task_results/*.json``) written before publication, publish by ``os.replace`` plus a
 directory fsync, the generation stamp after; a published but unstamped store is
-accepted by its own ``meta``; every own child drive down the tree (``descendant_drives``,
+accepted by its own ``meta``; the lock tier is re-probed on every boot and governs an
+EXISTING store too: a header naming the other tier is re-tiered in place (application id
+and ``meta.lock_tier``) under the import lock before any writer opens it, so the open
+mode follows what the kernel enforces today; every own child drive down the tree (``descendant_drives``,
 over ``task_custody.own_child_drives``) gets its own store by the same code; inadmissible rows are quarantined at import
 through the existing emitter; the cancel-latch migration runs as the first pass.
 Reconciliation (a published store found at boot) is per row against the baseline: a
@@ -116,28 +119,31 @@ def ensure_current_store(root: Any, *, with_children: bool = True) -> Dict[str, 
 
 
 def _ensure(root: pathlib.Path, path: pathlib.Path) -> Tuple[Dict[str, Any], list]:
+    from ouroboros.platform_layer import kernel_file_locks_enforced
     from ouroboros.startup_migrations import stamp
 
-    state, _tier = store.probe(root)
+    state, header = store.probe(root)
+    tier = TIER_ENFORCED if kernel_file_locks_enforced(root / "state" / LOCK_NAME) else TIER_NAME
     if state == "present":
-        with store.open_store(root, write=True) as txn:
+        retiered = {"retiered_from": header} if header != tier else {}
+        with store.open_store(root, write=True) as txn:  # opened under the header's protocol, left under today's
+            if retiered:
+                txn.conn.execute(f"PRAGMA application_id = {store._APPLICATION_ID[tier]}")
+                txn.set_meta("lock_tier", tier)
             phase = txn.phase()
             if phase == PUBLISHED:
-                report = _reconcile(root, txn)
+                report, quarantined = _reconcile(root, txn)
             export = txn.meta("export") or {}
         if phase == PUBLISHED:
             if not store.generation_stamped(root):
                 stamp(root, **{GENERATION_KEY: GENERATION})  # the stamp a crash after publication never wrote
-            return report
+            return {**report, "lock_tier": tier, **retiered}, quarantined
         if export.get("status") != "completed":
-            return {"status": "switch_pending", "phase": phase}, []  # the seam resumes it; nothing moves here
+            return {"status": "switch_pending", "phase": phase, "lock_tier": tier, **retiered}, []  # the seam resumes it
         stamp(root, **{GENERATION_KEY: None})  # before the rename: absent + stamped is always a loss
         os.replace(path, path.with_name(f"{path.name}.exported-{utc_stamp()}"))  # a full rebuild after a proven complete export
     elif store.generation_stamped(root):
         raise StoreLost(f"current store missing beside its completed stamp: {path}")
-    from ouroboros.platform_layer import kernel_file_locks_enforced
-
-    tier = TIER_ENFORCED if kernel_file_locks_enforced(root / "state" / LOCK_NAME) else TIER_NAME
     return _build_and_publish(root, path, tier)
 
 
