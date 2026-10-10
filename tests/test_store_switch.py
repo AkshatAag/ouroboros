@@ -197,7 +197,7 @@ def test_the_seam_exports_consumes_the_intent_retires_the_store_and_only_then_sw
     assert seen["intent"] is False and seen["facts_store"] == "absent" and seen["money_store"] is False
     assert seen["journal"] is True and seen["receipt"]["export"]["status"] == "completed"
     assert seen["receipt"]["steps"]["money"]["status"] == "completed"
-    assert seen["receipt"]["steps"]["handles"] == {"status": "no_packs"}
+    assert seen["receipt"]["steps"]["handles"] == {"status": "no_packs", "handles": 0, "bytes": 0, "packs": 0}
     assert len(seen["retired_facts"]) == 1 and len(seen["retired_money"]) == 1
     assert snapshot(root) == expected  # the files the old body reads are the ones the store imported
     assert receipt(root)["switched"]["ok"] is True
@@ -220,7 +220,7 @@ def test_a_target_with_the_store_switches_without_an_export(switch_root, target_
     assert state(root) == {"intent": False, "facts_store": "present", "money_store": True, "journal": True,
                            "retired_facts": [], "retired_money": []}
     assert meta(root, "phase") == store.PUBLISHED
-    assert receipt(root)["steps"].get("handles") == {"status": "no_packs"}
+    assert receipt(root)["steps"].get("handles") == {"status": "no_packs", "handles": 0, "bytes": 0, "packs": 0}
 
 
 def test_an_unconfirmed_stop_refuses_before_anything_moves(switch_root, target_repo):

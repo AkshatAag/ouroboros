@@ -853,6 +853,15 @@ def _member_key(member: Dict[str, Any]) -> tuple:
     return member["kind"], member["sha256"], str(member.get("path") or "")
 
 
+@contextlib.contextmanager
+def _unlink_phase(root: Any) -> Iterator[bool]:
+    """Serialize loose deletion with the switch's phase change, without creating a store."""
+    present, _ = store.probe(root)
+    with (store.open_store(root, write=True) if present == "present" else contextlib.nullcontext()) as txn:
+        yield (txn.phase() == store.PUBLISHED if txn is not None else
+               not (store.generation_stamped(root) or store.retired_sibling(root)))
+
+
 def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set, revision: str) -> Dict[str, int]:
     """Remove loose files whose bytes a VERIFIED pack holds; a blob some non-settled task's
     manifests still reference (``keep_shas``) stays loose. A busy file is retried next pass."""
@@ -892,9 +901,11 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
             return remove(current)
 
     # Compression precedes custody -> result -> manifest publication locks.
-    with task_custody_lock(root, task_id) as acquired:
-        if acquired:
-            update_json_locked(task_result_path(root, task_id, create=False), locked_remove, strict_existing_dict=True)
+    with _unlink_phase(root) as allowed:
+        if allowed:
+            with task_custody_lock(root, task_id) as acquired:
+                if acquired:
+                    update_json_locked(task_result_path(root, task_id, create=False), locked_remove, strict_existing_dict=True)
     return report
 
 
@@ -958,7 +969,10 @@ def archive_usage_segments(root: Any) -> Dict[str, int]:
                     check.update(chunk)
             if check.hexdigest() != digest.hexdigest():
                 raise EvidenceCorrupt(f"evidence_corrupt: archived segment {target.name} failed verification")
-            source.unlink()
+            with _unlink_phase(root) as allowed:
+                if not allowed:
+                    continue
+                source.unlink()
             report["archived"] += 1
             report["bytes"] += size
             report["compressed"] += target.stat().st_size

@@ -469,3 +469,75 @@ def test_unpacker_is_published_before_unlink_and_write_failure_keeps_loose(root,
     monkeypatch.setattr(os, "unlink", unlink)
     assert packer.run_pass(root)["faults"] == 0
     assert not any(path.exists() for path in loose)
+
+
+def test_exporting_phase_keeps_loose_evidence_until_published_again(root):
+    from ouroboros import store, store_import
+
+    refs, handle = _task(root, "phase", blobs=1)
+    store_import.ensure_current_store(root)
+    with store.open_store(root, write=True) as txn:
+        txn.set_meta("phase", store.EXPORTING)
+    report = packer.run_pass(root)
+    assert report["faults"] == 0 and report["unlinked"] == 0
+    assert _loose(refs[0]) and _handle_path(root, "phase", handle).exists()
+    with store.open_store(root, write=True) as txn:
+        txn.set_meta("phase", store.PUBLISHED)
+    assert packer.run_pass(root)["unlinked"] == 2
+
+
+def test_switch_preflight_refuses_corrupt_sidecar_before_export_or_owner(root, monkeypatch):
+    from ouroboros import store, store_import, store_switch
+
+    _task(root, "switch", blobs=1)
+    packer.run_pass(root)
+    sidecar = packs.packs_dir(root) / "switch.members.json"
+    original = sidecar.read_bytes()
+    sidecar.write_text("{", encoding="utf-8")
+    store_import.ensure_current_store(root)
+    monkeypatch.setattr(store_switch, "switch_needs", lambda *a: {"handles": True, "money": False, "facts": True})
+    monkeypatch.setattr(store_import, "export_facts", lambda *a: pytest.fail("export before corrupt-sidecar refusal"))
+    store_switch.record_switch_intent(root, target_sha="example-target", target_ref="example", reason="test", door="ui_rollback")
+    report = store_switch.run_switch_seam(root, repo_dir=root, owner=lambda *a: pytest.fail("owner called"))
+    assert report["status"] == "refused" and "SidecarCorrupt" in report["reason"]
+    with store.open_store(root, write=False) as txn:
+        assert txn.phase() == store.PUBLISHED
+    sidecar.write_bytes(original)
+    assert store_switch._handle_restore_bytes(root) == packs.pending_restore_bytes(root) > 0
+
+
+@pytest.mark.parametrize("leader", [True, False])
+def test_packer_child_is_custody_blocker_until_exit_is_confirmed(root, monkeypatch, leader):
+    from ouroboros import process_custody
+
+    entry = {"pid": 4242, "pgid": 4242, "purpose": "evidence_packer", "scope": "session"}
+    alive, signals = [True], []
+    monkeypatch.setattr(process_custody, "_read_ledger_records", lambda *a, **k: (True, [entry], b""))
+    monkeypatch.setattr(process_custody, "_fingerprint_matches", lambda e: alive[0] and leader)
+    monkeypatch.setattr(process_custody, "process_group_has_live_members", lambda pgid: alive[0])
+    monkeypatch.setattr(process_custody, "_rewrite_ledger", lambda *a, **k: None)
+    monkeypatch.setattr(process_custody, "kill_process_group_id", lambda pid: signals.append(pid))
+    assert process_custody.quiesce_custodied_services(root, timeout_sec=0) == (False, ["custody_service:4242"])
+    assert signals == [4242]
+    alive[0] = False
+    assert process_custody.quiesce_custodied_services(root, timeout_sec=0) == (True, [])
+
+
+@pytest.mark.parametrize("door", ["run_switch_seam", "resume_pending_switch"])
+def test_switch_doors_restore_handles_by_default_before_owner(root, monkeypatch, door):
+    from ouroboros import store_switch
+
+    raw = b"checkpoint before the old body starts"
+    _, handle = _task(root, "restore", blobs=1, handle=raw)
+    packer.run_pass(root)
+    target = _handle_path(root, "restore", handle)
+    assert not target.exists()
+    monkeypatch.setattr(store_switch, "switch_needs", lambda *a: {"handles": True, "money": False, "facts": False})
+    monkeypatch.setattr(store_switch, "rev_parse", lambda *a: "example-target")
+    store_switch.record_switch_intent(root, target_sha="example-target", target_ref="example", reason="test", door="ui_rollback")
+
+    def owner(_):
+        assert target.read_bytes() == raw
+        return True, "example switched"
+
+    assert getattr(store_switch, door)(root, repo_dir=root, owner=owner)["status"] == "switched"

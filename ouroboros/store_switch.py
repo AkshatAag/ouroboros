@@ -11,8 +11,8 @@ worker is dead (``store_boot.switch_at_restart`` from ``server._check_restart``)
 preflight (nothing moves on failure; a refusal is a normal restart on the current code
 plus a reason for the owner) -> phase ``exporting`` in every store -> facts
 (``store_import.export_facts`` per root) -> money (``usage_store.export_journal`` when the
-target lacks ``usage_store.py``), idempotent through the switch receipt -> handles (an
-interface the packing stage fills; «no packs» now) -> fsync -> ``export.status=completed``
+target lacks ``usage_store.py``), idempotent through the switch receipt -> handles (the packing stage
+restores every retained checkpoint prefix) -> fsync -> ``export.status=completed``
 + receipt -> the intent is CONSUMED -> the stores are retired -> the SAME switching owner
 the door used to call runs (``switching_owner``, bound to the intent's target and reason;
 HEAD is verified against the target after it returns) -> the caller exits 42 or re-execs. A
@@ -32,7 +32,7 @@ import shutil
 import subprocess
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
-from ouroboros import store, store_import, usage_store
+from ouroboros import evidence_packs, store, store_import, usage_store
 from ouroboros.store import EXPORTING, GENERATION_KEY, PUBLISHED, RETIRED
 from ouroboros.store_import import sha256_hex as _sha, supervisor_row, utc_stamp as _stamp
 from ouroboros.usage_ledger import LEDGER_REL, UsageAccountingError
@@ -199,7 +199,7 @@ def _largest_result_bytes(roots: Sequence[pathlib.Path]) -> int:
 
 
 def _handle_restore_bytes(root: pathlib.Path) -> int:
-    return 0  # the packing stage's `evidence_packs.pending_restore_bytes(root)`: the handles' raw bytes the A+ restore writes
+    return evidence_packs.pending_restore_bytes(root)
 
 
 def _money_refusal(root: pathlib.Path, receipt: Dict[str, Any]) -> str:
@@ -315,7 +315,7 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
     ``blockers`` are the names of writers whose stop the caller could not confirm (the
     census of killed workers, the packer through process custody); any name refuses the
     switch. ``owner`` defaults to the door's own switching owner; ``restore_handles`` is the
-    packing stage's A+ restore and reports no packs until it exists."""
+    packing stage's A+ restore, including retained descendant drives."""
     root = pathlib.Path(root)
     intent = read_switch_intent(root)
     if intent is None:
@@ -332,7 +332,10 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
     needs = switch_needs(repo_dir, intent["target_sha"])
     roots, refusal = _roots(root) if needs["facts"] else ([], "")
     _progress(root, "preflight", needs=needs, attempt=receipt["attempts"])
-    refusal = refusal or _preflight(root, needs, receipt, roots)
+    try:
+        refusal = refusal or _preflight(root, needs, receipt, roots)
+    except (OSError, store.StoreError, UsageAccountingError) as exc:
+        refusal = f"{type(exc).__name__}: {exc}"
     if refusal:
         return _refuse(root, intent, receipt, refusal)
     try:
@@ -352,7 +355,7 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
             _write_receipt(root, receipt)
         if needs["handles"]:
             _progress(root, "handles")
-            steps["handles"] = restore_handles(root) if restore_handles else {"status": "no_packs"}
+            steps["handles"] = (restore_handles or evidence_packs.restore_checkpoint_handles)(root)
             _write_receipt(root, receipt)
     except (OSError, store.StoreError, UsageAccountingError) as exc:
         receipt["export"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "at": utc_now_iso()}
@@ -402,7 +405,8 @@ def resume_pending_switch(root: Any, *, repo_dir: Any, owner: Optional[Owner] = 
     ran is reported (the owner presses the door again), never replayed."""
     root = pathlib.Path(root)
     if read_switch_intent(root) is not None:
-        return run_switch_seam(root, repo_dir=repo_dir, owner=owner, blockers=blockers, restore_handles=restore_handles)
+        return run_switch_seam(root, repo_dir=repo_dir, owner=owner, blockers=blockers,
+                               restore_handles=restore_handles or evidence_packs.restore_checkpoint_handles)
     receipt = read_json_dict(root / RECEIPT_REL) or {}
     if (receipt.get("export") or {}).get("status") == "completed" and not receipt.get("switched"):
         receipt["switched"] = {"ok": False, "message": "the switch never ran after the export", "at": utc_now_iso()}

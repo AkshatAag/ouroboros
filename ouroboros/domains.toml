@@ -1095,6 +1095,7 @@ lazy_only = [
   "D20->D09",
   "D20->D11",
   "D20->D12",
+  "D20->D16",
 ]
 # Cross-domain pairs created by resolved dynamic imports (importlib/__import__).
 dynamic_pairs = []
