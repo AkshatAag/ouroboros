@@ -5,6 +5,8 @@ import gzip
 import hashlib
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -72,6 +74,57 @@ def test_exact_whole_document_and_string_projection(ctx):
     collision = call(ctx, op="json", kind="review_ledger", ids=["review-one"], select="a", save_as="record.json")
     assert collision["status"] == "error" and "collision" in collision["message"]
     assert saved(ctx, whole) == raw
+
+
+@pytest.mark.parametrize("same_bytes", [False, True])
+def test_concurrent_exports_publish_exclusively(ctx, monkeypatch, same_bytes):
+    payloads = [b'{"value":"first"}', b'{"value":"first"}' if same_bytes else b'{"value":"second"}']
+    for index, raw in enumerate(payloads):
+        write(ctx, f"state/review_ledger/source-{index}.json", raw)
+    ready, first_done, worker = threading.Barrier(2), threading.Event(), threading.local()
+    original_write = artifacts.write_bytes_atomic
+
+    def publish(path, data):
+        ready.wait(timeout=10)  # Both writers reach publication before either publishes.
+        if worker.index == 1:
+            assert first_done.wait(timeout=10)
+        return original_write(path, data)
+
+    def export(index):
+        worker.index = index
+        try:
+            result = call(ctx, op="json", kind="review_ledger", ids=[f"source-{index}"], save_as="shared.json")
+            if index == 0:
+                assert result["status"] == "ok", result
+                assert saved(ctx, result) == payloads[0]
+            return result
+        finally:
+            if index == 0:
+                first_done.set()
+
+    monkeypatch.setattr(artifacts, "write_bytes_atomic", publish)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = list(pool.map(export, range(2)))
+    if same_bytes:
+        assert second["status"] == "ok", second
+        assert saved(ctx, second) == payloads[0]
+    else:
+        assert second["status"] == "error" and "collision" in second["message"], second
+    assert saved(ctx, first) == payloads[0]
+    artifact_dir = artifacts.task_artifact_dir_path(ctx.drive_root, ctx.task_id)
+    assert not list(artifact_dir.glob(".*.tmp"))
+
+
+def test_artifact_publication_failure_removes_temporary(ctx, monkeypatch):
+    def fail_link(*args):
+        raise OSError("publication failed")
+
+    monkeypatch.setattr(artifacts.os, "link", fail_link)
+    with pytest.raises(OSError, match="publication failed"):
+        artifacts.store_task_artifact_bytes(ctx.drive_root, ctx.task_id, "failed.json", b"{}")
+    artifact_dir = artifacts.task_artifact_dir_path(ctx.drive_root, ctx.task_id)
+    assert not (artifact_dir / "failed.json").exists()
+    assert not list(artifact_dir.glob(".*.tmp"))
 
 
 @pytest.mark.parametrize("kind,path", [("queue_snapshot", "state/queue_snapshot.json"),

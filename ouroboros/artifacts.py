@@ -1258,13 +1258,9 @@ def store_task_artifact_bytes(
     *,
     kind: str = "task_artifact",
 ) -> Dict[str, Any]:
-    """Persist immutable task-owned bytes and register the actor-readable file.
+    """Publish immutable actor-readable bytes; reuse equal bytes, refuse collisions.
 
-    This is the byte-oriented twin of ``copy_file_to_task_artifacts`` for
-    producers that already own canonical bytes. Existing-valid-content wins;
-    a name collision with different bytes is refused instead of rewriting a
-    durable authority ref.
-    """
+    Byte-oriented twin of ``copy_file_to_task_artifacts`` for canonical bytes."""
     safe_name = pathlib.Path(str(name or "")).name
     if not safe_name or safe_name in {".", ".."} or safe_name != str(name):
         raise ValueError("task artifact name must be one plain filename")
@@ -1272,12 +1268,16 @@ def store_task_artifact_bytes(
         raise ValueError("task artifact name is reserved")
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
     path = artifact_dir / safe_name
-    if path.exists():
-        existing = path.read_bytes()
-        if existing != data:
-            raise ValueError(f"task artifact collision: {safe_name}")
-    else:
-        write_bytes_atomic(path, data)
+    temporary = path.with_name(f".{uuid.uuid4().hex}.tmp")
+    try:
+        write_bytes_atomic(temporary, data)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_bytes() != data:
+                raise ValueError(f"task artifact collision: {safe_name}")
+    finally:
+        temporary.unlink(missing_ok=True)
     record = {**artifact_record(path, kind=kind), "immutable": True}
     _register_task_artifact_records(artifact_dir, [record])
     return {
