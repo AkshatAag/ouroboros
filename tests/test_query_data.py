@@ -258,7 +258,8 @@ def test_blob_exact_bytes_projection_limits_and_packed_resolver(ctx, monkeypatch
 
 
 def test_money_defaults_snapshot_and_missing_packs_are_typed(ctx, monkeypatch):
-    from ouroboros import query_data_sql
+    from ouroboros import query_data_sql, usage_store
+    usage_store.migrate_from_journal(ctx.drive_root)
     requests = []
     monkeypatch.setattr(query_data_sql, "run_sql", lambda *a, **kw: requests.append(kw) or {"status": "ok", "data": 1})
     for snapshot in (None, False):
@@ -314,6 +315,45 @@ def test_real_registry_light_children_and_typed_errors(ctx, monkeypatch):
         assert denied.status == "error", denied.text
     schema = get_tools()[0].schema["parameters"]
     assert "path" not in schema["properties"] and "root" not in schema["properties"]
+
+
+@pytest.mark.parametrize("retained_store", [True, False])
+def test_native_inspection_queries_stay_on_selected_data_plane(ctx, retained_store):
+    from ouroboros.review_native_episode import inspection_registry
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tool_access import canonical_data_root
+    from ouroboros.usage_accounting import UsageScope, usage_scope
+
+    write_task_result(ctx.drive_root, "caller", "running", root_task_id="caller")
+    retained = ctx.drive_root / "retained-review"
+    retained.mkdir()
+    if retained_store:
+        store_import.ensure_current_store(retained, with_children=False)
+        store.update_task(retained, "caller", lambda _: {"status": "failed", "result": "retained"})
+    retained_ctx = ToolContext(repo_dir=ctx.repo_dir, drive_root=retained, task_id="caller")
+    for relative in ("state/review_ledger/record.json", "state/skills/example/review_job.json"):
+        write(ctx, relative, b'{"plane":"live"}')
+        write(retained_ctx, relative, b'{"plane":"retained"}')
+    with usage_scope(UsageScope(drive_root=ctx.drive_root, task_id="caller", root_task_id="caller")):
+        registry, inspection, _ = inspection_registry(str(ctx.repo_dir), retained, "reviewer")
+        assert inspection.drive_root == retained
+        assert inspection.task_id == "caller" and inspection.task_lifecycle_bound
+        assert canonical_data_root(inspection) == ctx.drive_root  # Budget/Pause keep their owner.
+        task = registry.execute_result("query_data", {"op": "json", "kind": "task_result", "ids": ["caller"], "select": "result"})
+        facts = registry.execute_result("query_data", {"op": "sql", "query": "SELECT status FROM tasks"})
+        if retained_store:
+            assert task.status == "ok" and json.loads(task.text)["data"] == "retained", task.text
+            assert facts.status == "ok" and json.loads(facts.text)["data"]["rows"] == [["failed"]], facts.text
+        else:
+            for result in (task, facts):
+                assert result.status == "unavailable", result.text
+                assert json.loads(result.text)["code"] == "not_found"
+            assert not store.store_path(retained).exists()
+        file_read = registry.execute_result("read_file", {"root": "runtime_data", "path": "state/review_ledger/record.json"})
+        assert file_read.status == "ok" and '"plane":"retained"' in file_read.text, file_read.text
+        for kind, identity in (("review_ledger", "record"), ("skill_state", "example")):
+            result = registry.execute_result("query_data", {"op": "json", "kind": kind, "ids": [identity]})
+            assert result.status == "ok" and json.loads(result.text)["data"] == {"plane": "retained"}, result.text
 
 
 def test_delivery_retains_the_complete_query_before_cut(ctx):

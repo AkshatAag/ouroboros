@@ -175,7 +175,7 @@ Outside Cyber Pro, read-only shell git is allowed everywhere; mutating shell git
 
 #### Native tool-round episode
 
-`review_native_episode.py::NativeToolRoundReviewExecutor` runs retrieving API rows (`delivery: native`) and deep self-review. Each logical attempt gets a fresh read-only registry: `read_file`, `list_files`, `search_code`, `query_code`, `vcs_status`, `vcs_diff`, `compact_context`, with `local_readonly_subagent` authority and network off. Commit, change and preflight review use the two-part brief; plan, skill and acceptance keep their own questions and output contracts.
+`review_native_episode.py::NativeToolRoundReviewExecutor` serves API rows (`delivery: native`) and deep self-review. Each attempt binds read-only tools to its selected data plane; budget/Pause keep canonical roots. Tools: `read_file`, `list_files`, `search_code`, `query_code`, `vcs_status`, `vcs_diff`, `compact_context`, under `local_readonly_subagent` with network off. Commit/change/preflight use two-part briefs; plan/skill/acceptance keep their contracts.
 
 P13 permits no round cap; physical sends meet the calibrated transcript bound (`OUROBOROS_REVIEW_NATIVE_MAX_TRANSCRIPT_CHARS` and the reviewer window), owner deadline/slot window, inspection-tool timeouts and per-send ledger admission. Mandatory sources can span successive working views; `native_multiple_windows_required` and `native_read_coverage` disclose the reading, never raise the bound, invalidate an answer/quorum seat, block a commit or buy a repeat. The reader in `tools/core_file_tools.py` stamps `native_tool_receipts` from `ctx.last_read_view` as `host_observed`, distinguishing bounded reads from full coverage without trusting the model's path spelling (§6 The coupling question (Part 2 of the brief)).
 

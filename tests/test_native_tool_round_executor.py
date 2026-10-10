@@ -388,7 +388,7 @@ def test_multi_call_round_withholds_reads_once_the_room_is_spent(subject_repo, m
     room left is WITHHELD — not executed — with a typed marker."""
     monkeypatch.setenv("OUROBOROS_REVIEW_NATIVE_MAX_TRANSCRIPT_CHARS", "50000")
     for name in ("a", "b", "c"):
-        (subject_repo / f"{name}.txt").write_text(name * 30_000, encoding="utf-8")
+        (subject_repo / f"{name}.txt").write_text(name * (20_000 if name == "a" else 30_000), encoding="utf-8")
     llm = _ScriptedLLM([
         {"tool_calls": [
             _tool_call("read_file", {"path": "a.txt"}, "c1"),

@@ -344,6 +344,7 @@ def inspection_registry(root: str, drive_root: Any, task_id: str = "") -> tuple[
         ctx.task_metadata = {"root_task_id": scope.root_task_id or scope.task_id,
                              "budget_drive_root": str(scope.drive_root or drive_root)}
         ctx.task_lifecycle_bound = True
+    ctx.task_metadata["native_data_root"] = str(drive_root)
     registry.set_context(ctx)
     schemas = [schema for schema in (registry.get_schema_by_name(name) for name in _INSPECTION_TOOL_NAMES) if schema]
     if not any(s["function"]["name"] == "compact_context" for s in schemas):

@@ -120,7 +120,8 @@ def _jsonl(path, where, tail, cap):
 
 def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap):
     if kind == "task_result":
-        _path(ctx, root, store.STORE_REL)
+        if not _path(ctx, root, store.STORE_REL).is_file():
+            raise FileNotFoundError("task store is unavailable in the selected data root")
         with store.open_store(root, write=False) as txn:
             size = txn.conn.execute("SELECT length(CAST(body AS BLOB)) FROM task_bodies WHERE task_id=?",
                                     (identity,)).fetchone()
@@ -174,7 +175,7 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             raise ValueError("source parameters do not belong to this operation")
         if op != "jsonl" and tail != 100 or kind != "skill_state" and state_file != "review_job":
             raise ValueError("tail is JSONL-only; state_file is skill_state-only")
-        canonical = canonical_data_root(ctx).resolve()
+        canonical = Path((ctx.task_metadata or {}).get("native_data_root") or canonical_data_root(ctx)).resolve()
         root = Path(ctx.drive_root).resolve()
         if child_task_id:
             root = _child_root(ctx, canonical, _name(child_task_id))
@@ -184,8 +185,8 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             if db not in {"current", "money", "packs"} or not isinstance(query, str) or not query.strip() or len(query) > 16384:
                 raise ValueError("sql requires db=current|money|packs and one query of at most 16384 characters")
             path = _path(ctx, root, sql.database_path(root, db).relative_to(root))
-            if db == "packs" and not path.is_file():
-                result = {"status": "unavailable", "code": "no_packs", "source": {"db": db}}
+            if not path.is_file():
+                result = {"status": "unavailable", "code": "no_packs" if db == "packs" else "not_found", "source": {"db": db}}
             else:
                 use_snapshot = db == "money" if snapshot is None else snapshot
                 source.update(db=db, query=query, snapshot=use_snapshot)
