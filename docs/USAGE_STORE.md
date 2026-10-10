@@ -179,9 +179,27 @@ the legacy-import watermark, aligns the `state.json` marker with the journal's
 own, and renames the store `usage.sqlite.exported-<UTC>`. A later upgrade
 imports that journal again, including what the older release added. The
 journal the import kept is set aside as `usage_attempts.jsonl.pre-export-<UTC>`;
-a journal that changed after the import, or one without a store, is never
-overwritten: move it aside by hand to export (the rows an older release added
-after the import are not in the store).
+a journal that changed after the import (its sha256 is neither the imported nor
+the exported one), or one without a store, is never overwritten: move it aside
+by hand to export (the rows an older release added after the import are not in
+the store).
+
+The export is one plan committed before any file moves. Under the write lock it
+computes the journal bytes and commits an export mark (`meta.export`: the
+journal's size, sha256 and row count, the names it will retire and set aside,
+the `state.json` marker it replaces) in the store itself. While that mark
+stands every write hold is refused typed (`UsageExportInProgress`; reads still
+serve), so a late writer cannot land a row the journal does not carry. Only then does it set the
+kept journal aside, write the new one, align the marker and rename the store.
+An interrupted export is resumed from the mark (the journal bytes are
+recomputed and must match the recorded digest; a retired store is recognised by
+the digest in its own mark, never by size) or abandoned by the in-app switch
+(`usage_store.abandon_export`): the store comes back first, then the journal,
+then the marker, and the mark is cleared last, so a crash inside the
+abandonment resumes it instead of leaving two authorities. Residual: a process
+that was not holding the lock when the export began sees the store gone only
+on its next access, where the import path brings the exported journal back in
+— the quiescence census the switch runs first is what keeps that path cold.
 
 ## 8. Explicit history audit
 

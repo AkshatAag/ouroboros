@@ -152,23 +152,26 @@ def _export_bytes(roots: Sequence[pathlib.Path]) -> int:
 
 
 def _money_refusal(root: pathlib.Path, receipt: Dict[str, Any]) -> str:
-    """The money exporter's own refusals, checked before anything moves (``usage_store.export_journal``)."""
-    if (receipt["steps"].get("money") or {}).get("status") == "completed":
+    """The money exporter's own refusals, checked before anything moves (``usage_store.export_refusal``):
+    a completed step whose journal is intact needs nothing; an interrupted one resumes."""
+    step = receipt["steps"].get("money") or {}
+    if step.get("status") == "completed" and _sha256_file(root / LEDGER_REL) == step["journal"]["sha256"]:
         return ""
-    kept, path = root / LEDGER_REL, root / usage_store.STORE_REL
-    if not kept.exists():
+    if _nothing_to_export(root):
         return ""
-    if not path.exists():
-        started = (receipt["steps"].get("money") or {}).get("status") == "started"
-        if started and any(name.startswith(path.name + ".exported-") for name in os.listdir(path.parent)):
-            return ""  # this export's own rename landed; the money step completes the receipt
-        return f"a journal exists without a store: {kept}"
-    with usage_store.hold(root, migrate=False, write=False) as txn:
-        imported = ((txn.meta("import") or {}).get("source") or {}).get("size")
-    own = (receipt["steps"].get("money") or {}).get("status") == "started" and kept.stat().st_size != imported
-    if kept.stat().st_size != imported and not own:
-        return f"the money journal changed after the import; move it aside to export: {kept}"
-    return ""
+    return usage_store.export_refusal(root, resume=step.get("status") in {"started", "completed"})
+
+
+def _nothing_to_export(root: pathlib.Path) -> bool:
+    """An install that never had money: neither a store nor a journal."""
+    return not (root / usage_store.STORE_REL).exists() and not (root / LEDGER_REL).exists()
+
+
+def _sha256_file(path: pathlib.Path) -> Optional[str]:
+    try:
+        return _sha(path.read_bytes())
+    except FileNotFoundError:
+        return None
 
 
 def _preflight(root: pathlib.Path, needs: Dict[str, bool], receipt: Dict[str, Any], roots: Sequence[pathlib.Path]) -> str:
@@ -188,51 +191,36 @@ def _preflight(root: pathlib.Path, needs: Dict[str, bool], receipt: Dict[str, An
 
 
 def _export_money(root: pathlib.Path, receipt: Dict[str, Any]) -> Dict[str, Any]:
-    """``usage_store.export_journal`` made idempotent by the receipt: a completed step with its
-    journal intact is skipped; an interrupted step recognises its own journal; a crash after
-    the store rename is completed from the facts on disk."""
+    """``usage_store.export_journal`` under the receipt: a completed step with its journal intact
+    is skipped; an interrupted step resumes through the store's own export mark (its journal
+    recognised by the mark's digest, a landed rename completed from the retired copy)."""
     step = receipt["steps"].get("money") or {}
-    kept, path = root / LEDGER_REL, root / usage_store.STORE_REL
-    if step.get("status") == "completed" and kept.exists() and _sha(kept.read_bytes()) == step["journal"]["sha256"]:
+    if step.get("status") == "completed" and _sha256_file(root / LEDGER_REL) == step["journal"]["sha256"]:
         return step
-    own = None
-    if step.get("status") == "started" and kept.exists():
-        if not path.exists() and any(name.startswith(path.name + ".exported-") for name in os.listdir(path.parent)):
-            retired = sorted(name for name in os.listdir(path.parent) if name.startswith(path.name + ".exported-"))[-1]
-            return {"status": "completed", "journal": {"path": str(kept), "size": kept.stat().st_size,
-                                                       "sha256": _sha(kept.read_bytes())}, "store_retired_as": retired,
-                    "completed_at": utc_now_iso()}
-        with usage_store.hold(root, migrate=False, write=False) as txn:
-            imported = ((txn.meta("import") or {}).get("source") or {}).get("size")
-        if kept.stat().st_size != imported:
-            own = _sha(kept.read_bytes())  # our own journal from the interrupted attempt
-    receipt["steps"]["money"] = {"status": "started", "started_at": utc_now_iso()}
+    if _nothing_to_export(root):
+        return {"status": "nothing_to_export", "completed_at": utc_now_iso()}
+    receipt["steps"]["money"] = {"status": "started", "started_at": step.get("started_at") or utc_now_iso()}
     _write_receipt(root, receipt)
-    pre_export = {name for name in os.listdir(kept.parent) if name.startswith(kept.name + ".pre-export-")}
-    result = usage_store.export_journal(root, own_journal_sha256=own)
-    set_aside = sorted({name for name in os.listdir(kept.parent) if name.startswith(kept.name + ".pre-export-")} - pre_export)
-    journal = result["journal"]
+    result = usage_store.export_journal(root, resume=True)
     return {"status": "completed", "completed_at": utc_now_iso(), "store_retired_as": result["store_retired_as"],
-            "pre_export_as": set_aside[-1] if set_aside else None, "marker": result["marker"],
-            "journal": {"path": journal["path"], "size": journal["size"], "sha256": journal["sha256"]}}
+            "pre_export_as": result["pre_export_as"], "marker": result["marker"],
+            "journal": {"path": str(root / LEDGER_REL), "size": result["journal"]["size"],
+                        "sha256": result["journal"]["sha256"]}}
 
 
 def _abandon(root: pathlib.Path, receipt: Dict[str, Any]) -> Dict[str, Any]:
-    """Restore both authorities after a partial export: the money store from its retired name
-    when the journal is byte-identical to the receipt, the facts stores back to published."""
+    """Restore both authorities after a partial export, resumably: the receipt records the
+    abandonment ``started`` first (a death inside resumes it at the next boot), the money
+    store comes back through ``usage_store.abandon_export`` (store, journal, marker, mark),
+    the facts stores back to published with their own partial writes absorbed."""
+    receipt["abandonment"] = {"status": "started", "at": utc_now_iso()}
+    _write_receipt(root, receipt)
     restored: Dict[str, Any] = {}
     money = receipt["steps"].get("money") or {}
-    kept, path = root / LEDGER_REL, root / usage_store.STORE_REL
-    if money.get("status") == "completed" and money.get("store_retired_as") and not path.exists():
-        retired = path.with_name(money["store_retired_as"])
-        if retired.exists() and kept.exists() and _sha(kept.read_bytes()) == money["journal"]["sha256"]:
-            kept.unlink()
-            if money.get("pre_export_as") and kept.with_name(money["pre_export_as"]).exists():
-                os.replace(kept.with_name(money["pre_export_as"]), kept)
-            os.replace(retired, path)
-            store.fsync_directory(path.parent)
-            usage_store.forget(root)
-            restored["money"] = "republished"
+    if money.get("status") in {"started", "completed"}:
+        moved = usage_store.abandon_export(root, retired_as=money.get("store_retired_as"))
+        if moved:
+            restored["money"] = moved
     for drive in _roots(root)[0]:
         with store.open_store(drive, write=True) as txn:
             if txn.phase() != PUBLISHED:
@@ -240,7 +228,7 @@ def _abandon(root: pathlib.Path, receipt: Dict[str, Any]) -> Dict[str, Any]:
                 txn.set_meta("phase", PUBLISHED)
                 txn.set_meta("export", {"status": "abandoned", "at": utc_now_iso(), **absorbed})
                 restored.setdefault("facts", []).append(str(drive))
-    receipt["abandoned"] = {"at": utc_now_iso(), **restored}
+    receipt["abandonment"] = {"status": "completed", "at": utc_now_iso(), **restored}
     _write_receipt(root, receipt)
     return restored
 
@@ -270,6 +258,8 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
     if intent is None:
         return {"status": "no_intent"}
     receipt = _receipt(root, intent)
+    if (receipt.get("abandonment") or {}).get("status") == "started":  # a death inside the abandonment: finish it
+        return _refuse(root, intent, receipt, "abandonment_resumed")
     receipt["attempts"] = int(receipt.get("attempts") or 0) + 1
     _write_receipt(root, receipt)
     if receipt["attempts"] > 2:

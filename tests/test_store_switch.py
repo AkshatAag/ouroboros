@@ -5,10 +5,12 @@ idempotent money step around every crash point, abandonment restoring both autho
 and the chain new -> old -> new with failures around the consume and the switch."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
 import shutil
+import sqlite3
 import subprocess
 
 import pytest
@@ -257,7 +259,8 @@ def test_a_crash_after_the_store_rename_before_the_receipt_completes_from_the_fa
 
 def test_abandonment_after_a_partial_export_restores_both_authorities(switch_root, target_repo):
     root, (repo, old, _new) = switch_root, target_repo
-    before = state(root)
+    before, journal_before = state(root), (root / LEDGER_REL).read_bytes()  # captured BEFORE the export
+    (root / "state" / "state.json").write_text(json.dumps({"usage_ledger_high_water_seq": [0, 40]}), encoding="utf-8")
     intent(root, old)
 
     def handles_fail(_root):
@@ -266,13 +269,25 @@ def test_abandonment_after_a_partial_export_restores_both_authorities(switch_roo
     report = store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(), restore_handles=handles_fail)
     assert report["status"] == "failed"
     assert state(root)["money_store"] is False and meta(root, "phase") == store.EXPORTING  # money exported, facts open
+    assert (root / LEDGER_REL).read_bytes() != journal_before  # the export's own journal is in place
+    assert json.loads((root / "state" / "state.json").read_text(encoding="utf-8"))["usage_ledger_high_water_seq"] != [0, 40]
     report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(), blockers=["packer:7"])
-    assert report["status"] == "refused" and report["restored"]["money"] == "republished"
+    assert report["status"] == "refused"
+    assert report["restored"]["money"] == {"store": "restored", "journal": "restored", "state_marker": "restored",
+                                           "mark": "cleared"}
     assert state(root) == {**before, "intent": False}
-    assert meta(root, "phase") == store.PUBLISHED and (root / LEDGER_REL).stat().st_size == before_journal_size(root)
-    with usage_store.read(root) as txn:  # the republished money store serves again
-        assert len(txn.attempts()) == 2
+    assert meta(root, "phase") == store.PUBLISHED
+    assert (root / LEDGER_REL).read_bytes() == journal_before  # the import-kept journal, byte for byte
+    assert not list((root / "state").glob("usage_attempts.jsonl.pre-export-*"))
+    assert json.loads((root / "state" / "state.json").read_text(encoding="utf-8"))["usage_ledger_high_water_seq"] == [0, 40]
+    with usage_store.read(root) as txn:  # the republished money store serves again, and takes writes
+        assert len(txn.attempts()) == 2 and txn.meta("export") is None
+    with usage_store.hold(root) as txn:
+        assert txn.writable
     assert store.update_task(root, "done1", lambda current: {**current, "after": "abandonment"})["after"] == "abandonment"
+    assert receipt(root)["abandonment"]["status"] == "completed"
+    intent(root, old)  # a new switch works after the abandonment
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "switched"
 
 
 def test_abandonment_after_a_partial_facts_export_keeps_the_db_only_rows(switch_root, target_repo, monkeypatch):
@@ -313,9 +328,100 @@ def test_abandonment_after_a_partial_facts_export_keeps_the_db_only_rows(switch_
     assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner()) == {"status": "nothing_pending"}
 
 
-def before_journal_size(root: pathlib.Path) -> int:
-    rows_ = (root / LEDGER_REL).read_text(encoding="utf-8").splitlines()
-    return sum(len(line.encode("utf-8")) + 1 for line in rows_)
+def retired_attempt_ids(root: pathlib.Path) -> list:
+    """The attempt ids inside the retired money store, read with plain sqlite."""
+    retired = sorted((root / "state").glob("usage.sqlite.exported-*"))[-1]
+    with sqlite3.connect(retired) as conn:
+        return sorted(r[0] for r in conn.execute("SELECT attempt_id FROM attempts WHERE kind != 'usage_baseline_group'"))
+
+
+def test_a_money_write_during_the_export_window_is_refused_typed(switch_root, target_repo, monkeypatch):
+    """From the export mark's commit until the store is retired no money write lands: a writer
+    arriving while the journal is being written gets ``UsageExportInProgress`` inside its own
+    transaction; the journal and the retired store hold the same attempts."""
+    from ouroboros import usage_journal
+    from ouroboros.usage_ledger import UsageExportInProgress
+
+    root, (repo, old, _new) = switch_root, target_repo
+    intent(root, old)
+    real, refused = usage_journal.write_journal, []
+
+    def late_writer_then_write(target, rows):
+        with pytest.raises(UsageExportInProgress):
+            with usage_store.hold(root) as txn:  # the late writer: refused before it can touch a row
+                txn.conn.execute("DELETE FROM attempts")
+        with usage_store.read(root) as txn:  # a reader is not refused
+            refused.append(len(txn.attempts()))
+        return real(target, rows)
+
+    monkeypatch.setattr(usage_journal, "write_journal", late_writer_then_write)
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "switched"
+    assert refused == [2]  # the late writer's DELETE never committed
+    journal_ids = sorted({str(row.get("attempt_id") or "") for row in usage_journal.read_journal_records(root)[0]
+                          if row.get("kind") not in {"usage_baseline", "usage_baseline_group"}} - {""})
+    assert journal_ids == retired_attempt_ids(root) and len(journal_ids) == 2
+
+
+def test_a_crash_right_after_the_money_store_rename_is_completed_on_resume(switch_root, target_repo, monkeypatch):
+    root, (repo, old, _new) = switch_root, target_repo
+    intent(root, old)
+    real_replace = os.replace
+
+    def die_after_the_rename(src, dst, *args, **kwargs):
+        real_replace(src, dst, *args, **kwargs)
+        if "usage.sqlite.exported-" in str(dst):
+            raise KeyboardInterrupt("died right after renaming the money store aside")
+
+    monkeypatch.setattr(os, "replace", die_after_the_rename)
+    with pytest.raises(KeyboardInterrupt):
+        store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert state(root)["money_store"] is False and state(root)["journal"] is True
+    assert receipt(root)["steps"]["money"]["status"] == "started"  # the receipt never saw the completion
+    owner = Owner()
+    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=owner)
+    assert report["status"] == "switched" and len(owner.calls) == 1
+    money = receipt(root)["steps"]["money"]
+    assert money["status"] == "completed" and len(state(root)["retired_money"]) == 1
+    assert money["journal"]["sha256"] == hashlib.sha256((root / LEDGER_REL).read_bytes()).hexdigest()
+    assert money["pre_export_as"] and (root / "state" / money["pre_export_as"]).exists()
+
+
+def test_a_crash_inside_the_abandonment_after_the_journal_step_resumes_it(switch_root, target_repo, monkeypatch):
+    root, (repo, old, _new) = switch_root, target_repo
+    journal_before = (root / LEDGER_REL).read_bytes()
+    intent(root, old)
+
+    def handles_fail(_root):
+        raise OSError("the handle restore died")
+
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(), restore_handles=handles_fail)["status"] == "failed"
+    real_replace = os.replace
+
+    def die_after_the_journal_comes_back(src, dst, *args, **kwargs):
+        real_replace(src, dst, *args, **kwargs)
+        if pathlib.Path(dst) == root / LEDGER_REL:
+            raise KeyboardInterrupt("died inside the abandonment, after the journal step")
+
+    monkeypatch.setattr(os, "replace", die_after_the_journal_comes_back)
+    with pytest.raises(KeyboardInterrupt):
+        store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(), blockers=["packer:7"])
+    monkeypatch.setattr(os, "replace", real_replace)
+    # the store is back and the journal is back, but the mark still freezes the store and the intent is in place
+    assert state(root)["money_store"] is True and (root / LEDGER_REL).read_bytes() == journal_before
+    assert receipt(root)["abandonment"]["status"] == "started" and (root / store_switch.INTENT_REL).exists()
+    with pytest.raises(usage_store.UsageExportInProgress):
+        with usage_store.hold(root):
+            pass
+    owner = Owner()
+    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=owner)  # the next boot finishes it
+    assert report["status"] == "refused" and report["reason"] == "abandonment_resumed" and not owner.calls
+    assert report["restored"]["money"] == {"mark": "cleared"} and receipt(root)["abandonment"]["status"] == "completed"
+    assert not (root / store_switch.INTENT_REL).exists() and meta(root, "phase") == store.PUBLISHED
+    with usage_store.hold(root) as txn:
+        assert txn.meta("export") is None and len(txn.attempts()) == 2
+    intent(root, old)  # a new switch works after the abandonment
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "switched"
 
 
 def test_a_second_failure_of_the_same_intent_is_a_refusal_never_a_loop(switch_root, target_repo):
