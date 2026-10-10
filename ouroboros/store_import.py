@@ -45,21 +45,22 @@ from ouroboros.utils import append_jsonl, atomic_write_json, utc_now_iso, write_
 Record = Tuple[str, Dict[str, Any]]
 
 
-def _sha(data: bytes) -> str:
+def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _stamp() -> str:
+def utc_stamp() -> str:
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 
 
-def _row(root: pathlib.Path, payload: Dict[str, Any]) -> None:
+def supervisor_row(root: pathlib.Path, kind: str, payload: Dict[str, Any]) -> None:
+    """One best-effort ``logs/supervisor.jsonl`` row of ``kind`` (the import's and the switch's)."""
     try:
-        append_jsonl(root / "logs" / "supervisor.jsonl", {"ts": utc_now_iso(), **payload})
+        append_jsonl(root / "logs" / "supervisor.jsonl", {"ts": utc_now_iso(), "type": kind, **payload})
     except Exception:
         import logging
 
-        logging.getLogger(__name__).warning("current store row not recorded", exc_info=True)
+        logging.getLogger(__name__).warning("%s row not recorded", kind, exc_info=True)
 
 
 def child_roots(root: Any) -> List[pathlib.Path]:
@@ -76,12 +77,9 @@ def child_roots(root: Any) -> List[pathlib.Path]:
     return drives
 
 
-def ensure_current_store(root: Any, *, rebuild: bool = False, with_children: bool = True) -> Dict[str, Any]:
-    """The one creator and importer; idempotent on every boot door (details: the module docstring).
-
-    ``rebuild`` sets a published store aside (``.stale-<UTC>``) and rebuilds from the files:
-    the explicit repair job's authority, never a reader's. Returns the report it also
-    writes to ``logs/supervisor.jsonl``."""
+def ensure_current_store(root: Any, *, with_children: bool = True) -> Dict[str, Any]:
+    """The one creator and importer; idempotent on every boot door (details: the module
+    docstring). Returns the report it also writes to ``logs/supervisor.jsonl``."""
     root = pathlib.Path(root)
     path = store.store_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,37 +89,36 @@ def ensure_current_store(root: Any, *, rebuild: bool = False, with_children: boo
             if name.startswith(path.name + ".import-"):
                 with contextlib.suppress(OSError):
                     (path.parent / name).unlink()  # an unfinished import never published: redone from scratch
-        report, quarantined = _ensure(root, path, rebuild=rebuild)
+        report, quarantined = _ensure(root, path)
     emit_quarantine_event(root, quarantined)
     if with_children:
-        report["child_roots"] = {str(drive): ensure_current_store(drive, rebuild=rebuild, with_children=False)["status"]
+        report["child_roots"] = {str(drive): ensure_current_store(drive, with_children=False)["status"]
                                  for drive in child_roots(root)}
     report["duration_seconds"] = round(time.monotonic() - started, 3)
-    _row(root, {"type": "current_store_import", "phase": report["status"],
-                **{key: value for key, value in report.items() if key != "child_roots"}})
+    supervisor_row(root, "current_store_import", {"phase": report["status"],
+                                                  **{key: value for key, value in report.items() if key != "child_roots"}})
     return report
 
 
-def _ensure(root: pathlib.Path, path: pathlib.Path, *, rebuild: bool) -> Tuple[Dict[str, Any], list]:
+def _ensure(root: pathlib.Path, path: pathlib.Path) -> Tuple[Dict[str, Any], list]:
     from ouroboros.startup_migrations import stamp
 
     state, _tier = store.probe(root)
     if state == "present":
         with store.open_store(root, write=True) as txn:
             phase = txn.phase()
-            if phase == PUBLISHED and not rebuild:
+            if phase == PUBLISHED:
                 report = _reconcile(root, txn)
             export = txn.meta("export") or {}
-        if phase == PUBLISHED and not rebuild:
+        if phase == PUBLISHED:
             if not store.generation_stamped(root):
                 stamp(root, **{GENERATION_KEY: GENERATION})  # the stamp a crash after publication never wrote
             return report
-        if phase != PUBLISHED and export.get("status") != "completed" and not rebuild:
+        if export.get("status") != "completed":
             return {"status": "switch_pending", "phase": phase}, []  # the seam resumes it; nothing moves here
-        aside = path.with_name(f"{path.name}.{'stale' if phase == PUBLISHED else 'exported'}-{_stamp()}")
-        os.replace(path, aside)  # a full rebuild: after a proven complete export, or the explicit repair
+        os.replace(path, path.with_name(f"{path.name}.exported-{utc_stamp()}"))  # a full rebuild after a proven complete export
         stamp(root, **{GENERATION_KEY: None})
-    elif store.generation_stamped(root) and not rebuild:
+    elif store.generation_stamped(root):
         raise StoreLost(f"current store missing beside its completed stamp: {path}")
     from ouroboros.platform_layer import kernel_file_locks_enforced
 
@@ -160,11 +157,8 @@ def _admit(path: pathlib.Path, raw: bytes) -> Tuple[Optional[Dict[str, Any]], st
     except ValueError:
         data = None
     refusal = task_result_schema_refusal(data)
-    if refusal:
-        moved = quarantine_task_result(path, refusal)
-        if moved == "kept_admissible":  # a concurrent write stamped it: read the admitted bytes
-            return _admit(path, path.read_bytes())
-        return None, refusal, "quarantined" if moved == "moved" else "refused"
+    if refusal:  # writers are quiescent: a row the quarantine finds admissible again stays refused here
+        return None, refusal, "quarantined" if quarantine_task_result(path, refusal) == "moved" else "refused"
     if str(data.get("task_id") or "") != path.stem:
         return None, "task_id_mismatch", "refused"
     return data, "", "admitted"
@@ -172,10 +166,10 @@ def _admit(path: pathlib.Path, raw: bytes) -> Tuple[Optional[Dict[str, Any]], st
 
 def _baseline_entry(path: pathlib.Path, raw: bytes, document: Optional[Dict[str, Any]], reason: str = "") -> Dict[str, Any]:
     info = path.stat()
-    entry = {"size": info.st_size, "mtime_ns": info.st_mtime_ns, "sha256": _sha(raw)}
+    entry = {"size": info.st_size, "mtime_ns": info.st_mtime_ns, "sha256": sha256_hex(raw)}
     if document is None:
         return {**entry, "refused": reason}  # remembered, so an untouched refused file stays untouched
-    return {**entry, "body_sha256": _sha(encode_document(document).encode("utf-8"))}
+    return {**entry, "body_sha256": sha256_hex(encode_document(document).encode("utf-8"))}
 
 
 def _read_results(root: pathlib.Path):
@@ -254,7 +248,7 @@ def _quarantine_copy(root: pathlib.Path, task_id: str, body: str) -> None:
     """The DB version of a row whose file an old body deleted: kept beside the quarantined bytes."""
     directory = task_results_dir(root) / TASK_RESULT_QUARANTINE_DIR
     directory.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(directory / f"{task_id}.deleted-{_stamp()}.json", body, fsync=True)
+    write_text_atomic(directory / f"{task_id}.deleted-{utc_stamp()}.json", body, fsync=True)
 
 
 def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
@@ -271,7 +265,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
         entry = baseline.get(path.stem)
         if entry is None or (info.st_size, info.st_mtime_ns) == (entry["size"], entry["mtime_ns"]):
             continue  # new (imported below) or untouched
-        if _sha(path.read_bytes()) == entry["sha256"]:  # touched, same bytes: timestamps prove nothing
+        if sha256_hex(path.read_bytes()) == entry["sha256"]:  # touched, same bytes: timestamps prove nothing
             baseline[path.stem] = {**entry, "size": info.st_size, "mtime_ns": info.st_mtime_ns}
             continue
         changed.append(path.stem)
@@ -299,8 +293,8 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
             baseline[task_id] = _baseline_entry(path, raw, None, reason)
             continue
         body = txn.body_text(task_id)
-        if body is not None and _sha(body.encode("utf-8")) != baseline.get(task_id, {}).get("body_sha256"):
-            conflicts[task_id] = {"at": now, "db_body": body, "file_sha256": _sha(raw)}
+        if body is not None and sha256_hex(body.encode("utf-8")) != baseline.get(task_id, {}).get("body_sha256"):
+            conflicts[task_id] = {"at": now, "db_body": body, "file_sha256": sha256_hex(raw)}
         txn.store_task(document, pending_drive=_pending_drive(root, task_id, document))
         baseline[task_id] = _baseline_entry(path, raw, document)
     for task_id in deleted:

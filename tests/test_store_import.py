@@ -159,21 +159,19 @@ def test_a_crash_after_publication_before_the_stamp_is_closed_by_the_next_boot(t
     assert store.generation_stamped(root)
 
 
-def test_a_missing_store_beside_its_stamp_is_lost_and_only_the_explicit_rebuild_recovers(tmp_path):
+def test_a_missing_store_beside_its_stamp_is_lost_until_the_owner_clears_the_stamp(tmp_path):
+    from ouroboros.startup_migrations import stamp
+
     root = fixture_root(tmp_path)
     ensure_current_store(root, with_children=False)
     store.store_path(root).unlink()
     with pytest.raises(StoreLost):
         ensure_current_store(root, with_children=False)
-    assert ensure_current_store(root, with_children=False, rebuild=True)["status"] == "completed"
+    with pytest.raises(StoreLost):
+        ensure_current_store(root, with_children=False)  # no silent rebuild on a later boot either
+    stamp(root, **{GENERATION_KEY: None})  # the owner's explicit decision: the files are the authority again
+    assert ensure_current_store(root, with_children=False)["status"] == "completed"
     assert store.probe(root)[0] == "present"
-
-
-def test_the_explicit_rebuild_sets_a_published_store_aside(tmp_path):
-    root = fixture_root(tmp_path)
-    ensure_current_store(root, with_children=False)
-    assert ensure_current_store(root, with_children=False, rebuild=True)["status"] == "completed"
-    assert [p.name for p in (root / "state").glob("current.sqlite.stale-*")]
 
 
 def test_the_cancel_latch_migration_runs_first_so_a_latched_row_is_imported_not_quarantined(tmp_path):

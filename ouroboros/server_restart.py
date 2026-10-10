@@ -323,18 +323,11 @@ def _next_generation_pin():
     the candidate commit: its pin is read from that commit
     (``body_adoption.bound_candidate_file``), through the same validating parser.
     """
-    import tempfile
-
     from ouroboros import body_adoption
     from ouroboros.claudexor_runtime import _PIN_FILENAME, load_runtime_pin
 
     raw = body_adoption.bound_candidate_file(DATA_DIR, "ouroboros/" + _PIN_FILENAME)
-    if raw is None:
-        return load_runtime_pin()
-    with tempfile.TemporaryDirectory(prefix="ouroboros-next-pin-") as scratch:
-        pin_file = pathlib.Path(scratch) / _PIN_FILENAME
-        pin_file.write_bytes(raw)
-        return load_runtime_pin(pin_file)
+    return load_runtime_pin() if raw is None else load_runtime_pin(data=raw)
 
 
 def _live_running_task_ids(ctx: Any) -> list:

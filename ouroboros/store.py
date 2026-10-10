@@ -10,10 +10,8 @@ name lock, nothing above SQLite 3.24 so the bundled engine's file opens on a
 3.37 system engine); the schema (``tasks`` typed facts and obligation flags,
 ``task_bodies`` the original document joined only by ``load``, ``obligations``
 owner-held sets, ``task_handoffs``/``custody_runs``/``custody_outbox`` filled by
-the cutover, ``meta``); the tri-state open (missing, uninspectable, published
-are three answers; missing beside a completed stamp is LOST); ``update_task``
-(the phase read inside the transaction, ``StoreRetired`` for a straggler whose
-connection predates the export); ``load`` (body plus the row-backed fields
+the cutover, ``meta``); the tri-state open (``probe``/``open_store``); ``update_task``
+(the phase read inside the transaction); ``load`` (body plus the row-backed fields
 ``ROW_BACKED_FIELDS`` names once the cutover decides them).
 """
 
@@ -264,11 +262,9 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC) -> I
         except sqlite3.Error as exc:
             raise _typed(exc) from exc
         stack.callback(conn.close)
-        txn = Txn(conn)
         try:
-            with transaction(conn, write=write, finish=txn.finish,
-                             commit_wait_sec=wait_sec if tier == TIER_ENFORCED else None):
-                yield txn
+            with transaction(conn, write=write, commit_wait_sec=wait_sec if tier == TIER_ENFORCED else None):
+                yield Txn(conn)
         except sqlite3.Error as exc:
             raise _typed(exc) from exc
 
@@ -306,14 +302,7 @@ class Txn:
     (handoffs, custody, outbox) share the same connection."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
-        self.conn, self.aborted = conn, False
-
-    def finish(self) -> None:
-        if self.aborted:
-            with contextlib.suppress(sqlite3.Error):
-                self.conn.execute("ROLLBACK")
-            return
-        commit(self.conn)
+        self.conn = conn
 
     def meta(self, key: str) -> Any:
         record = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -384,7 +373,8 @@ def update_task(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Opt
                 pending_drive: Optional[bool] = None) -> Optional[Dict[str, Any]]:
     """The write seam: ``BEGIN IMMEDIATE``; the phase read inside (``StoreRetired`` once an export
     began, which a straggler's older connection sees in the retired inode); the mutator over the
-    current document (``None`` = no write); the cutover's riders on the same connection; COMMIT."""
+    current document (``None`` = no write: the read-only transaction commits empty); the
+    cutover's riders on the same connection; COMMIT."""
     with open_store(root, write=True) as txn:
         phase = txn.phase()
         if phase != PUBLISHED:
@@ -392,7 +382,6 @@ def update_task(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Opt
         current = txn.load(task_id) or {}
         updated = mutator(json.loads(json.dumps(current)))
         if updated is None:
-            txn.aborted = True
             return None
         txn.store_task({**updated, "task_id": task_id}, pending_drive=pending_drive)
         for rider in riders:

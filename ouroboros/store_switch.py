@@ -6,36 +6,33 @@ through the UI door) records an intent (``record_switch_intent``) instead of swi
 at once; the restart exit, after every worker is dead, runs ``run_switch_seam``:
 
 preflight (nothing moves on failure; a refusal is a normal restart on the current code
-plus a reason for the owner) -> phase ``exporting`` in every store -> facts (every row to
-its byte-equivalent ``task_results/<id>.json``, every obligation set file in full) ->
-money through ``usage_store.export_journal`` when the target lacks ``usage_store.py``,
-idempotent through the switch receipt -> handles (an interface the packing stage fills;
-it reports «no packs» now) -> fsync -> ``export.status=completed`` + receipt -> the intent
-is CONSUMED -> the stores are retired -> the SAME switching owner the door used to call
-runs (``rollback_to_version`` / ``rollback_managed_update`` / ``checkout_and_reset``, with
-their rescue refs, failed ref, branch verification, stash restore and cleanup handoff) ->
-the caller exits 42 or re-execs. A death after the consume and before the switch leaves
-the new code with a completed export: the next boot finds no intent and a retired store,
-re-imports from the complete export and tells the owner the switch did not happen. An
-unconfirmed stop of a writer refuses the switch, never hangs. The switch receipt
-(``meta`` and ``state/switch_receipt.json``) records every completed step and the files it
-wrote or retired; abandonment after a partial export restores BOTH authorities.
+plus a reason for the owner) -> phase ``exporting`` in every store -> facts
+(``store_import.export_facts`` per root) -> money (``usage_store.export_journal`` when the
+target lacks ``usage_store.py``), idempotent through the switch receipt -> handles (an
+interface the packing stage fills; «no packs» now) -> fsync -> ``export.status=completed``
++ receipt -> the intent is CONSUMED -> the stores are retired -> the SAME switching owner
+the door used to call runs (``switching_owner``) -> the caller exits 42 or re-execs. A
+death after the consume and before the switch leaves the new code with a completed export:
+the next boot finds no intent and a retired store, re-imports from the complete export and
+tells the owner the switch did not happen. An unconfirmed stop of a writer refuses the
+switch, never hangs. The switch receipt (``meta`` and ``state/switch_receipt.json``)
+records every completed step and the files it wrote or retired; abandonment after a
+partial export restores BOTH authorities.
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
 import pathlib
 import shutil
 import subprocess
-import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from ouroboros import store, store_import, usage_store
 from ouroboros.store import EXPORTING, GENERATION_KEY, PUBLISHED, RETIRED
+from ouroboros.store_import import sha256_hex as _sha, supervisor_row, utc_stamp as _stamp
 from ouroboros.usage_ledger import LEDGER_REL, UsageAccountingError
-from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 INTENT_REL = pathlib.Path("state/switch_intent.json")
 RECEIPT_REL = pathlib.Path("state/switch_receipt.json")
@@ -45,26 +42,9 @@ SPACE_MARGIN = 1.1  # free space needed over the bytes the export writes
 Owner = Callable[[Dict[str, Any]], Tuple[bool, str]]
 
 
-def _sha(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def _stamp() -> str:
-    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-
-
-def _row(root: pathlib.Path, payload: Dict[str, Any]) -> None:
-    try:
-        append_jsonl(root / "logs" / "supervisor.jsonl", {"ts": utc_now_iso(), "type": "storage_switch", **payload})
-    except Exception:
-        import logging
-
-        logging.getLogger(__name__).warning("storage switch row not recorded", exc_info=True)
-
-
 def _progress(root: pathlib.Path, phase: str, **facts: Any) -> None:
     atomic_write_json(root / PROGRESS_REL, {"phase": phase, "at": utc_now_iso(), **facts})
-    _row(root, {"phase": phase, **facts})
+    supervisor_row(root, "storage_switch", {"phase": phase, **facts})
 
 
 # ---- intent and receipt -------------------------------------------------------------
@@ -119,17 +99,10 @@ def switch_needs(repo_dir: Any, target_sha: str) -> Dict[str, bool]:
 
 def next_engine_pin(repo_dir: Any, target_sha: str):
     """The engine pin the next generation selects, read from the target as a bound candidate."""
-    import tempfile
-
     from ouroboros.claudexor_runtime import _PIN_FILENAME, load_runtime_pin
 
     raw = target_file_bytes(repo_dir, target_sha, "ouroboros/" + _PIN_FILENAME)
-    if raw is None:
-        return None
-    with tempfile.TemporaryDirectory(prefix="ouroboros-switch-pin-") as scratch:
-        pin_file = pathlib.Path(scratch) / _PIN_FILENAME
-        pin_file.write_bytes(raw)
-        return load_runtime_pin(pin_file)
+    return None if raw is None else load_runtime_pin(data=raw)
 
 
 def switching_owner(door: str) -> Owner:

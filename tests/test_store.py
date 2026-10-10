@@ -222,9 +222,8 @@ def test_a_straggler_whose_connection_predates_the_rename_sees_the_retired_inode
 
     @contextlib.contextmanager
     def stale_open(root, *, write, wait_sec=0.0):
-        txn = store.Txn(straggler)
-        with store.transaction(straggler, write=write, finish=txn.finish):
-            yield txn
+        with store.transaction(straggler, write=write):
+            yield store.Txn(straggler)
 
     monkeypatch.setattr(store, "open_store", stale_open)
     with pytest.raises(StoreRetired):
@@ -261,16 +260,16 @@ def test_riders_share_the_write_transaction(tmp_path):
 
     def rider(txn, current, updated):
         txn.conn.execute("INSERT INTO custody_runs (run_id, task_id, state, facts) VALUES (?, ?, ?, ?)",
-                         ("run1", updated["task_id"], "started", "{}"))
+                         (f"run{updated['n']}", updated["task_id"], "started", "{}"))
         if updated.get("boom"):
             raise RuntimeError("the rider refused")
 
     store.update_task(tmp_path, "t1", lambda current: {**current, "n": 1}, riders=(rider,))
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="the rider refused"):  # the rider's own exception, not a constraint's
         store.update_task(tmp_path, "t1", lambda current: {**current, "n": 2, "boom": True}, riders=(rider,))
     with store.open_store(tmp_path, write=False) as txn:
         assert txn.load("t1")["n"] == 1  # the refused transaction rolled back whole
-        assert [r["run_id"] for r in txn.conn.execute("SELECT run_id FROM custody_runs")] == ["run1"]
+        assert [r["run_id"] for r in txn.conn.execute("SELECT run_id FROM custody_runs")] == ["run1"]  # run2 with it
 
 
 def test_obligation_rows_keep_their_file_order(tmp_path):
@@ -316,18 +315,20 @@ def _string_literals(source: str):
             yield node.value
 
 
+def _offending_sql(source: str):
+    return [s for s in _string_literals(source) if _ABOVE_3_24.search(s)]
+
+
 def test_nothing_above_sqlite_3_24_in_the_store_modules():
     """A file written by the bundled engine must open on a 3.37 system engine (the CI floor
     job runs this module there); the modules' SQL uses no syntax the floor lacks."""
-    assert _ABOVE_3_24.search("SELECT body ->> '$.x' FROM t")  # the guard fires
-    assert _ABOVE_3_24.search("CREATE TABLE t (a) STRICT")
-    assert [s for s in _string_literals("x = 'SELECT a -> b'\ndef f() -> str: pass") if _ABOVE_3_24.search(s)]
-    assert not [s for s in _string_literals('"""a -> b docstring"""\ndef f():\n    """c -> d"""\n') if _ABOVE_3_24.search(s)]
-    for rel in STORE_MODULES:
-        path = REPO / rel
-        if path.exists():
-            offending = [s for s in _string_literals(path.read_text(encoding="utf-8")) if _ABOVE_3_24.search(s)]
-            assert not offending, (rel, offending)
+    sources = {rel: (REPO / rel).read_text(encoding="utf-8") for rel in STORE_MODULES}  # all three exist
+    for rel, source in sources.items():
+        assert not _offending_sql(source), (rel, _offending_sql(source))
+        # the self-check: a newer construct inserted into THIS module's real source is caught
+        assert _offending_sql(source + "\nq = 'SELECT body ->> \"$.x\" FROM t'\n"), rel
+        assert _offending_sql(source + "\nq = 'CREATE TABLE t (a) STRICT'\n"), rel
+    assert not _offending_sql('"""a -> b docstring"""\ndef f() -> str:\n    """c -> d"""\n')  # prose, annotations
     assert sqlite3.sqlite_version_info >= (3, 24, 0)
 
 
