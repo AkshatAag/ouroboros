@@ -11,7 +11,7 @@ from ouroboros.task_finalization import build_swarm_efficiency
 from ouroboros.task_status import find_child_tasks
 from ouroboros.tools.control_scheduling import _emit_swarm_fanout
 from ouroboros.utils import append_jsonl, atomic_write_json
-from tests.test_storage_scale import observations
+from tests.test_storage_scale import observations, runtime_journal as runtime_journal
 
 
 def emit(root, child="child"):

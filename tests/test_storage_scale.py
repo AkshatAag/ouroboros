@@ -13,6 +13,11 @@ from ouroboros.utils import append_jsonl
 pytestmark = pytest.mark.scale
 
 
+@pytest.fixture(autouse=True)
+def runtime_journal(tmp_path, monkeypatch):
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+
+
 def observations(root, operation):
     rows = [json.loads(line) for line in (root / "logs/events.jsonl").read_text(encoding="utf-8").splitlines()]
     return [row for row in rows if row.get("type") == "storage_read_timing" and row["operation"] == operation]
@@ -78,3 +83,19 @@ def test_journal_failure_cannot_change_listing(tmp_path, monkeypatch):
     write_task_result(tmp_path, "task", "completed")
     monkeypatch.setattr(storage_observation, "append_jsonl", lambda *args: (_ for _ in ()).throw(OSError("fixture full")))
     assert len(list_task_results(tmp_path)) == 1
+
+
+@pytest.mark.parametrize("existing_journal", [False, True])
+def test_observing_another_root_does_not_write_into_it(tmp_path, existing_journal):
+    inspected = tmp_path / "inspected"
+    write_task_result(inspected, "task", "completed")
+    if existing_journal:
+        append_jsonl(inspected / "logs/events.jsonl", {"type": "original_evidence"})
+    before = {path.relative_to(inspected): (path.read_bytes(), path.stat().st_mtime_ns)
+              for path in inspected.rglob("*") if path.is_file()}
+    assert len(list_task_results(inspected)) == 1
+    after = {path.relative_to(inspected): (path.read_bytes(), path.stat().st_mtime_ns)
+             for path in inspected.rglob("*") if path.is_file()}
+    assert after == before
+    row = observations(tmp_path, "list_task_results")[-1]
+    assert row["calls"] == 1 and row["operations"]["decode_attempts"] == 1

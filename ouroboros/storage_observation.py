@@ -3,11 +3,11 @@
 import contextvars
 import functools
 import logging
-import pathlib
 import sys
 import time
 from contextlib import contextmanager
 
+from ouroboros import config
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 _OBSERVATION = contextvars.ContextVar("storage_observation", default=None)
@@ -35,7 +35,8 @@ def storage_observed(function):
     """Instrument every caller, including calls outside a model timing scope.
 
     Nested operations keep independent counters; telemetry cannot change the
-    read's result or exception. No bodies, paths or task text enter the event.
+    read's result or exception. The configured runtime owns the journal, not
+    the inspected root. No bodies, paths or task text enter the event.
     """
     @functools.wraps(function)
     def observed(*args, **kwargs):
@@ -53,13 +54,10 @@ def storage_observed(function):
         finally:
             _OBSERVATION.reset(token)
             row.update(ts=utc_now_iso(), seconds=time.monotonic() - started)
-            root = args[0] if args else kwargs.get("drive_root", kwargs.get("env"))
-            root = getattr(root, "drive_root", root)
-            if root is not None:
-                try:
-                    append_jsonl(pathlib.Path(root) / "logs" / "events.jsonl", row)
-                except Exception:
-                    logging.getLogger(__name__).debug("Storage timing unavailable", exc_info=True)
+            try:
+                append_jsonl(config.DATA_DIR / "logs" / "events.jsonl", row)
+            except Exception:
+                logging.getLogger(__name__).debug("Storage timing unavailable", exc_info=True)
     return observed
 
 
