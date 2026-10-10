@@ -28,7 +28,7 @@ from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
 from ouroboros.model_wait import model_wait_reason, propagate_model_control
 from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY, pop_custom_validation_receipts
 from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal  # typed-refusal contract owner
-from ouroboros.observability import new_call_id, new_execution_id, persist_call
+from ouroboros.observability import _json_bytes, new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost_optional, infer_model_category
 from ouroboros.send_clock import main_send_scope
 from ouroboros.task_pacing import main_loop_wire_options
@@ -1406,7 +1406,7 @@ def call_llm_with_retry(
                 call_type="llm_request",
                 payload={
                     "messages": messages,
-                    "send_messages": send_messages,
+                    **({"send_messages": send_messages} if _json_bytes(send_messages) != _json_bytes(messages) else {}),
                     "tools": tools or [],
                     "model": model,
                     "reasoning_effort": effort,

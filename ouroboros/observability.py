@@ -977,7 +977,7 @@ def call_manifest_path(drive_root: pathlib.Path, task_id: str, call_id: str) -> 
 
 
 def read_call_payload(drive_root: pathlib.Path, *, task_id: str, call_id: str) -> tuple:
-    """Read one exact call and its complete digest-verified existing CAS body."""
+    """Verify a call's CAS body and restore an omitted identical send history."""
     path = call_manifest_path(drive_root, task_id, call_id)
     if not path.exists():
         from ouroboros.source_retention import retained_task_roots
@@ -990,6 +990,8 @@ def read_call_payload(drive_root: pathlib.Path, *, task_id: str, call_id: str) -
     if not isinstance(manifest, dict) or manifest.get("task_id") != task_id or manifest.get("call_id") != call_id:
         raise ValueError("observability call identity mismatch")
     payload = read_blob_ref(drive_root, manifest.get("full_payload_ref"))
+    if manifest.get("call_type") == "llm_request" and isinstance(payload, dict) and "messages" in payload:
+        payload.setdefault("send_messages", payload["messages"])
     ref = {"call_id": call_id, "manifest_ref": {"path": str(path), "call_id": call_id,
            "sha256": hashlib.sha256(raw).hexdigest()},
            "redacted_projection_ref": manifest.get("redacted_projection_ref"),
