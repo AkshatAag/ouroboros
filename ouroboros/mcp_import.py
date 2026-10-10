@@ -1,40 +1,55 @@
-"""One-way preview of a pasted ``mcpServers`` document as MCP Settings draft patches.
+"""One-way preview of a pasted MCP client document as MCP Settings draft patches.
 
-The common client dialect — a top-level ``mcpServers`` object whose keys name
-servers — is translated here and nothing else happens: no process starts, no
-address is contacted and nothing is saved. Each entry becomes an ``add`` (a new,
-disabled server) or an ``update`` of the ONE draft server with the same
-canonical identity (``mcp_client.canonical_server_id``) and the same transport.
-A field the entry does not name stays as it is; a named ``headers`` object
-replaces the whole map, so ``{}`` clears it. ``Authorization`` stays a literal
-header, never the legacy ``auth_header``/``auth_token`` pair. Malformed JSON,
-duplicate keys, wrong types and ambiguous identities are problems that keep an
-entry out of the result rather than truncating it. The loader's field
-validators judge imported fields without loading settings or connecting.
+Two common client shapes are read: a top-level ``mcpServers`` object (Claude
+Code, Cursor, portable VS Code files) or a top-level ``servers`` object (VS
+Code workspace files); a document with both is ambiguous and refused. Entry
+types ``http``, ``streamable_http``, ``streamable-http``, ``sse`` and ``stdio``
+are understood. Nothing else happens here: no process starts, no address is
+contacted, nothing is saved and no ``${...}`` reference is expanded — such text
+stays literal, and the entry names the fields that carry it.
 
-The displayed projection carries names and counts only; addresses and commands stay in patches,
-``patch`` carries the pasted values back to the client draft, which the owner
-then saves through the ordinary Settings writer.
+Each entry becomes an ``add`` (a new, disabled server) or an ``update`` of the
+ONE draft server with the same canonical identity (``mcp_client.canonical_server_id``)
+and the same transport. A field the entry does not name stays as it is. A named
+``headers`` object is that server's complete header list: it replaces every
+current header, the legacy ``auth_header``/``auth_token`` pair included (cleared
+in the same patch), and ``{}`` clears them all. ``***set***`` is the Settings
+marker for "keep the saved value", so a header with exactly that value is a
+problem, never a literal. Malformed JSON, duplicate keys, wrong types and
+ambiguous identities are problems that keep an entry out of the result rather
+than truncating it. The loader's field validators judge imported fields without
+loading settings or connecting.
+
+The draft list the caller sends carries identities, transports and header names
+only (``MCPImportDraftServer``); values and addresses stay in the browser.
+Display facts carry names and counts; ``patch`` carries the pasted values back
+to the client draft, which the owner then saves through the ordinary Settings
+writer.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List
 
 from ouroboros.mcp_client import (
     canonical_server_id, raw_server_id, _validate_url,
     _validate_stdio_args, _validate_stdio_command,
 )
-from ouroboros.mcp_headers import validate_headers
+from ouroboros.mcp_headers import HEADER_VALUE_PLACEHOLDER, validate_headers
 from ouroboros.workspace_executor import validate_process_env
 
-TRANSPORTS = {"http": "streamable_http", "streamable_http": "streamable_http", "sse": "sse", "stdio": "stdio"}
+WRAPPERS = ("mcpServers", "servers")
+TRANSPORTS = {"http": "streamable_http", "streamable_http": "streamable_http", "streamable-http": "streamable_http",
+              "sse": "sse", "stdio": "stdio"}
 _FIELDS = {"streamable_http": ("url", "headers"), "sse": ("url", "headers"),
            "stdio": ("command", "args", "env", "cwd")}
 _TYPE_KEYS = ("type", "transport")
+_SUBSTITUTION = re.compile(r"\$\{[^}]*\}")
 _ENV_NOTICE = ("Environment values are saved as ordinary visible settings; keep secrets in Custom keys and "
                "select them with Environment from settings.")
+_SHAPE_ERROR = "Expected a JSON object with a top-level mcpServers or servers object."
 
 
 def _unique_object(pairs: List[tuple]) -> Dict[str, Any]:
@@ -56,7 +71,11 @@ def _validate_patch(patch: Dict[str, Any]) -> None:
         except ValueError:
             raise ValueError("url must be a valid permitted http:// or https:// address; "
                              "username/password credentials require Cyber mode") from None
-        validate_headers(patch.get("headers"))
+        reserved = [name for name, value in validate_headers(patch.get("headers")).items()
+                    if value == HEADER_VALUE_PLACEHOLDER]
+        if reserved:
+            raise ValueError(f"header {', '.join(reserved)} has the value {HEADER_VALUE_PLACEHOLDER}, which Settings "
+                             "reserves for keeping a saved value; paste the real value")
     else:
         _validate_stdio_command(patch.get("command"))
         _validate_stdio_args(patch.get("args"))
@@ -66,11 +85,21 @@ def _validate_patch(patch: Dict[str, Any]) -> None:
             raise ValueError("cwd must be a string without NUL")
 
 
+def _substitution_fields(patch: Dict[str, Any]) -> List[str]:
+    """Names of the fields whose values contain ``${...}``; values are never echoed."""
+    found = [key for key in ("url", "command", "cwd") if _SUBSTITUTION.search(str(patch.get(key) or ""))]
+    if any(_SUBSTITUTION.search(item) for item in patch.get("args") or []):
+        found.append("args")
+    for field, label in (("env", "environment"), ("headers", "header")):
+        found += [f"{label} {name}" for name, value in (patch.get(field) or {}).items() if _SUBSTITUTION.search(value)]
+    return found
+
+
 def _translate(name: str, raw: Any) -> Dict[str, Any]:
     """One entry's display facts, problems and field patch, before draft matching."""
     entry: Dict[str, Any] = {"source_name": name, "server_id": canonical_server_id(name), "action": "",
-                             "transport": "", "url": "", "command": "", "arg_count": 0, "header_names": [],
-                             "env_names": [], "unsupported_keys": [], "problems": [], "warnings": [], "patch": {}}
+                             "transport": "", "arg_count": 0, "header_names": [], "env_names": [],
+                             "unsupported_keys": [], "problems": [], "warnings": [], "patch": {}}
     problems: List[str] = entry["problems"]
     if not entry["server_id"]:
         problems.append("the name has no usable server ID; use letters or digits")
@@ -112,9 +141,39 @@ def _translate(name: str, raw: Any) -> Dict[str, Any]:
     # configuration values too: only patches carry them, never display facts.
     entry.update(arg_count=len(patch.get("args") or []), header_names=list(patch.get("headers") or {}),
                  env_names=list(patch.get("env") or {}), patch=patch)
+    literal = _substitution_fields(patch)
+    if literal:
+        entry["warnings"].append(f"{', '.join(literal)}: ${{...}} is kept as written. Nothing is expanded, so the "
+                                 "server receives those characters unless you replace them.")
     if patch.get("env"):
         entry["warnings"].append(_ENV_NOTICE)
     return entry
+
+
+def _header_changes(entry: Dict[str, Any], target: Dict[str, Any]) -> None:
+    """Disclose which current header names an update replaces, removes or keeps."""
+    names = [name for name in target.get("header_names") or [] if isinstance(name, str) and name]
+    legacy = target.get("legacy_header") if isinstance(target.get("legacy_header"), str) else ""
+    if legacy and legacy.casefold() not in {name.casefold() for name in names}:
+        names.append(legacy)
+    if legacy:
+        entry["legacy_header"] = legacy
+    if target.get("unreadable_headers") is True:
+        entry["unreadable_headers"] = True
+    imported = entry["patch"].get("headers")
+    if imported is None:
+        entry["kept_header_names"] = names
+        return
+    incoming = {name.casefold() for name in imported}
+    current = {name.casefold() for name in names}
+    entry["header_changes"] = {
+        "added": [name for name in imported if name.casefold() not in current],
+        "replaced": [name for name in names if name.casefold() in incoming],
+        "removed": [name for name in names if name.casefold() not in incoming],
+    }
+    if legacy:
+        # The file's list is the whole list: the old single token goes with it, atomically.
+        entry["patch"].update(auth_header="Authorization", auth_token="")
 
 
 def preview_import(text: str, draft: List[Any]) -> Dict[str, Any]:
@@ -125,9 +184,13 @@ def preview_import(text: str, draft: List[Any]) -> Dict[str, Any]:
         return {"ok": False, "error": f"The text is not valid JSON (line {exc.lineno}, column {exc.colno}).", "entries": []}
     except (ValueError, RecursionError):
         return {"ok": False, "error": "The text is not valid JSON: duplicate JSON object key or excessive nesting.", "entries": []}
-    if not isinstance(document, dict) or not isinstance(document.get("mcpServers"), dict):
-        return {"ok": False, "error": "Expected a JSON object with a top-level mcpServers object.", "entries": []}
-    entries = [_translate(name, raw) for name, raw in document["mcpServers"].items()]
+    wrappers = [key for key in WRAPPERS if isinstance(document, dict) and key in document]
+    if len(wrappers) > 1:
+        return {"ok": False, "error": "The document has both mcpServers and servers; keep one of them.", "entries": []}
+    if not wrappers or not isinstance(document[wrappers[0]], dict):
+        return {"ok": False, "error": _SHAPE_ERROR, "entries": []}
+    wrapper = wrappers[0]
+    entries = [_translate(name, raw) for name, raw in document[wrapper].items()]
     imported = [entry["server_id"] for entry in entries]
     claimants: Dict[str, List[int]] = {}
     for index, server in enumerate(draft):
@@ -147,16 +210,13 @@ def preview_import(text: str, draft: List[Any]) -> Dict[str, Any]:
                             "remove that server first, then import it again")
         if problems:
             entry["patch"] = {}
+            entry["warnings"] = []
             continue
         if target is None:
             entry["action"] = "add"
             entry["patch"] = {"id": server_id, "name": entry["source_name"], "enabled": False, **entry["patch"]}
             continue
         entry.update(action="update", index=targets[0])
-        legacy = str(target.get("auth_header") or "Authorization").strip() or "Authorization"
-        if str(target.get("auth_token") or "").strip() and any(
-                name.casefold() == legacy.casefold() and value for name, value in entry["patch"].get("headers", {}).items()):
-            entry["warnings"].append(
-                "This server's legacy Auth token sets the same header. Clear the legacy Auth token before saving; "
-                "until then the server reports a configuration error.")
-    return {"ok": True, "entries": entries, "ignored_keys": sorted(set(document) - {"mcpServers"})}
+        if entry["transport"] != "stdio":
+            _header_changes(entry, target)
+    return {"ok": True, "wrapper": wrapper, "entries": entries, "ignored_keys": sorted(set(document) - {wrapper})}

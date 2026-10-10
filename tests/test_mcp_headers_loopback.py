@@ -50,25 +50,31 @@ class _Synthetic:
         await self.app(scope, receive, send)
 
 
-@pytest.fixture
-def loopback():
+def start_asgi(app, running, name="mcp-loopback"):
+    """Serve one ASGI app on a free loopback port; ``running`` collects it for shutdown."""
     import uvicorn
 
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, name=name, daemon=True)
+    thread.start()
+    running.append((server, thread))
+    deadline = time.monotonic() + 10
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "synthetic MCP server did not start"
+        time.sleep(0.02)
+    return port
+
+
+@pytest.fixture
+def loopback():
     running = []
 
-    def serve(transport, required):
+    def serve(transport, required, wrap=None):
         app = _Synthetic(transport, required)
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-        thread = threading.Thread(target=server.run, name=f"mcp-loopback-{transport}", daemon=True)
-        thread.start()
-        running.append((server, thread))
-        deadline = time.monotonic() + 10
-        while not server.started:
-            assert thread.is_alive() and time.monotonic() < deadline, "synthetic MCP server did not start"
-            time.sleep(0.02)
+        port = start_asgi(wrap(app) if wrap else app, running, f"mcp-loopback-{transport}")
         path = "/mcp" if transport == "http" else "/sse"
         return app, f"http://127.0.0.1:{port}{path}"
 
@@ -125,3 +131,148 @@ def test_a_rejected_header_reports_the_failure_without_its_value(loopback):
     outcome = manager.refresh_server("denied")
     assert outcome["ok"] is False and wrong not in outcome["error"]
     assert wrong not in str(manager.status_payload())
+
+
+class _Echoing:
+    """Answers the first MCP message with invalid JSON that starts with a received header value."""
+
+    def __init__(self, app, transport):
+        self.app, self.transport = app, transport
+
+    async def __call__(self, scope, receive, send):
+        headers = {key.decode().lower(): value.decode() for key, value in scope.get("headers", [])}
+        if scope["type"] == "http" and scope["method"] == "POST" and self.transport == "http":
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": (headers["x-api-key"] + " is not JSON").encode()})
+            return
+        if scope["type"] == "http" and scope["method"] == "GET" and self.transport == "sse":
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"text/event-stream")]})
+            body = (f"event: endpoint\ndata: /messages/?session_id=fixture\n\n"
+                    f"event: message\ndata: {headers['x-api-key']} is not JSON\n\n")
+            await send({"type": "http.response.body", "body": body.encode(), "more_body": True})
+            while (await receive())["type"] != "http.disconnect":
+                pass
+            return
+        if scope["type"] == "http" and scope["method"] == "POST":
+            await send({"type": "http.response.start", "status": 202, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+            return
+        await self.app(scope, receive, send)
+
+
+@pytest.mark.parametrize("transport, sdk_line", [("http", "Error parsing JSON response"),
+                                                  ("sse", "Error parsing server message")])
+@pytest.mark.parametrize("redacted", [True, False])
+def test_sdk_parse_tracebacks_in_process_logs_never_carry_a_header_value(loopback, monkeypatch, transport, sdk_line,
+                                                                         redacted):
+    """The SDK logs the raw invalid body with its traceback before Ouroboros sees an error.
+
+    The real formatted log text is captured. Disabling the projection (negative
+    control) shows the witness would see the echoed value.
+    """
+    import contextlib
+    import io
+    import logging
+
+    if not redacted:
+        monkeypatch.setattr(mcp_client, "_redacted_sdk_logs", lambda cfg, name: contextlib.nullcontext())
+    _app, url = loopback(transport, {}, wrap=lambda app: _Echoing(app, transport))
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        manager = mcp_client.get_manager()
+        manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 3, "MCP_SERVERS": [
+            {"id": "echo", "enabled": True, "transport": "sse" if transport == "sse" else "streamable_http",
+             "url": url, "headers": {"X-Api-Key": CUSTOM}}]})
+        outcome = manager.refresh_server("echo")
+    finally:
+        root.removeHandler(handler)
+    logged = stream.getvalue()
+    assert outcome["ok"] is False and CUSTOM not in outcome["error"]
+    assert sdk_line in logged and "json_invalid" in logged, logged
+    if redacted:
+        assert CUSTOM not in logged and "*** is not JSON" in logged, logged
+    else:
+        assert CUSTOM in logged  # negative control: the unprojected SDK record carries the value
+
+
+class _Recording:
+    def __init__(self, app):
+        self.app, self.seen = app, []
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            self.seen.append((scope["method"], [(key.decode().lower(), value.decode())
+                                                for key, value in scope["headers"]]))
+        await self.app(scope, receive, send)
+
+
+def test_effective_wire_precedence_of_protocol_headers_is_transport_specific(loopback):
+    """Literal means sent as written unless the transport sets that name itself.
+
+    Streamable HTTP sets Accept and Content-Type on every request, and
+    Mcp-Protocol-Version once negotiated. The SSE helper sets Accept and
+    Cache-Control on its stream request; SSE message POSTs send a configured
+    Accept or Content-Type as written, and an MCP server may refuse the latter.
+    Every other configured header arrives exactly as written.
+    """
+    configured = {"Accept": "text/plain", "Cache-Control": "max-age=7", "Mcp-Protocol-Version": "1999-01-01",
+                  "Authorization": "Bearer  two-spaces", "X-Api-Key": CUSTOM}
+    recorders = []
+
+    def recorded(app):
+        recorders.append(_Recording(app))
+        return recorders[-1]
+
+    _http, http_url = loopback("http", {}, wrap=recorded)
+    _sse, sse_url = loopback("sse", {}, wrap=recorded)
+    _typed, typed_url = loopback("sse", {}, wrap=recorded)
+    http_rec, sse_rec, typed_rec = recorders
+    manager = mcp_client.get_manager()
+    manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 4, "MCP_SERVERS": [
+        {"id": "h", "enabled": True, "url": http_url, "headers": {**configured, "Content-Type": "text/plain"}},
+        {"id": "s", "enabled": True, "transport": "sse", "url": sse_url, "headers": configured},
+        {"id": "t", "enabled": True, "transport": "sse", "url": typed_url, "headers": {"Content-Type": "text/plain"}}]})
+    assert manager.refresh_server("h")["ok"] and manager.refresh_server("s")["ok"]
+    assert manager.refresh_server("t")["ok"] is False  # the server refused the literal Content-Type
+
+    def values(rec, method):
+        rows = [dict(headers) for seen_method, headers in rec.seen if seen_method == method]
+        assert rows, (method, rec.seen)
+        return rows
+
+    posts = values(http_rec, "POST")
+    for request in posts:
+        assert request["accept"] == "application/json, text/event-stream"
+        assert request["content-type"] == "application/json"
+        assert request["cache-control"] == "max-age=7"
+        assert request["authorization"] == "Bearer  two-spaces" and request["x-api-key"] == CUSTOM
+    assert posts[0]["mcp-protocol-version"] == "1999-01-01"  # before negotiation, the configured value
+    assert all(request["mcp-protocol-version"] != "1999-01-01" for request in posts[1:])  # then the SDK's
+    for request in values(sse_rec, "GET"):
+        assert request["accept"] == "text/event-stream" and request["cache-control"] == "no-store"
+        assert request["authorization"] == "Bearer  two-spaces" and request["x-api-key"] == CUSTOM
+    for request in values(sse_rec, "POST"):
+        assert request["accept"] == "text/plain" and request["content-type"] == "application/json"
+        assert request["cache-control"] == "max-age=7" and request["x-api-key"] == CUSTOM
+    assert {request["content-type"] for request in values(typed_rec, "POST")} == {"text/plain"}
+
+
+def test_cyber_url_userinfo_replaces_a_configured_authorization_header(loopback, monkeypatch):
+    """With userinfo in the URL (Cyber only), the HTTP client sends Basic auth in Authorization."""
+    import base64
+
+    monkeypatch.setattr(mcp_client, "mode_has_unrestricted_agency", lambda _mode: True)
+    basic = "Basic " + base64.b64encode(b"user:synthetic-userinfo").decode()
+    app, url = loopback("http", {"Authorization": basic, "X-Api-Key": CUSTOM})
+    url = url.replace("http://", "http://user:synthetic-userinfo@")
+    manager = mcp_client.get_manager()
+    manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 10, "MCP_SERVERS": [
+        {"id": "u", "enabled": True, "url": url, "headers": {"Authorization": BEARER, "X-Api-Key": CUSTOM}}]})
+    assert manager.refresh_server("u")["ok"]
+    assert {headers["authorization"] for headers in app.seen} == {basic}

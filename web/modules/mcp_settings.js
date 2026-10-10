@@ -1,10 +1,13 @@
 import { apiFetch, jsonPost } from './api_client.js';
-/** MCP settings cards; preserves masked auth tokens until the user edits them. */
+/** MCP settings cards; preserves masked credentials until the user edits them. */
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { revealNewRow } from './ui_helpers.js';
-import { bindSecretReveal, resetSecretReveals } from './settings_secrets.js';
-import { renderHeaderFields, bindHeaderFields, headerPayload, headerHasMask, resetHeaderRows, validateHeaderFields } from './mcp_header_fields.js';
-import { openMcpImportDialog } from './mcp_import_dialog.js';
+import { resetSecretReveals } from './settings_secrets.js';
+import {
+    renderHeaderFields, bindHeaderFields, credentialPayload, headerKeepsSavedValues, keptHeaderNames,
+    headerDraftRows, headerImportFacts, resetHeaderRows, serverIdentity, validateHeaderFields,
+} from './mcp_header_fields.js';
+import { endpointChange, openMcpImportDialog } from './mcp_import_dialog.js';
 
 const TRANSPORTS = [
     { value: 'streamable_http', label: 'Streamable HTTP' },
@@ -17,11 +20,16 @@ const SERVER_FIELDS = new Set(['id', 'slug', 'name', 'label', 'enabled', 'transp
 let mcpServers = [];
 let mcpStatusByServer = {};
 let mcpStatusEnvelope = null;
-let mcpDirtyTokens = new Set();
 let onChangeCallback = null;
-// Original lookup identity and masked value only; never serialize these into a
-// server draft or use its editable id / current list index to reveal a token.
+// Original lookup identity and masked address only; never serialize these into
+// a server draft or use its editable id / current list index to reveal a value.
 const savedMcpSecrets = new WeakMap();
+// Card results follow the server object, not its list position: a pending
+// Refresh or Test lands on its own card or nowhere, and a draft edit retires a
+// Test result that no longer describes the draft.
+const cardMessages = new WeakMap();
+const draftGenerations = new WeakMap();
+const pendingActions = new WeakMap();
 
 function looksMasked(value) {
     const text = String(value ?? '').trim();
@@ -50,6 +58,60 @@ function notifyChanged() {
     }
 }
 
+function cardFor(server) {
+    const index = mcpServers.indexOf(server);
+    return index < 0 ? null : document.querySelector(`[data-mcp-index="${index}"]`);
+}
+
+function paintCardMessage(server) {
+    const el = cardFor(server)?.querySelector('[data-mcp-message]');
+    if (!el) return;
+    const message = cardMessages.get(server);
+    el.textContent = message?.text || '';
+    if (message) el.dataset.tone = message.tone;
+    el.hidden = !message;
+}
+
+function setCardMessage(server, text, tone = 'muted', kind = '') {
+    if (text) cardMessages.set(server, { text, tone, kind });
+    else cardMessages.delete(server);
+    paintCardMessage(server);
+}
+
+/** One server's draft changed: a finished Test no longer describes it. */
+function serverEdited(server) {
+    draftGenerations.set(server, (draftGenerations.get(server) || 0) + 1);
+    if (cardMessages.get(server)?.kind === 'test') setCardMessage(server, '');
+    paintEndpointNotice(server);
+    notifyChanged();
+}
+
+function setPending(server, action, busy) {
+    const actions = pendingActions.get(server) || new Set();
+    if (busy) actions.add(action); else actions.delete(action);
+    pendingActions.set(server, actions);
+    const button = cardFor(server)?.querySelector(`[data-mcp-${action}]`);
+    if (button) button.disabled = busy;
+}
+
+/** A deliberate address change keeps saved values; say where they will go. */
+function endpointNotice(server) {
+    const saved = savedMcpSecrets.get(server);
+    if (!saved || server.transport === 'stdio') return '';
+    const change = endpointChange(saved.url, server.url);
+    const names = keptHeaderNames(server);
+    if (!change || !names.length) return '';
+    const where = change.sameOrigin ? `changes on ${change.to}` : `changes from ${change.from} to ${change.to}`;
+    return `Address ${where}. Saved values of ${names.join(', ')} stay with this server and go to the new address when you Test or Save.`;
+}
+
+function paintEndpointNotice(server) {
+    const el = cardFor(server)?.querySelector('[data-mcp-endpoint-notice]');
+    if (!el) return;
+    el.textContent = endpointNotice(server);
+    el.hidden = !el.textContent;
+}
+
 function toolCountLabel(count) {
     return `${count} tool${count === 1 ? '' : 's'}`;
 }
@@ -57,8 +119,8 @@ function toolCountLabel(count) {
 function unsupportedFields(server) {
     const unused = server.transport === 'stdio' ? ['url', 'auth_token', 'headers']
         : ['command', 'args', 'cwd', 'env', 'env_from_settings'];
-    // Edited headers live in the draft even when server.headers is absent.
-    const draft = { ...server, ...headerPayload(server) };
+    // Edited header rows live in the draft even when server.headers is absent.
+    const draft = { ...server, ...credentialPayload(server) };
     const fields = Object.keys(draft).filter((key) => !SERVER_FIELDS.has(key)
         || (unused.includes(key) && !['', '[]', '{}', 'null'].includes(JSON.stringify(draft[key]))
             && draft[key] !== ''));
@@ -80,8 +142,6 @@ function renderServerCard(server, index) {
     const envRefs = typeof server.env_from_settings === 'string'
         ? server.env_from_settings : JSON.stringify(server.env_from_settings ?? {}, null, 2);
     const literalEnv = typeof server.env === 'string' ? server.env : JSON.stringify(server.env ?? {}, null, 2);
-    const authHeader = String(server.auth_header ?? 'Authorization');
-    const authToken = String(server.auth_token ?? '');
     const enabled = server.enabled === true || server.enabled === 'True' || server.enabled === 'true';
     const allowedTools = Array.isArray(server.allowed_tools) ? server.allowed_tools.join(', ') : '';
     const transportOptions = TRANSPORTS.map((opt) => {
@@ -116,9 +176,9 @@ function renderServerCard(server, index) {
             `).join('')}</ul>`
         : '';
 
-    const authPlaceholder = authToken && looksMasked(authToken)
-        ? authToken
-        : (authToken ? '••••••' : 'Bearer xxxxx (optional)');
+    const message = cardMessages.get(server);
+    const pending = pendingActions.get(server) || new Set();
+    const notice = endpointNotice(server);
 
     return `
         <article class="mcp-server-card" data-mcp-card data-mcp-index="${index}">
@@ -132,8 +192,8 @@ function renderServerCard(server, index) {
                         <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Enabled" data-mcp-field="enabled" ${enabled ? 'checked' : ''}>
                         <span>Enabled</span>
                     </label>
-                    <button type="button" class="btn btn-default" data-mcp-test>Test draft catalog</button>
-                    <button type="button" class="btn btn-default" data-mcp-refresh>Refresh saved catalog</button>
+                    <button type="button" class="btn btn-default" data-mcp-test ${pending.has('test') ? 'disabled' : ''}>Test draft catalog</button>
+                    <button type="button" class="btn btn-default" data-mcp-refresh ${pending.has('refresh') ? 'disabled' : ''}>Refresh saved catalog</button>
                     <button type="button" class="btn btn-default mcp-server-remove" data-mcp-remove>Remove</button>
                 </div>
             </header>
@@ -156,7 +216,8 @@ function renderServerCard(server, index) {
                     <label for="mcp-${index}-endpoint">${isStdio ? 'Command' : 'Server URL'}</label>
                     ${isStdio
                         ? `<input type="text" class="ui-control" id="mcp-${index}-endpoint" aria-label="MCP server ${index + 1}: Command" data-mcp-field="command" value="${escapeHtml(command)}" placeholder="npx" autocomplete="off" spellcheck="false">`
-                        : `<input type="text" class="ui-control" id="mcp-${index}-endpoint" aria-label="MCP server ${index + 1}: Server URL" data-mcp-field="url" value="${escapeHtml(url)}" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false">`}
+                        : `<input type="text" class="ui-control" id="mcp-${index}-endpoint" aria-label="MCP server ${index + 1}: Server URL" data-mcp-field="url" value="${escapeHtml(url)}" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false">
+                    <span class="ui-field-help" data-mcp-endpoint-notice ${notice ? '' : 'hidden'}>${escapeHtml(notice)}</span>`}
                 </div>
             </div>
             ${isStdio ? `
@@ -185,29 +246,14 @@ function renderServerCard(server, index) {
                     <textarea class="ui-control" id="mcp-${index}-env" aria-label="MCP server ${index + 1}: Environment (JSON, optional)" data-mcp-field="env" rows="3" placeholder='{"PORT": "8080", "DEBUG": "1"}' autocomplete="off" spellcheck="false">${escapeHtml(literalEnv)}</textarea>
                     <span class="muted">Ordinary values passed directly to the process. Settings references override matching names; use Custom keys for secrets.</span>
                 </div>
-            </div>` : `
-            <div class="form-grid two">
-                <div class="form-field ui-field">
-                    <label for="mcp-${index}-auth_header">Legacy header name</label>
-                    <input type="text" class="ui-control" id="mcp-${index}-auth_header" aria-label="MCP server ${index + 1}: Legacy header name" data-mcp-field="auth_header" value="${escapeHtml(authHeader)}" placeholder="Authorization" autocomplete="off" spellcheck="false">
-                </div>
-                <div class="form-field ui-field">
-                    <label for="mcp-${index}-auth_token">Legacy header value (optional)</label>
-                    <div class="secret-input-row">
-                        <input type="password" class="ui-control" id="mcp-${index}-auth_token" aria-label="MCP server ${index + 1}: Legacy header value (optional)" data-mcp-field="auth_token" value="${escapeHtml(authToken)}" placeholder="${escapeHtml(authPlaceholder)}" autocomplete="off" spellcheck="false">
-                        <button type="button" class="btn btn-default" data-mcp-token-toggle>Show</button>
-                        <button type="button" class="btn btn-default" data-mcp-token-clear>Clear</button>
-                    </div>
-                </div>
-            </div>
-            ${renderHeaderFields(server, index)}`}
+            </div>` : renderHeaderFields(server, index)}
             <div class="form-row">
                 <div class="form-field ui-field">
                     <label for="mcp-${index}-allowed_tools">Allowed tools (optional, comma-separated)</label>
                     <input type="text" class="ui-control" id="mcp-${index}-allowed_tools" aria-label="MCP server ${index + 1}: Allowed tools (optional, comma-separated)" data-mcp-field="allowed_tools" value="${escapeHtml(allowedTools)}" placeholder="search, read_repo" autocomplete="off" spellcheck="false">
                 </div>
             </div>
-            <div class="settings-inline-status mcp-server-message" data-mcp-message hidden></div>
+            <div class="settings-inline-status mcp-server-message" data-mcp-message ${message ? `data-tone="${escapeHtml(message.tone)}"` : 'hidden'}>${escapeHtml(message?.text || '')}</div>
             ${unsupported.length ? `<div class="form-row"><span class="muted">Fields retained but not applied: ${escapeHtml(unsupported.join(', '))}</span>
                 <button type="button" class="btn btn-default" data-mcp-clear-unsupported>Remove unsupported fields</button></div>` : ''}
             ${toolsHtml ? `<details class="mcp-tools-disclosure"><summary>Discovered tools</summary>${toolsHtml}</details>` : ''}
@@ -218,26 +264,14 @@ function renderServerCard(server, index) {
 function bindCardEvents(card) {
     const idx = Number(card.dataset.mcpIndex || 0);
     const rowServer = mcpServers[idx];
-    bindHeaderFields(card, {server: rowServer, savedIdentity: savedMcpSecrets.get(rowServer)?.identity,
-        onChange: notifyChanged, render: renderAll});
-    const setMessage = (text, tone = 'muted') => {
-        const el = card.querySelector('[data-mcp-message]');
-        if (!el) return;
-        if (!text) {
-            el.hidden = true;
-            el.textContent = '';
-            return;
-        }
-        el.textContent = text;
-        el.dataset.tone = tone;
-        el.hidden = false;
-    };
+    const saved = savedMcpSecrets.get(rowServer);
+    bindHeaderFields(card, {server: rowServer, savedIdentity: saved?.identity,
+        onChange: () => serverEdited(rowServer), render: renderAll});
 
     card.querySelectorAll('[data-mcp-field]').forEach((input) => {
         input.addEventListener('input', () => {
             const field = input.dataset.mcpField;
-            const server = mcpServers[idx];
-            if (!server) return;
+            const server = rowServer;
             if (field === 'enabled') {
                 server.enabled = Boolean(input.checked);
             } else if (field === 'allowed_tools') {
@@ -249,141 +283,98 @@ function bindCardEvents(card) {
                 server.args = String(input.value || '')
                     .split(/\r?\n/)
                     .filter((value) => value.length > 0);
-            } else if (field === 'auth_token') {
-                if (looksMasked(input.value)) {
-                    mcpDirtyTokens.delete(`${idx}`);
-                } else {
-                    mcpDirtyTokens.add(`${idx}`);
-                }
-                server.auth_token = input.value;
             } else if (field === 'env_from_settings' || field === 'env') {
                 try {
                     server[field] = JSON.parse(input.value || '{}');
-                    setMessage('');
+                    setCardMessage(server, '');
                 } catch {
                     server[field] = input.value;
-                    setMessage('Environment values and references must be JSON objects. Your input is retained.', 'danger');
+                    setCardMessage(server, 'Environment values and references must be JSON objects. Your input is retained.', 'danger');
                 }
             } else {
                 server[field] = input.value;
             }
             if (field === 'transport') renderAll();
-            notifyChanged();
+            serverEdited(server);
         });
         input.addEventListener('change', () => {
-            const field = input.dataset.mcpField;
-            const server = mcpServers[idx];
-            if (!server) return;
-            if (field === 'enabled') {
-                server.enabled = Boolean(input.checked);
-                notifyChanged();
+            if (input.dataset.mcpField === 'enabled') {
+                rowServer.enabled = Boolean(input.checked);
+                serverEdited(rowServer);
             }
         });
     });
 
     card.querySelector('[data-mcp-clear-unsupported]')?.addEventListener('click', () => {
-        const server = mcpServers[idx];
-        const fields = unsupportedFields(server);
-        for (const key of fields) delete server[key];
-        if (fields.includes('headers')) resetHeaderRows(server);
+        const fields = unsupportedFields(rowServer);
+        for (const key of fields) delete rowServer[key];
+        if (fields.includes('headers') || fields.includes('auth_token')) resetHeaderRows(rowServer);
+        renderAll();
+        serverEdited(rowServer);
+    });
+
+    card.querySelector('[data-mcp-remove]')?.addEventListener('click', () => {
+        const index = mcpServers.indexOf(rowServer);
+        if (index >= 0) mcpServers.splice(index, 1);
         renderAll();
         notifyChanged();
     });
 
-    const tokenInput = card.querySelector('[data-mcp-field="auth_token"]');
-    const tokenToggle = card.querySelector('[data-mcp-token-toggle]');
-    const tokenClear = card.querySelector('[data-mcp-token-clear]');
-    let tokenReveal;
-    if (tokenToggle && tokenInput) {
-        const server = mcpServers[idx];
-        const saved = savedMcpSecrets.get(server);
-        tokenInput.dataset.appliedValue = saved?.value || '';
-        tokenReveal = bindSecretReveal(tokenInput, tokenToggle, {
-            savedSelector: () => saved?.identity ? { mcp_server_id: saved.identity } : null,
-            savedLabel: () => saved && String(server.id || server.slug || server.name || '') !== saved.identity
-                ? `Saved value for ${saved.identity}` : '',
-            identityInputs: ['id', 'name'].map((field) => card.querySelector(`[data-mcp-field="${field}"]`)).filter(Boolean),
-        });
-    }
-    if (tokenClear && tokenInput) {
-        tokenClear.addEventListener('click', () => {
-            tokenReveal?.reset();
-            tokenInput.value = '';
-            tokenInput.type = 'password';
-            const server = mcpServers[idx];
-            if (server) server.auth_token = '';
-            mcpDirtyTokens.add(`${idx}`);
-            notifyChanged();
-        });
-    }
-
-    const removeBtn = card.querySelector('[data-mcp-remove]');
-    if (removeBtn) {
-        removeBtn.addEventListener('click', () => {
-            mcpServers.splice(idx, 1);
-            mcpDirtyTokens.delete(`${idx}`);
-            renderAll();
-            notifyChanged();
-        });
-    }
-
-    const testBtn = card.querySelector('[data-mcp-test]');
-    if (testBtn) {
-        testBtn.addEventListener('click', async () => {
-            const server = mcpServers[idx];
-            if (!server) return;
-            const errors = validateHeaderFields(card, server);
-            if (errors.length) { setMessage(errors[0].message, 'danger'); errors[0].input.focus(); return; }
-            testBtn.disabled = true;
-            setMessage('Testing connection...', 'muted');
-            try {
-                // Saved identity lets the backend rehydrate either credential form.
-                const sid = String(server.id || '').trim();
-                const tokenMasked = looksMasked(server.auth_token);
-                const urlMasked = String(server.url || '').includes('://***@');
-                const body = sid && (tokenMasked || urlMasked || headerHasMask(server))
-                    ? { server_id: sid, server: { ...server, ...headerPayload(server) } }
-                    : { server: serverForTest(server) };
-                const data = await jsonPost('/api/mcp/test', body, { rejectOkFalse: true });
-                const warnings = (data.configuration_warnings || []).join(' ');
-                setMessage(`Draft connection OK — ${toolCountLabel(Number(data.tool_count || 0))} discovered. No tool was called.${warnings ? ' ' + warnings : ''}`, warnings ? 'warn' : 'ok');
-            } catch (err) {
-                setMessage(`Test failed: ${err && err.message ? err.message : err}`, 'danger');
-            } finally {
-                testBtn.disabled = false;
-            }
-        });
-    }
-
-    const refreshBtn = card.querySelector('[data-mcp-refresh]');
-    if (refreshBtn) {
-        refreshBtn.addEventListener('click', async () => {
-            const server = mcpServers[idx];
-            if (!server) return;
-            const sid = String(server.id || '').trim();
-            if (!sid) {
-                setMessage('Save the server (with an ID) before refreshing.', 'warn');
+    card.querySelector('[data-mcp-test]')?.addEventListener('click', async () => {
+        const server = rowServer;
+        const errors = validateHeaderFields(card, server, saved?.identity);
+        if (errors.length) { setCardMessage(server, errors[0].message, 'danger'); errors[0].input.focus(); return; }
+        const generation = draftGenerations.get(server) || 0;
+        setPending(server, 'test', true);
+        setCardMessage(server, 'Testing connection...', 'muted', 'test');
+        try {
+            // The saved identity lets the backend restore kept values; the
+            // candidate's own identity still decides which saved server they are.
+            const candidate = collectServer(server);
+            const urlMasked = String(server.url || '').includes('://***@');
+            const keep = saved?.identity && (looksMasked(candidate.auth_token) || urlMasked || headerKeepsSavedValues(server));
+            const body = keep ? { server_id: saved.identity, server: candidate } : { server: serverForTest(candidate) };
+            const data = await jsonPost('/api/mcp/test', body, { rejectOkFalse: true });
+            if (!mcpServers.includes(server)) return;
+            if ((draftGenerations.get(server) || 0) !== generation) {
+                setCardMessage(server, 'This server changed while it was tested. Test again to check the current draft.', 'warn', 'test');
                 return;
             }
-            refreshBtn.disabled = true;
-            setMessage('Refreshing tools...', 'muted');
-            try {
-                const data = await jsonPost('/api/mcp/refresh', { server_id: sid }, { rejectOkFalse: true });
-                await refreshStatus();
-                const current = document.querySelector(`[data-mcp-index="${idx}"] [data-mcp-message]`);
-                if (current) { current.textContent = `Saved catalog refreshed — ${Number(data.tool_count || 0)} tools discovered. No tool was called.`;
-                    current.dataset.tone = 'ok'; current.hidden = false; }
-            } catch (err) {
-                setMessage(`Refresh failed: ${err && err.message ? err.message : err}`, 'danger');
-            } finally {
-                refreshBtn.disabled = false;
-            }
-        });
-    }
+            const warnings = (data.configuration_warnings || []).join(' ');
+            setCardMessage(server, `Draft connection OK — ${toolCountLabel(Number(data.tool_count || 0))} discovered. No tool was called.${warnings ? ' ' + warnings : ''}`, warnings ? 'warn' : 'ok', 'test');
+        } catch (err) {
+            if (!mcpServers.includes(server)) return;
+            const stale = (draftGenerations.get(server) || 0) !== generation;
+            setCardMessage(server, `Test failed${stale ? ' for an earlier draft' : ''}: ${err && err.message ? err.message : err}`, 'danger', 'test');
+        } finally {
+            setPending(server, 'test', false);
+        }
+    });
+
+    card.querySelector('[data-mcp-refresh]')?.addEventListener('click', async () => {
+        const server = rowServer;
+        // The saved catalog belongs to the saved identity (id, slug or name).
+        const sid = saved?.identity || '';
+        if (!sid) {
+            setCardMessage(server, 'Save the server before refreshing its saved catalog.', 'warn');
+            return;
+        }
+        setPending(server, 'refresh', true);
+        setCardMessage(server, 'Refreshing tools...', 'muted', 'refresh');
+        try {
+            const data = await jsonPost('/api/mcp/refresh', { server_id: sid }, { rejectOkFalse: true });
+            await refreshStatus();
+            if (mcpServers.includes(server)) setCardMessage(server, `Saved catalog refreshed — ${toolCountLabel(Number(data.tool_count || 0))} discovered. No tool was called.`, 'ok', 'refresh');
+        } catch (err) {
+            if (mcpServers.includes(server)) setCardMessage(server, `Refresh failed: ${err && err.message ? err.message : err}`, 'danger', 'refresh');
+        } finally {
+            setPending(server, 'refresh', false);
+        }
+    });
 }
 
 function serverForTest(server) {
-    const out = { ...server, ...headerPayload(server) };
+    const out = { ...server };
     if (looksMasked(out.auth_token)) {
         // Drop literal masks so inline tests never send "***" as Bearer auth.
         out.auth_token = '';
@@ -418,7 +409,7 @@ function renderEnvelopeStatus() {
         return;
     }
     if (!mcpStatusEnvelope.sdk_available) {
-        el.textContent = `MCP SDK not installed: ${mcpStatusEnvelope.sdk_error || 'install `mcp>=1.6` to enable MCP integration.'}`;
+        el.textContent = `MCP SDK not installed: ${mcpStatusEnvelope.sdk_error || 'install `mcp>=1.10` to enable MCP integration.'}`;
         el.dataset.tone = 'warn';
         return;
     }
@@ -488,21 +479,39 @@ export function initMcpSettings({ onChange } = {}) {
     bindAddButton();
     bindRefreshAllButton();
     const importButton = document.getElementById('btn-mcp-import');
-    importButton?.addEventListener('click', () => openMcpImportDialog({
-        draftIdentity: () => mcpServers.map((server) => server && typeof server === 'object' && !Array.isArray(server)
-            ? {...server, ...headerPayload(server)} : server),
-        onApply: (entries) => {
-            for (const entry of entries) {
-                if (entry.action === 'add') mcpServers.push({...entry.patch});
-                else if (entry.action === 'update') {
-                    const server = mcpServers[entry.index];
-                    Object.assign(server, entry.patch);
-                    if (Object.hasOwn(entry.patch, 'headers')) resetHeaderRows(server);
+    importButton?.addEventListener('click', async () => {
+        const applied = await openMcpImportDialog({
+            draftServers: () => mcpServers.map((server) => isServer(server) ? {
+                ...(server.id ? { id: String(server.id) } : {}), ...(server.slug ? { slug: String(server.slug) } : {}),
+                ...(server.name ? { name: String(server.name) } : {}),
+                transport: String(server.transport || 'streamable_http'), ...headerImportFacts(server),
+            } : null),
+            draftFreshness,
+            draftUrl: (index) => isServer(mcpServers[index]) ? String(mcpServers[index].url || '') : '',
+            onApply: (entries) => {
+                const touched = [];
+                for (const entry of entries) {
+                    if (entry.action === 'add') {
+                        const server = {...entry.patch};
+                        mcpServers.push(server);
+                        touched.push(server);
+                    } else if (entry.action === 'update') {
+                        const server = mcpServers[entry.index];
+                        Object.assign(server, entry.patch);
+                        if (['headers', 'auth_token'].some((key) => Object.hasOwn(entry.patch, key))) resetHeaderRows(server);
+                        draftGenerations.set(server, (draftGenerations.get(server) || 0) + 1);
+                        if (cardMessages.get(server)?.kind === 'test') cardMessages.delete(server);
+                        touched.push(server);
+                    }
                 }
-            }
-            renderAll(); notifyChanged();
-        },
-    }));
+                renderAll(); notifyChanged();
+                return touched;
+            },
+        });
+        // The dialog has returned focus to Import; hand it to the first card it changed.
+        const card = applied?.length ? cardFor(applied.find((server) => !savedMcpSecrets.has(server)) || applied[0]) : null;
+        revealNewRow(card, card?.querySelector('[data-mcp-field="id"]'));
+    });
     const enabled = document.getElementById('s-mcp-enabled');
     if (enabled) enabled.addEventListener('change', notifyChanged);
     const timeout = document.getElementById('s-mcp-tool-timeout');
@@ -520,7 +529,8 @@ export function applyMcpSettings(settings) {
         timeoutInput.value = String(Number.isFinite(value) && value > 0 ? value : 60);
     }
     const incoming = Array.isArray(settings.MCP_SERVERS) ? settings.MCP_SERVERS : [];
-    // auth_configured belongs to Settings response metadata, not user config.
+    // auth_configured belongs to Settings response metadata, not user config;
+    // the legacy pair's masked token itself becomes a header row.
     mcpServers = incoming.map((entry) => {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
         const { auth_configured: _authConfigured, ...s } = entry;
@@ -537,12 +547,9 @@ export function applyMcpSettings(settings) {
             auth_token: String(s.auth_token ?? ''),
             allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
         };
-        savedMcpSecrets.set(server, {
-            identity: String(s.id || s.slug || s.name || ''), value: server.auth_token,
-        });
+        savedMcpSecrets.set(server, { identity: serverIdentity(s), url: server.url });
         return server;
     });
-    mcpDirtyTokens = new Set();
     renderAll();
     refreshStatus();
 }
@@ -552,7 +559,7 @@ export function validateMcpSettings() {
     const errors = [];
     document.querySelectorAll('[data-mcp-card]').forEach((card) => {
         const server = mcpServers[Number(card.dataset.mcpIndex)];
-        if (server) errors.push(...validateHeaderFields(card, server));
+        if (server) errors.push(...validateHeaderFields(card, server, savedMcpSecrets.get(server)?.identity));
     });
     document.querySelectorAll('[data-mcp-field="env"], [data-mcp-field="env_from_settings"]').forEach((input) => {
         let value, parsed = false;
@@ -570,33 +577,51 @@ export function validateMcpSettings() {
     return errors;
 }
 
+function isServer(server) {
+    return Boolean(server) && typeof server === 'object' && !Array.isArray(server);
+}
+
+/** One server as Save and Test send it; header rows decide headers and the legacy pair. */
+function collectServer(s) {
+    return {
+        ...s,
+        id: String(s.id || '').trim(),
+        name: String(s.name || '').trim(),
+        enabled: Boolean(s.enabled),
+        transport: String(s.transport || 'streamable_http'),
+        url: String(s.url || '').trim(),
+        command: String(s.command || '').trim(),
+        args: s.args ?? [],
+        auth_header: String(s.auth_header || 'Authorization').trim() || 'Authorization',
+        auth_token: String(s.auth_token || ''),
+        allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
+        ...credentialPayload(s),
+    };
+}
+
+/** Raw draft for dirty tracking: header rows are kept even where the payload collapses them. */
+export function mcpDraftSnapshot() {
+    return mcpServers.map((server) => isServer(server) ? headerDraftRows(server) : null);
+}
+
+/** Every field an import Apply could overwrite or match on, raw header rows and order included. */
+function draftFreshness() {
+    return JSON.stringify(mcpServers.map((server) => {
+        if (!isServer(server)) return server;
+        const { enabled: _enabled, allowed_tools: _allowedTools, ...fields } = server;
+        return [fields, headerDraftRows(server)];
+    }));
+}
+
 export function collectMcpSettings() {
     const enabledCheckbox = document.getElementById('s-mcp-enabled');
     const timeoutInput = document.getElementById('s-mcp-tool-timeout');
     const enabled = enabledCheckbox ? enabledCheckbox.checked : false;
     const timeoutRaw = timeoutInput ? Number(timeoutInput.value) : 60;
     const timeout = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? Math.floor(timeoutRaw) : 60;
-    const out = {
+    return {
         MCP_ENABLED: Boolean(enabled),
         MCP_TOOL_TIMEOUT_SEC: timeout,
-        MCP_SERVERS: mcpServers.map((s) => {
-            if (!s || typeof s !== 'object' || Array.isArray(s)) return s;
-            const transport = String(s.transport || 'streamable_http');
-            return {
-                ...s,
-                ...headerPayload(s),
-                id: String(s.id || '').trim(),
-                name: String(s.name || '').trim(),
-                enabled: Boolean(s.enabled),
-                transport,
-                url: String(s.url || '').trim(),
-                command: String(s.command || '').trim(),
-                args: s.args ?? [],
-                auth_header: String(s.auth_header || 'Authorization').trim() || 'Authorization',
-                auth_token: String(s.auth_token || ''),
-                allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
-            };
-        }),
+        MCP_SERVERS: mcpServers.map((s) => isServer(s) ? collectServer(s) : s),
     };
-    return out;
 }

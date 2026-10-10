@@ -6,6 +6,11 @@ policy above the seam (attempt rails, persistence, parsing, actor projection,
 quorum) and knows only that a route exists.
 
 The dependency runs one way: this module never imports the coordinator.
+
+A session verdict is trusted as structured output only when the run reports
+``outputConformance == "passed"``; otherwise it falls to the strict parse, then
+light-model extraction, and any landing below the requested ``outputSchema`` is
+disclosed as ``capability_delta``.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from ouroboros.delegate_custody_usage import (
 from ouroboros.triad_review import (
     ACCEPTANCE_SURFACE_RULES,
     TIER_CLASSIFICATION_RULES,
+    TWO_PART_SESSION_OUTPUT_SCHEMA,
     default_output_contract,
     review_output_shape,
 )
@@ -75,18 +81,21 @@ class ReviewRouteKind(str, Enum):
     AGENT_SESSION = "agent_session"
 
 
-def delivery_retrieves(route: Any, subagent_id: Any) -> bool:
+def delivery_retrieves(route: Any, native_retrieval: Any) -> bool:
     """THE delivery-class predicate: does this reviewer row read the subject
-    with its own tools (a hosted session, or a configured-subagent api row's
-    native tool rounds) instead of receiving the assembled packet?
+    with its own tools (a hosted session, or an api row saved with the
+    ``native`` delivery — bounded native tool rounds) instead of receiving the
+    assembled packet?
 
     One definition for every caller — slot properties, admission, packet fit
     and the surfaces' request builders — so a delivery class can never be
     recognised by one caller and missed by another. ``route`` may be a
-    ``ReviewRouteKind`` or its wire string."""
+    ``ReviewRouteKind`` or its wire string; ``native_retrieval`` is the row's
+    own explicit delivery fact. Every pool row carries a catalog id, so the id
+    is NOT a delivery signal (F8) and this predicate no longer reads one."""
     return (
         str(getattr(route, "value", route) or "") == ReviewRouteKind.AGENT_SESSION.value
-        or bool(str(subagent_id or "").strip())
+        or bool(native_retrieval)
     )
 
 class ReviewRouteUnavailable(RuntimeError):
@@ -501,8 +510,8 @@ class ApiChatReviewExecutor(ReviewSlotExecutor):
 # ---------------------------------------------------------------------------
 # Route configuration.
 #
-# Per-row delivery lives in the structured reviewer-slot SSOT
-# (``OUROBOROS_REVIEWER_SLOTS`` — D14/6.1); the phase-5 per-row route envs
+# Per-row delivery lives on the catalog's reviewer rows (the review pool,
+# ``OUROBOROS_SUBAGENTS`` ``delivery`` field); the phase-5 per-row route envs
 # (``OUROBOROS_REVIEW_ROUTES`` / ``OUROBOROS_SCOPE_REVIEW_ROUTES``) are
 # RETIRED settings keys (ABI-10) and are ignored — a row built outside the
 # structured config is pinned ``api_chat`` explicitly. The one surviving key
@@ -620,26 +629,23 @@ ACCEPTANCE_SESSION_OUTPUT_SCHEMA: Dict[str, Any] = {
 def review_session_output_schema(surface: str) -> Optional[Dict[str, Any]]:
     """The session verdict schema, shaped to the SURFACE's own clean contract.
 
-    The shared schema admits ``{"findings": []}`` — the honest clean verdict for a
-    triad or ordinary advisory reviewer. Scope's coverage contract requires all
-    checklist rows (PASS included); Skill Review has the same matrix shape. Their
-    schemas demand ``minItems: 1`` so an engine cannot conform with an empty answer;
-    each surface's downstream parser still verifies exact item coverage. An
-    ``object``-shaped surface (task acceptance) asks for the whole verdict object; a
-    ``report`` surface asks for NO schema — its prose passes through verbatim.
+    The shared schema admits ``{"findings": []}`` — the honest clean verdict for an
+    ordinary advisory reviewer. Skill Review's matrix contract requires all checklist
+    rows (PASS included): its schema demands ``minItems: 1`` and the downstream parser
+    still verifies exact item coverage. The commit gate's ``two_part`` shape asks for
+    contract B's one object; an ``object`` surface (task acceptance) for the whole
+    verdict object; a ``report`` surface for NO schema — its prose passes verbatim.
     """
     shape = review_output_shape(surface)
-    if shape == "report":
-        return None
-    if shape == "object":
-        return ACCEPTANCE_SESSION_OUTPUT_SCHEMA
+    if shape in ("report", "object", "two_part"):
+        return {"object": ACCEPTANCE_SESSION_OUTPUT_SCHEMA, "two_part": TWO_PART_SESSION_OUTPUT_SCHEMA}.get(shape)
     if surface == "plan_review":
         # plan review's own element contract (4e133c8a): the generic item/verdict shape
         # would conform-and-launder — an unknown class demotes to a note.
         from ouroboros.tools.plan_spec import PLAN_REVIEW_SESSION_OUTPUT_SCHEMA
 
         return PLAN_REVIEW_SESSION_OUTPUT_SCHEMA
-    if surface not in {"scope_review", "skill_review"}:
+    if surface != "skill_review":
         return REVIEW_SESSION_OUTPUT_SCHEMA
     shaped = json.loads(json.dumps(REVIEW_SESSION_OUTPUT_SCHEMA))
     shaped["properties"]["findings"]["minItems"] = 1
@@ -846,7 +852,7 @@ def run_delegated_review_session(
                 thread_id = ensure_review_thread(
                     gateway, custody, thread_id, route=route, root=root,
                     surface=surface, slot_id=slot_id, task_id=task_id)
-                existing_project = project_id
+                existing_project = project_id  # the retained thread now needs this registration
             invocation_id = custody.new_invocation_id()
             seconds = bounded_seconds(timeout_sec, default=300, maximum=_CLAUDEXOR_MAX_SECONDS)
             run_request = prepare_review_session_request(
@@ -884,7 +890,7 @@ def run_delegated_review_session(
             if not requested:
                 # No durable request means no POST; only a fresh registration is retirable.
                 _retire_orphaned_review_registration(
-                    custody, gateway, custody_drive, project_id, definite_refusal=not recovering,
+                    custody, gateway, custody_drive, project_id if not existing_project else "", definite_refusal=not recovering,
                     reason="start_request_row_unwritable",
                     invocation_id=invocation_id, surface=surface, slot_id=slot_id)
                 raise ReviewRouteUnavailable(
@@ -913,7 +919,7 @@ def run_delegated_review_session(
                 definite = isinstance(exc, OwnerPauseRefused) or 400 <= status < 500
                 # Only a definite 4xx proves the registration never bound a run.
                 _retire_orphaned_review_registration(
-                    custody, gateway, custody_drive, project_id,
+                    custody, gateway, custody_drive, project_id if not existing_project else "",
                     definite_refusal=definite and not recovering,
                     reason=code, invocation_id=invocation_id, surface=surface, slot_id=slot_id)
                 if definite and not recovering:

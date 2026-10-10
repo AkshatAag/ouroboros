@@ -197,6 +197,20 @@ def test_a_new_server_id_or_shared_identity_never_receives_a_saved_header():
         _rehydrate_mcp_servers_payload(_mask_mcp_servers_payload(saved) * 2, saved)
 
 
+def test_the_browser_identity_mirror_table_is_the_backend_identity():
+    """web/tests/fixtures/mcp_server_identity_parity.json pins both implementations to one table."""
+    import pathlib
+
+    table = json.loads((pathlib.Path(__file__).resolve().parents[1] / "web" / "tests" / "fixtures"
+                        / "mcp_server_identity_parity.json").read_text(encoding="utf-8"))
+    for row in table["canonical"]:
+        assert mcp_client.canonical_server_id(row["raw"]) == row["canonical"], row
+    for row in table["entries"]:
+        assert mcp_client.raw_server_id(row["entry"]) == row["identity"], row
+    assert {row["canonical"] for row in table["canonical"] if row["raw"].strip().lower() in ("docs", "docs!")} == {"docs"}
+    assert any(len(row["canonical"]) == 24 and row["canonical"][11] == "_" for row in table["canonical"])  # digest path
+
+
 def test_a_whole_malformed_saved_map_round_trips_unchanged_until_removed():
     saved = [http(headers="Authorization: " + BEARER)]
     masked = _mask_mcp_servers_payload(saved)
@@ -344,16 +358,46 @@ def test_settings_rejects_invalid_authored_headers_without_writing(mcp_settings,
 
 
 @pytest.mark.parametrize("headers", ["malformed-map-synthetic", {"X-Bad": {"value": CUSTOM}}, {"X-Bad": 9}])
-def test_unrelated_save_keeps_malformed_existing_headers_and_null_rows(mcp_settings, headers):
+def test_unrelated_save_keeps_malformed_existing_headers_and_unknown_fields(mcp_settings, headers):
     case = mcp_settings
-    case.on_disk["MCP_SERVERS"] = [None, {"id": "old", "headers": headers, "future": {"yes": True}}]
+    case.on_disk["MCP_SERVERS"] = [{"id": "old", "headers": headers, "future": {"yes": True}}]
     served = _served(case)
-    assert served[0] is None and CUSTOM not in json.dumps(served)
+    assert CUSTOM not in json.dumps(served)
     response = case.client.post("/api/settings", json={"MCP_SERVERS": served})
     assert response.status_code == 200, response.text
-    assert case.saved["MCP_SERVERS"][0] is None
-    assert case.saved["MCP_SERVERS"][1]["headers"] == headers
-    assert case.saved["MCP_SERVERS"][1]["future"] == {"yes": True}
+    assert case.saved["MCP_SERVERS"][0]["headers"] == headers
+    assert case.saved["MCP_SERVERS"][0]["future"] == {"yes": True}
+
+
+@pytest.mark.serial  # the shared fixture's module is serial: it re-points the Settings file
+def test_production_read_and_write_keep_untouched_legacy_and_malformed_values(reveal_settings, monkeypatch):  # noqa: F811
+    """The real loader, GET, POST and file: not an in-memory helper document.
+
+    Non-object rows are dropped by the production reader before any consumer
+    sees them; every object entry's unknown fields, malformed header map and
+    untouched legacy token survive an unrelated save byte for byte.
+    """
+    case = reveal_settings
+    monkeypatch.setattr(mcp_client, "refresh_all_background", lambda **kwargs: None)
+    entries = [
+        None,
+        {"id": "legacy", "url": "https://legacy.example/mcp", "auth_header": "X-Legacy",
+         "auth_token": "legacy-tökén-0011", "future": {"kept": True}},  # legacy admission, not ASCII-only
+        {"id": "broken", "url": "https://broken.example/mcp", "headers": {"X-Bad": {"value": CUSTOM}}},
+        {"id": "multi", "url": "https://multi.example/mcp", "headers": {"Authorization": BEARER, "X-Empty": ""}},
+    ]
+    case.settings["MCP_SERVERS"] = entries
+    case.path.write_text(json.dumps(case.settings), encoding="utf-8")
+    with TestClient(case.app) as client:
+        served = client.get("/api/settings").json()["MCP_SERVERS"]
+        assert [entry["id"] for entry in served] == ["legacy", "broken", "multi"]
+        assert served[0]["auth_token"] == "legacy-t...", served[0]  # the legacy prefix mask, unchanged
+        assert CUSTOM not in json.dumps(served) and BEARER not in json.dumps(served)
+        response = client.post("/api/settings", json={"MCP_SERVERS": served})
+        assert response.status_code == 200, response.text
+    stored = json.loads(case.path.read_text(encoding="utf-8"))["MCP_SERVERS"]
+    assert [{key: value for key, value in entry.items() if key in source} for entry, source in
+            zip(stored, entries[1:])] == entries[1:]
 
 
 def test_invalid_config_diagnostic_masks_header_echoes_even_before_a_config_exists(caplog):
@@ -363,13 +407,30 @@ def test_invalid_config_diagnostic_masks_header_echoes_even_before_a_config_exis
 
 
 @pytest.mark.parametrize("transport, sdk_name", [("streamable_http", "streamablehttp_client"), ("sse", "sse_client")])
-def test_both_transport_factories_use_the_same_literal_wire_map(monkeypatch, transport, sdk_name):
+def test_both_transport_factories_use_the_same_literal_wire_map_and_origin_guard(monkeypatch, transport, sdk_name):
+    import asyncio
+    import contextlib
+
     seen = []
-    monkeypatch.setattr(mcp_client, sdk_name, lambda url, **kwargs: seen.append((url, kwargs)))
+
+    @contextlib.asynccontextmanager
+    async def sdk(url, **kwargs):
+        seen.append((url, kwargs))
+        yield ("read", "write")
+
+    monkeypatch.setattr(mcp_client, sdk_name, sdk)
     cfg, errors = config(transport=transport, headers={"Authorization": BASIC, "X-Key": CUSTOM, "X-Clear": ""})
     assert not errors
-    mcp_client._transport_factory(cfg)
-    assert seen == [(cfg.url, {"headers": {"Authorization": BASIC, "X-Key": CUSTOM}})]
+
+    async def enter():
+        async with mcp_client._transport_factory(cfg) as streams:
+            return streams
+
+    assert asyncio.run(enter()) == ("read", "write")
+    [(url, kwargs)] = seen
+    assert url == cfg.url and kwargs["headers"] == {"Authorization": BASIC, "X-Key": CUSTOM}
+    factory = kwargs["httpx_client_factory"]
+    assert isinstance(factory.__self__, mcp_client._CredentialOriginGuard) and factory.__self__.cfg is cfg
 
 
 def test_renamed_test_candidate_cannot_inherit_the_selected_servers_legacy_token(test_endpoint):

@@ -25,6 +25,7 @@ COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
+    "inspect_harness", "maintain_harness",
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -89,6 +90,7 @@ LOCAL_READONLY_SUBAGENT_MODE: str = "local_readonly_subagent"
 # knowledge notes, memory marks and chronicle drafts below. Browser interaction remains available
 # by explicit product decision, so this mode is not a remote website sandbox.
 LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
+    "inspect_harness",
     "finish_task",
     # switch_model changes COGNITIVE POWER, not authority: a child that started on
     # the cheap lane and finds the work harder raises itself instead of failing or
@@ -149,6 +151,7 @@ ACTING_SUBAGENT_MODE: str = "acting_subagent"
 # integrates and is the sole committer. Extension / MCP tools are denied unless
 # explicitly granted per-child via TaskConstraint.external_tool_grants.
 ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
+    "inspect_harness",
     "finish_task",
     # switch_model changes COGNITIVE POWER, not authority: a child that started on
     # the cheap lane and finds the work harder raises itself instead of failing or
@@ -200,6 +203,7 @@ def acting_tool_names_for_context(ctx: object, registered_names: Iterable[str]) 
 
 
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
+    "inspect_harness",
     "read_file", "list_files",
     "search_code", "query_code", "recent_tasks",
     "web_search", "chat_history",
@@ -263,6 +267,8 @@ UNTRUNCATED_REPO_READ_PREFIXES: tuple[str, ...] = (
 
 # Per-tool char caps; omitted tools use DEFAULT_TOOL_RESULT_LIMIT.
 TOOL_RESULT_LIMITS: dict[str, int] = {
+    "inspect_harness": 80_000,
+    "maintain_harness": 80_000,
     "read_file": 80_000,
     "recent_tasks": 80_000,
     "knowledge_read": 80_000,
@@ -362,6 +368,7 @@ def routing_action_for_tool(name: object) -> str:
 # named below, so the table cannot drift away from the catalog. Publication
 # (``FOREGROUND_MUTATIVE_TOOLS``) joins the set at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
+    "maintain_harness",
     # starting or steering work (steer_task stays: the nanny of a running campaign)
     "promote_chat_to_task", "schedule_subagent", "schedule_followup", "plan_task",
     "route_to_project", "ensure_project_scope", "delegate_start", "initiate_presence",

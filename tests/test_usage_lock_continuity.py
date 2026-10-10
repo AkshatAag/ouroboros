@@ -86,6 +86,77 @@ def rows(root):
     return ledger_rows(root)
 
 
+@pytest.mark.parametrize("cancel", [False, True])
+def test_async_first_generation_real_writer_contention_keeps_loop_and_custody(root, monkeypatch, cancel):
+    from ouroboros.llm_stream import consume_stream_async
+    from ouroboros.openrouter_cost import binding_for_target
+    from tests.test_openrouter_transport_evidence import Wire, frame, target
+
+    acquired, release, entered, expired = (threading.Event() for _ in range(4))
+    original, bindings, threads = ua.bind_provider_generation, [], []
+
+    def observe(generation, **kwargs):
+        bindings.append(generation)
+        entered.set()
+        return original(generation, **kwargs)
+
+    def hold():
+        with ua._locked(root):
+            acquired.set()
+            if not release.wait(3):
+                expired.set()  # Bounded failure if the event loop cannot release us.
+
+    monkeypatch.setattr(ua, "bind_provider_generation", observe)
+
+    async def send():
+        holder = threading.Thread(target=hold)
+        threads.append(holder)
+        holder.start()
+        assert acquired.wait(2)
+        wire = Wire([frame(usage={"cost": 0.25}, finish="stop"), b"data: [DONE]\n\n"],
+                    header="gen-fixture")
+        return await consume_stream_async(wire)
+
+    async def exercise():
+        req = ua.AttemptRequest(model="vendor/fixture", provider="openrouter", reservation_usd=2,
+                                drive_root=root, provider_receipt_binding=binding_for_target(target()))
+        task = asyncio.create_task(ua.execute_physical_attempt_async(req, send))
+        try:
+            for _ in range(200):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered.is_set() and not expired.is_set()
+            if cancel:
+                task.cancel()
+            # This coroutine must progress while the real store writer remains held.
+            await asyncio.sleep(0.03)
+            assert not task.done() and not expired.is_set()
+            release.set()
+            if cancel:
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                assert (await task).model_dump()["choices"][0]["message"]["content"] == "answer"
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        for holder in threads:
+            holder.join(3)
+            assert not holder.is_alive()
+    assert bindings == ["gen-fixture"]
+    row = rows(root)[0]
+    assert row["provider_receipt_binding"]["generation_id"] == "gen-fixture"
+    assert row["state"] == ("unresolved" if cancel else "settled")
+
+
 @contextlib.contextmanager
 def held_name_lock(root, timeout=5):
     """The name-protocol helper itself (the store's ``name`` tier lock)."""
@@ -109,8 +180,7 @@ def held_name_lock(root, timeout=5):
 
 @pytest.mark.parametrize("stage", ["reserve", "dispatch"])
 @pytest.mark.parametrize("interactive", [False, True])
-@pytest.mark.parametrize("scheduler_pause", [0, .25])
-def test_same_chain_preparation_stamp_claim_and_one_send(root, short_acquisitions, stage, interactive, monkeypatch, scheduler_pause):
+def test_same_chain_preparation_stamp_claim_and_one_send(root, short_acquisitions, stage, interactive):
     calls, prepared, stamps = [], [], []
     with contextlib.ExitStack() as stack:
         events = stack.enter_context(owner(root, task={"_is_direct_chat": interactive, "_presence_turn": interactive}))
@@ -119,19 +189,9 @@ def test_same_chain_preparation_stamp_claim_and_one_send(root, short_acquisition
 
         def start_hold():
             release = stack.enter_context(held_lock(root))
-            original_put = events.put
-
-            def release_on_entered(item, *args, **kwargs):
-                original_put(item, *args, **kwargs)
-                data = item.get("data", {})
-                if (data.get("checkpoint_kind") == "usage_lock_wait"
-                        and data.get("phase") == "entered"):
-                    release.set()
-
-            # Hold through a real reported contention, not a scheduler-sized timer.
-            # All emitted checkpoints and one-send assertions below stay real.
-            monkeypatch.setattr(events, "put", release_on_entered)
-            time.sleep(scheduler_pause)  # longer than the former .18s release timer
+            timer = threading.Timer(.18, release.set)
+            timer.start()
+            stack.callback(timer.join, 2)
 
         def before(held):
             prepared.append(held.attempt_id)

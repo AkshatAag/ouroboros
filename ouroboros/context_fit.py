@@ -747,15 +747,16 @@ def _failed_route_evidence(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
     return route, evidence
 
 
-def main_output_reserve_tokens(*, use_local: bool) -> int:
+def main_output_reserve_tokens(*, use_local: bool, evidence=None) -> int:
     """Predict the existing send cap without changing its physical allowance."""
     from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
 
+    requested = MAIN_LOOP_MAX_TOKENS
     if use_local:
         from ouroboros.llm_local import local_context_limits
-
-        return local_context_limits(MAIN_LOOP_MAX_TOKENS)[1]
-    return MAIN_LOOP_MAX_TOKENS
+        requested = local_context_limits(requested)[1]
+    from ouroboros.response_limits import ResponseLimit
+    return ResponseLimit(**(getattr(evidence, "response_limit", {}) or {})).ceiling(requested)
 
 
 def _request_tokens(system_content: List[Dict[str, Any]], user_content_json: str) -> int:
@@ -828,7 +829,7 @@ def build_context_fit_plan(
     # data-only fit representation to the high-level model loop.
     from ouroboros.capability_evidence import is_known
 
-    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")))
+    output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
     # One observation store: witnesses are written at settlement into the
     # canonical host root, so a child task's own drive must not be consulted.
     ratio = _route_calibration_ratio(

@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from ouroboros.config import load_settings
 from ouroboros.gateway._helpers import json_error, request_json_or
@@ -112,12 +113,30 @@ async def api_mcp_test(request: Request) -> JSONResponse:
 
 
 async def api_mcp_import_preview(request: Request) -> JSONResponse:
-    """Translate pasted client JSON into draft patches; no settings or transport I/O."""
+    """Translate pasted client JSON into draft patches; no settings or transport I/O.
+
+    ``servers`` is the draft's matching metadata (``MCPImportDraftServer``):
+    identities, transports and header names, never header values or addresses.
+    """
+    from ouroboros.gateway.mcp_import_contracts import MCPImportPreviewRequest
+    from ouroboros.gateway.schema import validate_ingress
     from ouroboros.mcp_import import preview_import
 
     headers = {"Cache-Control": "no-store"}
     body = await request_json_or(request, None)
-    if not isinstance(body, dict) or not isinstance(body.get("text"), str) or not isinstance(body.get("servers"), list):
-        return JSONResponse({"ok": False, "error": "Supply text and a servers list.", "entries": []},
-                            status_code=400, headers=headers)
+    # Executable gateway ABI: the derived request schema is the ingress gate.
+    schema_errors = validate_ingress(body, MCPImportPreviewRequest)
+    if schema_errors:
+        return JSONResponse({"ok": False, "error": f"Supply text and a servers list: {schema_errors[0]}.",
+                             "entries": []}, status_code=400, headers=headers)
     return JSONResponse(preview_import(body["text"], body["servers"]), headers=headers)
+
+
+def mcp_routes() -> list[Route]:
+    """The MCP family: saved status and refresh, the draft Test and the import preview."""
+    return [
+        Route("/api/mcp/status", endpoint=api_mcp_status, methods=["GET"]),
+        Route("/api/mcp/refresh", endpoint=api_mcp_refresh, methods=["POST"]),
+        Route("/api/mcp/test", endpoint=api_mcp_test, methods=["POST"]),
+        Route("/api/mcp/import/preview", endpoint=api_mcp_import_preview, methods=["POST"]),
+    ]

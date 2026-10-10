@@ -6,9 +6,15 @@ value is a credential whatever its header name: passive Settings projections
 emit one placeholder per value, and only the exact placeholder of the one
 saved server with the same identity and the same case-insensitive header name
 restores a saved value. An empty value is kept in the configuration but is not
-sent. The legacy ``auth_header``/``auth_token`` pair keeps its own meaning; a
-header that the active legacy pair also sets is a configuration error, never a
-silent precedence.
+sent. The legacy ``auth_header``/``auth_token`` pair keeps its own storage and
+prefix mask; the Settings editor shows it as one more header row without
+rewriting it. A header that the active legacy pair also sets is a
+configuration error, never a silent precedence.
+
+``***set***`` (``CONFIGURED_SECRET_PLACEHOLDER``) is the Settings-wide "keep
+the saved value" marker, so it cannot itself be stored as a header value: the
+editor and the import preview refuse it as a literal, and an API caller that
+sends it under an unchanged name keeps the saved value.
 """
 
 from __future__ import annotations
@@ -120,6 +126,12 @@ def restore_headers(incoming: Any, saved_server: Mapping[str, Any], *, server_id
     return out
 
 
+def _header_selection(row: Mapping[str, Any]) -> tuple:
+    """The fields that decide which headers one entry sends."""
+    return (row.get("headers"), str(row.get("transport") or "streamable_http").strip().lower(),
+            str(row.get("auth_header") or "Authorization").strip(), str(row.get("auth_token") or "").strip())
+
+
 def validate_changed_headers(incoming: Any, current: Any) -> None:
     """Validate newly authored header settings, not unrelated legacy damage.
 
@@ -137,11 +149,7 @@ def validate_changed_headers(incoming: Any, current: Any) -> None:
             continue
         matches = saved.get(raw_server_id(entry), [])
         old = matches[0] if len(matches) == 1 else {}
-        def selection(row):
-            return (row.get("headers"), str(row.get("transport") or "streamable_http").strip().lower(),
-                    str(row.get("auth_header") or "Authorization").strip(), str(row.get("auth_token") or "").strip())
-
-        if old and selection(entry) == selection(old):
+        if old and _header_selection(entry) == _header_selection(old):
             continue
         headers = validate_headers(entry["headers"],
                                    legacy_header=str(entry.get("auth_header") or "Authorization").strip(),

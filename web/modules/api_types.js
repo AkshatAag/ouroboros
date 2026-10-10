@@ -1,4 +1,4 @@
-/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js. */
+/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the MCP import preview in ./mcp_import_types.js. */
 /**
  * @typedef {Object} CostPresentation
  * @property {'own'|'root_tree'} scope
@@ -32,6 +32,7 @@
  * @property {string} runtime_mode
  * @property {string} context_mode
  * @property {boolean} context_mode_auto_low  // frozen compatibility field; always false
+ * @property {EffortRange} effort_range  // the owner's effort range (POST /api/owner/effort-range), the tolerant read
  * @property {string} safety_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
@@ -77,23 +78,7 @@
  * @property {string} phase
  * @property {number} started_at
  */
-/**
- * @typedef {Object} ActiveChatActivity
- * @property {Object=} owner_wait  // quiz-bound state, quiz_state and optional wait_ended_at, independent of Project detail
- * @property {Object=} project_admission_hold  // accepted unstarted work waiting for original Project authority
- * @property {string=} pause_cause  // budget | owner | restart | sleep | unknown; display only
- * @property {Object=} required_question  // read-only pointer to the current required Project quiz
- * @property {boolean=} required_question_unavailable  // a recorded owner-question wait whose detail could not be read: possibly blocked, never "no question"
- * @property {Object.<string,Object>=} model_waits
- * @property {number=} task_attempt
- * @property {string} activity_id
- * @property {number} chat_id
- * @property {string} project_id
- * @property {string} client_message_id  // empty for managed queue rows
- * @property {string} kind  // direct_chat | managed_task — presentational label; membership in this census, not kind, decides liveness
- * @property {string} phase  // managed: queued | budget_pausing | budget_paused | working | finalizing | unknown (unreadable Pause authority); direct: thinking or unknown; parked direct turns retain ID/kind and use managed phases
- * @property {number} started_at
- */
+/** @typedef {import('./task_activity_types.js').ActiveChatActivity} ActiveChatActivity */
 /**
  * @typedef {Object} EvolutionDataResponse
  * @property {Object[]} points
@@ -327,6 +312,9 @@
  * @property {string=} model_lane
  * @property {string=} requested_model_lane
  * @property {string=} effective_model_lane
+ * @property {string=} effort_level  The effort decided at dispatch (a session row: its leaf's); empty = unknown, no chip.
+ * @property {string=} effort_requested  The parent's request when it made one.
+ * @property {string=} effort_source  auto | pin | model_name | cyber.
  * @property {string=} executor_route
  *   Phase 6: the OPAQUE harness route RESOLVED AT DISPATCH for this bubble /
  *   subagent (delegated routes only) — the route it was sent to, not a receipt
@@ -462,6 +450,7 @@
  *   taskSourceDownloadUrl; not an original reviewer transcript or a copy of the row.
  * @property {string=} target_label
  * @property {string=} project_id
+ * @property {string=} task_name  // structured work title on Project creation/transfer entries
  * @property {string=} project_name
  * @property {string=} handoff_id  // immutable origin/destination receipt identity
  * @property {Object=} terminal_time  // host-owned occurrence; ts remains publication time
@@ -847,6 +836,15 @@
  */
 
 /**
+ * @typedef {Object} EffortRange  min ≤ recommended ≤ max, each an EFFORT_SCALE tier (the tolerant read)
+ * @property {string} min
+ * @property {string} recommended
+ * @property {string} max
+ *
+ * @typedef {Object} OwnerEffortRangeResponse
+ * @property {boolean} ok
+ * @property {EffortRange} effort_range
+ *
  * @typedef {Object} OwnerSafetyModeResponse
  * @property {boolean} ok
  * @property {string} safety_mode  // full | light | off (v6.54.3)
@@ -1236,6 +1234,9 @@
  * @property {Object=} profiles
  * @property {Array<Object>=} quota
  * @property {Array<Object>=} quota_absences
+ * @property {Array<Object>=} resources Engine resource facets retain decimal strings, units and independent observation times.
+ * @property {Object<string, boolean>=} resource_capabilities Catalog-negotiated read, refresh, reset and inspect_reset operations.
+ * @property {ClaudexorReadState=} resource_capabilities_read Operations-catalog evidence, independent of reads.catalog (agent capabilities).
  * @property {ClaudexorStatusReads=} reads
  * @property {boolean=} unified_accounts
  * @property {SubagentLastDelegation=} subagent_last_delegation
@@ -1471,13 +1472,16 @@
  * @property {string[]=} hot_code_paths
  * @property {'auto_merge'|'assisted'=} recommended_strategy
  */
+
 /**
  * @typedef {Object} UpdatePreflightRequest
  */
+
 /**
  * @typedef {Object} UpdatePreflightResponse
  * @property {UpdateMergePlan} merge_plan
  */
+
 /**
  * @typedef {Object} UpdateApplyRequest
  * @property {'auto_merge'|'assisted'|'manual'|'replace'} strategy
@@ -1485,6 +1489,7 @@
  * @property {string=} expected_target_sha
  * @property {boolean=} confirm_recovery
  */
+
 /**
  * @typedef {Object} UpdateApplySuccessResponse
  * @property {'ok'|'restart_required'|'assisted_started'|'manual'} status
@@ -1494,6 +1499,7 @@
  * @property {UpdateMergePlan=} merge_plan
  * @property {string=} error
  */
+
 /**
  * @typedef {Object} UpdateApplyErrorResponse
  * @property {string} error
@@ -1508,6 +1514,7 @@
  * @property {?number=} estimated_wave_usd Wave-floor admission estimate (worst-case review-pack caps).
  * @property {?number=} remaining_usd Remaining model budget the floor compared against.
  */
+
 /**
  * Process-local execution observation on /api/update/status; not recovery authority.
  * @typedef {Object} UpdateProgress
@@ -1521,16 +1528,19 @@
  * @property {string} error
  * @property {boolean} restart_required
  */
+
 /**
  * @typedef {Object} UpdateProgressChangedOutbound
  * @property {'update_progress_changed'} type
  */
+
 /**
  * @typedef {Object} UpdateStatusReadyOutbound
  * @property {'update_status_ready'} type
  * @property {boolean} available
  * @property {?boolean} check_ok
  */
+
 /**
  * LLM-written update letter in `/api/update/status` and `/api/update/check`.
  * The additive `letter` is absent/null without a stored letter. It outlives its update;
@@ -1551,6 +1561,7 @@
  * @property {string} failed_at  ISO 8601 time of the failed attempt, independent of the shown text's written_at
  * @property {({base_sha: string, target_sha: string, update_channel: string, target_ref: string}|null)} latest_failed_key  the failed attempt's range, never the provenance of retained text
  */
+
 export const MAX_LINK_ACTIONS = 12;
 export const MAX_QUIZ_OPTIONS = 6;
 // Mirror task_decision._COMMENT_MAX: ingress refuses longer comments, never
@@ -1586,15 +1597,4 @@ export const GATEWAY_CONTRACT_VERSION = '7.6.0';
  * Physical messages and folded review attempts may additionally carry
  * history_id:string and history_position:ChatHistoryPosition. They identify
  * stored source records, never current task or review authority.
- */
-
-/** @typedef {Object} MCPImportPreviewRequest
- * @property {string} text
- * @property {Array<*>} servers
- */
-/** @typedef {Object} MCPImportPreviewResponse
- * @property {boolean} ok
- * @property {Array<Object>} entries Only patch carries literals; display facts contain no credentials.
- * @property {string[]=} ignored_keys
- * @property {string=} error
  */

@@ -88,7 +88,7 @@ def test_mcp_module_drops_masked_token_in_test_payload(mcp_source: str) -> None:
     so the backend can rehydrate the persisted token."""
     assert "looksMasked" in mcp_source
     assert "out.auth_token = ''" in mcp_source
-    assert "server_id: sid, server: { ...server, ...headerPayload(server) }" in mcp_source
+    assert "{ server_id: saved.identity, server: candidate }" in mcp_source
 
 
 def test_mcp_module_supports_http_sse_and_stdio(mcp_source: str) -> None:
@@ -183,24 +183,27 @@ const button = { disabled: false, addEventListener: (_kind, handler) => { click 
 const card = { dataset: { mcpIndex: '0' }, querySelectorAll: () => [], querySelector: (selector) =>
     selector === '[data-mcp-test]' ? button : selector === '[data-mcp-message]' ? message : null };
 const host = { innerHTML: '', querySelectorAll: (selector) => selector === '[data-mcp-card]' ? [card] : [] };
-globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null,
+    querySelector: (selector) => selector === '[data-mcp-index="0"]' ? card : null };
 globalThis.fetch = async (url, options) => {
     if (url === '/api/mcp/status') return { ok: false };
     assert.equal(url, '/api/mcp/test');
     requests.push(JSON.parse(options.body));
     return { ok: true, json: async () => ({ ok: true, tool_count: 1 }) };
 };
-for (const server of [
-    { id: 'saved', url: 'https://***@host.test/mcp', auth_token: '' },
-    { id: 'saved', url: 'https://host.test/mcp', auth_token: '***' },
-    { id: 'new', url: 'https://new:credential@host.test/mcp', auth_token: '' },
-    { id: '', url: 'https://host.test/mcp', auth_token: '' },
+for (const [server, selected] of [
+    [{ id: 'saved', url: 'https://***@host.test/mcp', auth_token: '' }, 'saved'],
+    [{ id: 'saved', url: 'https://host.test/mcp', auth_token: '***' }, 'saved'],
+    // A saved server identified by its name alone still names its saved identity.
+    [{ name: 'Name Only', url: 'https://host.test/mcp', headers: { 'X-Key': '***set***' } }, 'Name Only'],
+    [{ id: 'new', url: 'https://new:credential@host.test/mcp', auth_token: '' }, undefined],
+    [{ id: '', url: 'https://host.test/mcp', auth_token: '' }, undefined],
 ]) {
     applyMcpSettings({ MCP_SERVERS: [server] });
     await click();
     const body = requests.at(-1);
     assert.equal(body.server.url, server.url);
-    assert.equal(body.server_id, requests.length <= 2 ? 'saved' : undefined);
+    assert.equal(body.server_id, selected);
     assert.match(message.textContent, /Draft connection OK/);
     assert.equal(button.disabled, false);
 }

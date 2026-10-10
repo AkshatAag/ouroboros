@@ -28,8 +28,11 @@ import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote, urlencode
 
 import httpx
+
+from ouroboros.gateways.claudexor_maintenance import ClaudexorMaintenanceGateway
 from ouroboros.effort_evidence import validated_effort_resolution
 from ouroboros.observability import timed_phase
 
@@ -90,20 +93,13 @@ _ATTEMPT_RECORD = "attempt.yaml"
 
 
 class ClaudexorUnavailable(RuntimeError):
-    """Typed lane refusal: the delegated route cannot run right now.
+    """Typed engine or transport failure; callers classify by ``code``, not prose.
 
-    Carries the machine-readable ``code`` so callers classify instead of matching
-    prose. Never raised for an ordinary in-run failure — only for "this transport
-    is not usable".
-
-    ``required_actions`` retains the daemon's TOP-LEVEL ``ControlProblem.requiredActions``
-    string list when the refusal carried one (e.g. the reconcile 409's
-    ``retry_setup_reconciliation``), bounded to the daemon's own wire limit. It is
-    a preserved fact for the typed error seam, not a client action framework.
+    ``problem`` retains the received ControlProblem; ``required_actions`` is its
+    bounded top-level compatibility projection. Neither executes recovery actions.
     """
 
-    # What the engine REPORTED about a failed run ("" = nothing reported); set only by
-    # ``run_failure_error``. An opaque fact: carried and shown, never branched on.
+    # What the engine reported about a failed run or request; diagnostic, never policy.
     reported_cause = ""
     retry_after = ""  # The received HTTP Retry-After header, never a local backoff.
 
@@ -376,6 +372,18 @@ def account_catalog_supported(operations: list[dict], path: str) -> bool:
     return operation_query_supported(operations, method="GET", path=path, name="view", value="accounts")
 
 
+def account_resource_capabilities(operations: list[dict]) -> dict[str, bool]:
+    """Negotiate resource presentation and direct controls from the serving catalog."""
+    def resource_view(method):
+        return operation_query_supported(operations, method=method, path="/v2/quota",
+                                         name="view", value="resources")
+
+    ids = {row.get("id") for row in operations if isinstance(row, dict)}
+    return {"read": resource_view("GET"), "refresh": resource_view("POST"),
+            "reset": "post:account-resets" in ids,
+            "inspect_reset": "get:account-resets.id" in ids}
+
+
 def model_failure_evidence_supported(operations: list[dict]) -> bool:
     return operation_query_supported(operations, method="POST", path="/v2/model-operations",
                                      name="captureFailureEvidence", value="true")
@@ -406,7 +414,7 @@ def run_message_supported(operations: list[dict]) -> bool:
     )
 
 
-class ClaudexorGateway:
+class ClaudexorGateway(ClaudexorMaintenanceGateway):
     """Thin typed client over the Claudexor ``/v2`` control API."""
 
     def __init__(self, endpoint: Optional[DaemonEndpoint] = None, *, home: Optional[pathlib.Path] = None):
@@ -507,7 +515,7 @@ class ClaudexorGateway:
             ) from exc
 
     def _problem(self, response: httpx.Response) -> ClaudexorUnavailable:
-        """Translate a ControlProblem body into a typed refusal."""
+        """Keep ControlProblem authority; nested lookup causes are diagnostics only."""
         code = f"http_{response.status_code}"
         message = response.text[:500]
         context: Dict[str, Any] = {}
@@ -546,7 +554,11 @@ class ClaudexorGateway:
                                           status_code=response.status_code)
                 or ClaudexorUnavailable(code, message, status_code=response.status_code,
                                         required_actions=required_actions))
+        error.problem = body if isinstance(body, dict) else {"code": code, "message": message}
         error.retry_after = response.headers.get("Retry-After", "")
+        if isinstance(context.get("cause"), dict):
+            facts = {key: context[key] for key in ("stage", "cause", "preflight") if key in context}
+            error.reported_cause = run_failure_cause({"safeMessage": json.dumps(facts, ensure_ascii=False)})
         return error
 
     # -- operations ------------------------------------------------------------
@@ -629,8 +641,6 @@ class ClaudexorGateway:
 
     def list_model_sources(self, *, view: Optional[str] = None) -> Dict[str, Any]:
         """Return the engine's opaque source ids and credential-harness bindings."""
-        from urllib.parse import urlencode
-
         path = "/v2/model-sources"
         if view is not None:
             path += "?" + urlencode({"view": view})
@@ -640,10 +650,8 @@ class ClaudexorGateway:
                            credential_profile_id: Optional[str] = None, *,
                            requested_model: Optional[str] = None,
                            timeout_sec: Optional[float] = None,
-                           view: Optional[str] = None) -> Dict[str, Any]:
+                           view: Optional[str] = None, include_admission: bool = False) -> Dict[str, Any]:
         """Preserve the exact-profile catalog envelope; an omitted pin means engine Auto."""
-        from urllib.parse import quote, urlencode
-
         path = f"/v2/model-sources/{quote(str(source), safe='')}/models"
         query = {}
         if view is not None:
@@ -652,6 +660,8 @@ class ClaudexorGateway:
             query["credentialProfileId"] = credential_profile_id
         if requested_model is not None:
             query["requestedModel"] = requested_model
+        if include_admission:
+            query["includeAdmission"] = "true"
         if query:
             path += "?" + urlencode(query)
         return _model_object(self._request("GET", path, **({"timeout_sec": timeout_sec} if timeout_sec is not None else {})))
@@ -665,8 +675,6 @@ class ClaudexorGateway:
         reply. A cancelled or still-writing upload remains a typed refusal; this
         method never creates another upload or inference to hide that outcome.
         """
-        from urllib.parse import quote
-
         key = _model_idempotency_key(idempotency_key)
         if not isinstance(request, dict):
             raise ClaudexorUnavailable("invalid_model_payload", "Model request must be a JSON object")
@@ -731,8 +739,6 @@ class ClaudexorGateway:
 
     def get_model_operation(self, operation_id: str, *,
                             timeout_sec: Optional[float] = None) -> Dict[str, Any]:
-        from urllib.parse import quote
-
         return _model_operation(self._request(
             "GET", f"/v2/model-operations/{quote(str(operation_id), safe='')}",
             timeout_sec=timeout_sec,
@@ -746,8 +752,6 @@ class ClaudexorGateway:
         The caller ACKs after retaining the result under its own custody contract.
         ``raw_bytes`` keeps exact JSON encoding; size, digest, UTF-8 and object checks apply.
         """
-        from urllib.parse import quote
-
         ref = _model_payload_ref(expected_ref)
         data = self._request(
             "GET", f"/v2/model-operations/{quote(str(operation_id), safe='')}/result",
@@ -764,8 +768,6 @@ class ClaudexorGateway:
 
     def acknowledge_model_result(self, operation_id: str, sha256: str) -> Dict[str, Any]:
         """Acknowledge only the exact result the caller has retained; no implicit ACK."""
-        from urllib.parse import quote
-
         return _model_operation(self._request(
             "POST", f"/v2/model-operations/{quote(str(operation_id), safe='')}/ack",
             json_body={"sha256": sha256},
@@ -773,8 +775,6 @@ class ClaudexorGateway:
 
     def cancel_model_operation(self, operation_id: str, *, reason_code: str = "") -> Dict[str, Any]:
         """Request cancellation; the returned engine lifecycle, not this POST, proves settlement."""
-        from urllib.parse import quote
-
         control = {"action": "cancel"}
         if reason_code:
             control["reasonCode"] = reason_code
@@ -796,19 +796,29 @@ class ClaudexorGateway:
         rows = body.get("harnesses") if isinstance(body, dict) else None
         return [row for row in (rows or []) if isinstance(row, dict)]
 
-    def quota_state(self) -> Dict[str, Any]:
+    def quota_state(self, *, view: str = "") -> Dict[str, Any]:
         """GET /v2/quota once, retaining its one-epoch evidence envelope."""
-        body = self._request("GET", "/v2/quota")
+        body = self._request("GET", "/v2/quota" + ("?view=resources" if view == "resources" else ""))
         return body if isinstance(body, dict) else {}
 
-    def refresh_quota(self) -> Dict[str, Any]:
+    def refresh_quota(self, *, target: Optional[Dict[str, str]] = None,
+                      view: str = "") -> Dict[str, Any]:
         """POST /v2/quota once, returning the foreground evidence envelope."""
         return self._request(
             "POST",
-            "/v2/quota",
-            json_body={},
+            "/v2/quota" + ("?view=resources" if view == "resources" else ""),
+            json_body={"target": target} if target is not None else {},
             timeout_sec=get_claudexor_quota_refresh_timeout_sec(),
         )
+
+    def create_account_reset(self, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
+        """One explicit direct operation; replay retains the caller's exact key/body."""
+        return self._request("POST", "/v2/account-resets", json_body=request,
+                             headers={"Idempotency-Key": idempotency_key},
+                             timeout_sec=get_claudexor_quota_refresh_timeout_sec())
+
+    def get_account_reset(self, operation_id: str) -> Dict[str, Any]:
+        return self._request("GET", f"/v2/account-resets/{quote(operation_id, safe='')}")
 
     def quota_snapshots(self) -> List[Dict[str, Any]]:
         body = self.quota_state()
@@ -863,8 +873,6 @@ class ClaudexorGateway:
         actual-file list distinguishes absence from an explicit refusal; its
         path remains authoritative when a legacy record has no repoRoot.
         """
-        from urllib.parse import quote
-
         target = str(root)
         body = self._request("GET", f"/v2/trust?repoRoot={quote(target, safe='')}")
         entries = body.get("entries") if isinstance(body, dict) else None
@@ -938,8 +946,6 @@ class ClaudexorGateway:
         self, thread_id: str, request: Dict[str, Any], *, idempotency_key: str,
     ) -> Dict[str, Any]:
         """Append one turn through the public v3 thread pipeline."""
-        from urllib.parse import quote
-
         body = self._request(
             "POST", f"/v2/threads/{quote(str(thread_id), safe='')}/turns",
             json_body=dict(request), headers={"Idempotency-Key": str(idempotency_key)},
@@ -950,8 +956,6 @@ class ClaudexorGateway:
 
     def get_thread(self, thread_id: str) -> Dict[str, Any]:
         """Read turns, native-session bindings, and continuity receipts."""
-        from urllib.parse import quote
-
         body = self._request("GET", f"/v2/threads/{quote(str(thread_id), safe='')}")
         return body if isinstance(body, dict) else {}
 
@@ -976,8 +980,6 @@ class ClaudexorGateway:
         retention-reclaimed run with a 410 tombstone — all of which surface here as
         typed ``ClaudexorUnavailable`` refusals, never as a silent empty body.
         """
-        from urllib.parse import quote
-
         try:
             response = self._client.request(
                 "GET", f"/v2/runs/{quote(str(run_id), safe='')}/artifacts/{quote(str(path), safe='/')}")
@@ -999,8 +1001,6 @@ class ClaudexorGateway:
         HTTP refusals and partial streams never become an empty successful file;
         the existing small diagnostic-artifact reader keeps its bytes contract.
         """
-        from urllib.parse import quote
-
         digest, size = hashlib.sha256(), 0
         response = None
         try:
@@ -1033,8 +1033,6 @@ class ClaudexorGateway:
 
     def apply_run(self, run_id: str, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
         """Apply the existing run product; the caller retains intent and custody."""
-        from urllib.parse import quote
-
         return _model_object(self._request(
             "POST", f"/v2/runs/{quote(str(run_id), safe='')}/apply", json_body=request,
             headers={"Idempotency-Key": idempotency_key},
@@ -1042,8 +1040,6 @@ class ClaudexorGateway:
 
     def decide_run(self, run_id: str, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
         """Submit an explicit disposition through the existing engine decision route."""
-        from urllib.parse import quote
-
         body = self._request("POST", f"/v2/runs/{quote(str(run_id), safe='')}/decision", json_body=request,
                              headers={"Idempotency-Key": idempotency_key})
         if not isinstance(body, dict):
@@ -1068,8 +1064,6 @@ class ClaudexorGateway:
         failures, a bodyless 404 (``no such run``), the 501 of an engine build with
         no answer service, and any other refusal without a typed status.
         """
-        from urllib.parse import quote
-
         path = (f"/v2/runs/{quote(str(run_id), safe='')}"
                 f"/interactions/{quote(str(interaction_id), safe='')}/answer")
         try:
@@ -1119,8 +1113,6 @@ class ClaudexorGateway:
         verb classifies by code AND status. A 2xx without a typed outcome is
         ``malformed_response``.
         """
-        from urllib.parse import quote
-
         path = f"/v2/runs/{quote(str(run_id), safe='')}/messages"
         payload: Dict[str, Any] = {"text": str(text)}
         if expected_attempt_id:
@@ -1195,8 +1187,6 @@ class ClaudexorGateway:
         route exists on 3.5.0 engines already; unified-model engines serve the
         migrated default logins through it too, because those are ordinary
         registry rows there."""
-        from urllib.parse import quote
-
         body = self._request(
             "PATCH",
             f"/v2/credential-profiles/{quote(str(harness_id), safe='')}"
@@ -1215,8 +1205,6 @@ class ClaudexorGateway:
         counterpart for a native CLI login — that account belongs to the
         vendor's own CLI, and simulating a sign-out here would claim an effect
         this process cannot have."""
-        from urllib.parse import quote
-
         body = self._request(
             "DELETE",
             f"/v2/credential-profiles/{quote(str(harness_id), safe='')}"
@@ -1227,8 +1215,6 @@ class ClaudexorGateway:
     def harness_models(self, harness_id: str) -> List[Dict[str, Any]]:
         """GET /v2/harnesses/:id/models — the discovered model list (owner
         directive: models are a dropdown fed by discovery, never free input)."""
-        from urllib.parse import quote
-
         body = self._request("GET", f"/v2/harnesses/{quote(str(harness_id), safe='')}/models")
         models = body.get("models") if isinstance(body, dict) else None
         return [row for row in (models or []) if isinstance(row, dict)]
@@ -1237,8 +1223,6 @@ class ClaudexorGateway:
                               credential_profile_id: Optional[str] = None,
                               view: Optional[str] = None) -> Dict[str, Any]:
         """Retain the catalog envelope for an explicitly negotiated view."""
-        from urllib.parse import quote, urlencode
-
         path = f"/v2/harnesses/{quote(str(harness_id), safe='')}/models"
         query = {}
         if view is not None:
@@ -1271,8 +1255,6 @@ class ClaudexorGateway:
         route answers 404, which the caller must treat as a typed capability
         gap, not a bug.
         """
-        from urllib.parse import quote
-
         base = f"/v2/setup/jobs/{quote(str(job_id), safe='')}"
         if op == "snapshot":
             body = self._request("GET", f"{base}/snapshot")
@@ -1374,7 +1356,7 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError("Non-finite JSON number")
 
 
-def pending_interactions(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
+def pending_interactions(detail: Dict[str, Any], *, strict: bool = False) -> List[Dict[str, Any]]:
     """The run detail's live interactive questions, normalized and complete.
 
     ``GET /v2/runs/:id`` carries ``pendingInteractions`` — full
@@ -1384,10 +1366,33 @@ def pending_interactions(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
     strings normalized to ``None``/empty, rows without an interaction id dropped
     (an unanswerable row is noise, not a question). Purely shape translation — no
     truncation here; bounding belongs to the delivery layer that knows its budget.
+    ``strict`` rejects malformed observations instead of silently dropping rows:
+    only an actual empty list can prove there were no questions at read time.
     """
     rows = detail.get("pendingInteractions") if isinstance(detail, dict) else None
+    if strict and not isinstance(rows, list):
+        raise ValueError("run detail has no pendingInteractions list")
     out: List[Dict[str, Any]] = []
     for row in rows or []:
+        if strict:
+            if (not isinstance(row, dict) or not isinstance(row.get("interactionId"), str)
+                    or not row["interactionId"] or not isinstance(row.get("questions"), list)
+                    or not row["questions"]):
+                raise ValueError("malformed pendingInteractions row")
+            if any(row.get(key) is not None and not isinstance(row[key], str) for key in (
+                    "runId", "attemptId", "harnessId", "sourceTool", "requestedAt", "timeoutAt")):
+                raise ValueError("malformed pendingInteractions identity or timestamp")
+            for question in row["questions"]:
+                if (not isinstance(question, dict) or not isinstance(question.get("id"), str)
+                        or not question["id"] or not isinstance(question.get("question"), str)
+                        or not isinstance(question.get("options", []), list)
+                        or not isinstance(question.get("multi_select", False), bool)
+                        or (question.get("header") is not None and not isinstance(question["header"], str))):
+                    raise ValueError("malformed pendingInteractions question")
+                if any(not isinstance(option, dict) or not isinstance(option.get("label"), str)
+                       or (option.get("description") is not None and not isinstance(option["description"], str))
+                       for option in question.get("options", [])):
+                    raise ValueError("malformed pendingInteractions option")
         if not isinstance(row, dict):
             continue
         questions: List[Dict[str, Any]] = []
@@ -1411,6 +1416,9 @@ def pending_interactions(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         out.append({
             "interaction_id": interaction_id,
+            **{target: row[source] for source, target in (
+                ("runId", "run_id"), ("attemptId", "attempt_id"), ("harnessId", "harness_id"),
+            ) if source in row},
             "source_tool": str(row.get("sourceTool") or "") or None,
             "requested_at": str(row.get("requestedAt") or ""),
             "timeout_at": str(row.get("timeoutAt") or "") or None,
