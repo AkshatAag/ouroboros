@@ -4,13 +4,14 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import sqlite3
 
 import pytest
 
 from ouroboros import evidence_packer as packer
 from ouroboros import evidence_packs as packs
-from ouroboros.artifacts import store_actor_source_bytes
-from tests.test_evidence_packs import _handle_path, _loose, _task
+from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+from tests.test_evidence_packs import _blob, _handle_path, _loose, _task
 from tests.test_evidence_packs import root as root
 
 
@@ -114,3 +115,38 @@ def test_presence_reentry_projection_reads_loose_and_packed_source(root, monkeyp
     assert reentry_source_projection(root, "presence", "0" * 64)["reason"] == "source_unavailable"
     monkeypatch.setattr(artifacts, "read_actor_source_bytes", lambda *a, **k: (_ for _ in ()).throw(OSError("read failed")))
     assert reentry_source_projection(root, "presence", ref["sha256"])["reason"] == "source_unreadable"
+
+
+def test_identical_checkpoint_and_blob_bytes_keep_both_index_kinds(root):
+    raw = b'{"same": true}'
+    refs, handle = _task(root, "same", blobs=1, payloads=[raw], handle=raw)
+    other = _blob(root, raw, kind="bin")
+    (root / "observability" / "calls" / "same" / "other.json").write_text(json.dumps(other), encoding="utf-8")
+    assert packer.run_pass(root)["faults"] == 0
+    assert not _loose(refs[0]) and not _handle_path(root, "same", handle).exists()
+    assert read_actor_source_bytes(root, "same", handle) == raw
+    assert packs.blob_bytes(root, refs[0]) == packs.blob_bytes(root, other) == raw
+    with packs.open_index(root) as conn:
+        assert {row[0] for row in conn.execute("SELECT kind FROM members")} == {"json", "bin", "checkpoint"}
+
+
+def test_old_index_schema_rebuilds_without_rewriting_sidecars(root):
+    refs, handle = _task(root, "indexed", blobs=1)
+    packer.run_pass(root)
+    directory = packs.packs_dir(root)
+    sidecar = (directory / "indexed.members.json").read_bytes()
+    with sqlite3.connect(directory / packs.INDEX_NAME) as conn:
+        conn.execute("DROP TABLE members")
+        conn.execute("CREATE TABLE members (sha256 TEXT, task_id TEXT, generation INTEGER, offset INTEGER, "
+                     "size INTEGER, kind TEXT, PRIMARY KEY (sha256, task_id, generation))")
+        conn.execute("DELETE FROM meta WHERE key='schema_version'")
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('format_version', '1')")
+    packs._VALIDATED.clear()
+    with packs.open_index(root) as conn:
+        key = {row["name"] for row in conn.execute("PRAGMA table_info(members)") if row["pk"]}
+        assert key == {"sha256", "kind", "task_id", "generation"}
+        assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(packs.INDEX_SCHEMA_VERSION)
+    assert (directory / "indexed.members.json").read_bytes() == sidecar
+    assert json.loads(sidecar)["format_version"] == 1
+    assert read_actor_source_bytes(root, "indexed", handle).startswith(b"# focus")
+    assert packs.blob_bytes(root, refs[0]).startswith(b'{"message"')

@@ -236,12 +236,12 @@ def test_index_is_a_cache_rebuilt_from_sidecars(root):
     assert read_actor_source_bytes(root, "task-a", handle).startswith(b"# focus")
     with sqlite3.connect(index) as conn:
         assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-    # a stale format version is rebuilt too
+    # a stale index schema is rebuilt without changing the sidecar format
     with sqlite3.connect(index) as conn:
-        conn.execute("UPDATE meta SET value='0' WHERE key='format_version'")
+        conn.execute("UPDATE meta SET value='0' WHERE key='schema_version'")
     packs._VALIDATED.clear()
     with packs.open_index(root) as conn:
-        assert conn.execute("SELECT value FROM meta WHERE key='format_version'").fetchone()[0] == str(packs.FORMAT_VERSION)
+        assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(packs.INDEX_SCHEMA_VERSION)
 
 
 def test_no_unlink_before_on_disk_reverify(root, monkeypatch):

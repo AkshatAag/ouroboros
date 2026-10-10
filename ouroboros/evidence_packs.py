@@ -39,6 +39,7 @@ INDEX_NAME = "index.sqlite"
 INDEX_LOCK_NAME = "packs_index.lock"  # the name lock under state/ around every index access
 INDEX_WAIT_SEC = 5.0
 FORMAT_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
 CODEC, PRESET = "xz", 1
 MIN_DICT_SIZE, MAX_DICT_SIZE = 4096, 64 << 20
 CHECKPOINTS_REL = pathlib.PurePosixPath("source_handles/context_checkpoints")
@@ -51,7 +52,7 @@ CREATE TABLE packs (task_id TEXT NOT NULL, generation INTEGER NOT NULL, path TEX
   raw_total INTEGER NOT NULL, packed_total INTEGER NOT NULL, verified_at TEXT, members INTEGER NOT NULL,
   PRIMARY KEY (task_id, generation));
 CREATE TABLE members (sha256 TEXT NOT NULL, task_id TEXT NOT NULL, generation INTEGER NOT NULL,
-  offset INTEGER NOT NULL, size INTEGER NOT NULL, kind TEXT NOT NULL, PRIMARY KEY (sha256, task_id, generation));
+  offset INTEGER NOT NULL, size INTEGER NOT NULL, kind TEXT NOT NULL, PRIMARY KEY (sha256, kind, task_id, generation));
 CREATE TABLE handles (task_id TEXT NOT NULL, rel_path TEXT NOT NULL, sha256 TEXT NOT NULL,
   generation INTEGER NOT NULL, PRIMARY KEY (task_id, rel_path));
 CREATE TABLE swept (task_id TEXT PRIMARY KEY, stamps TEXT NOT NULL);
@@ -264,12 +265,12 @@ def _index_valid(path: pathlib.Path, tier: str) -> bool:
         conn = store.connect(path, tier, wait_sec=INDEX_WAIT_SEC)
         try:
             ok = conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-            version = conn.execute("SELECT value FROM meta WHERE key='format_version'").fetchone()
+            version = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         finally:
             conn.close()
     except sqlite3.Error:
         return False
-    valid = ok and version is not None and version[0] == str(FORMAT_VERSION)
+    valid = ok and version is not None and version[0] == str(INDEX_SCHEMA_VERSION)
     if valid:
         _VALIDATED[str(path)] = stamp
     return valid
@@ -300,7 +301,7 @@ def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str) -> None:
             conn.execute(f"PRAGMA application_id = {_APPLICATION_ID[tier]}")
             conn.executescript(_INDEX_SCHEMA)
             with store.transaction(conn, write=True):
-                conn.execute("INSERT INTO meta VALUES ('format_version', ?)", (str(FORMAT_VERSION),))
+                conn.execute("INSERT INTO meta VALUES ('schema_version', ?)", (str(INDEX_SCHEMA_VERSION),))
                 conn.execute("INSERT INTO meta VALUES ('built_at', ?)", (utc_now_iso(),))
                 errors: list = []
                 for sidecar_path, sidecar in list_sidecars(root, errors=errors):
