@@ -10,11 +10,11 @@ The local `ouroboros-stable` ref is also a recovery fallback maintained by expli
 
 ### CI topology
 
-`.github/workflows/ci.yml` has 21 jobs, grouped by trigger and secret exposure:
+`.github/workflows/ci.yml` has 22 jobs, grouped by trigger and secret exposure:
 
 | Tier | Jobs | Trust boundary |
 |---|---|---|
-| Fork-safe PR validation | `quick-test`, `betterleaks-platform-smoke`, `benchmark-methodology` (also `ouroboros-stable` pushes and `v*` tags) | `ouroboros` pushes, pull requests into `ouroboros`, manual runs; read-only, no provider secrets, never `pull_request_target` |
+| Fork-safe PR validation | `quick-test`, `sqlite-floor` (the store modules on ubuntu-22.04's system SQLite 3.37.2), `betterleaks-platform-smoke`, `benchmark-methodology` (also `ouroboros-stable` pushes and `v*` tags) | `ouroboros` pushes, pull requests into `ouroboros`, manual runs; read-only, no provider secrets, never `pull_request_target` |
 | Android source/build proof | `android-test` | Every run; `android/tests`, release tests and disposable-key APK compilation; no publisher secrets |
 | Android emulator proof | `android-emulator-smoke` | Tags or verified `android/` changes; install/start and same-UID PackageInstaller readback on an x86_64 API matrix; no publisher secrets |
 | Browser consumer proof | `ui-browser.yml`, called by `ci.yml` and `ui-browser-push.yml` | One reusable complete lane: PRs, manual runs and `v*` tags via `ci.yml`; every `ouroboros` push via `ui-browser-push.yml`, which alone owns the partial diagnostic scenario. No path filter, because Makefile-, spec- and requirements-only merges are read by tests. Four `ui-shard` jobs, one `ui-manifest` collection and the `ui-smoke` verdict, which reconciles the shards against the manifest and refuses a red session. No schedule, no provider secrets |
