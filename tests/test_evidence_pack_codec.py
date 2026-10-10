@@ -60,3 +60,27 @@ def test_reader_ascending_backward_and_replaced_pack_cursors(root):
     assert read(0, 11) == b"replacement"
     with pytest.raises(packs.EvidenceCorrupt, match="evidence_corrupt"):
         read(0, 12)
+
+
+@pytest.mark.parametrize("damage", ["missing_header", "wrong_total", "escaped_handle", "overlap"])
+def test_invalid_sidecar_structure_refuses_restore_and_preflight(root, damage):
+    _task(root, "shape", blobs=1)
+    packer.run_pass(root)
+    path = packs.packs_dir(root) / "shape.members.json"
+    original = path.read_bytes()
+    sidecar = json.loads(original)
+    if damage == "missing_header":
+        del sidecar["pack_sha256"]
+    elif damage == "wrong_total":
+        sidecar["raw_total"] += 1
+    elif damage == "escaped_handle":
+        sidecar["members"][0]["path"] = "../../outside.md"
+    else:
+        sidecar["members"][1]["offset"] = 0
+    path.write_text(json.dumps(sidecar), encoding="utf-8")
+    for operation in (packs.pending_restore_bytes, packs.restore_checkpoint_handles):
+        with pytest.raises(packs.SidecarCorrupt, match="evidence_corrupt"):
+            operation(root)
+    path.write_bytes(original)
+    assert packs.pending_restore_bytes(root) > 0
+    assert packs.restore_checkpoint_handles(root)["handles"] == 1

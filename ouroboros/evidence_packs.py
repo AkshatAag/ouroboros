@@ -84,13 +84,28 @@ def read_sidecar(path: pathlib.Path) -> Dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
         if (not isinstance(data, dict) or data.get("format_version") != FORMAT_VERSION or data.get("codec") != CODEC
                 or not isinstance(data.get("members"), list) or not data.get("task_id")
-                or int(data["generation"]) < 1 or sidecar_name(data["task_id"], data["generation"]) != path.name):
+                or any(type(data[key]) is not int for key in ("generation", "raw_total", "packed_total", "dict_size", "preset"))
+                or data["generation"] < 1 or sidecar_name(data["task_id"], data["generation"]) != path.name
+                or len(data["pack_sha256"]) != 64 or data["pack_sha256"].strip("0123456789abcdef")
+                or data["packed_total"] <= 0 or data["preset"] != PRESET
+                or data["dict_size"] != dict_size_for(data["raw_total"])):
             raise ValueError("invalid pack header")
-        for member in data["members"]:
-            if (member["kind"] not in BLOB_KINDS | {CHECKPOINT} or int(member["size"]) < 0 or int(member["offset"]) < 0
-                    or len(member["sha256"]) != 64 or member["sha256"].strip("0123456789abcdef")
-                    or (member["kind"] == CHECKPOINT and not member.get("path"))):
+        offset, blobs = 0, False
+        for member in sorted(data["members"], key=lambda m: m["offset"]):
+            if (member["kind"] not in BLOB_KINDS | {CHECKPOINT}
+                    or any(type(member[key]) is not int for key in ("size", "offset"))
+                    or member["size"] < 0 or member["offset"] != offset
+                    or len(member["sha256"]) != 64 or member["sha256"].strip("0123456789abcdef")):
                 raise ValueError("invalid pack member")
+            if member["kind"] == CHECKPOINT:
+                rel = pathlib.PurePosixPath(member["path"])
+                if blobs or len(rel.parts) != 3 or rel.parts[:2] != CHECKPOINTS_REL.parts or rel.stem.rsplit("-", 1)[-1] != member["sha256"]:
+                    raise ValueError("invalid checkpoint prefix")
+            else:
+                blobs = True
+            offset += member["size"]
+        if offset != data["raw_total"]:
+            raise ValueError("invalid pack extent")
         return data
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise SidecarCorrupt(f"evidence_corrupt: unreadable sidecar {path.name}") from exc

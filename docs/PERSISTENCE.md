@@ -37,16 +37,14 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
 - **Atomic writes** — `utils.atomic_write_json`: compact JSON (`settings.json`: indent 2),
   tmp+rename; `update_json_locked`: sidecar lock; `append_jsonl`: O_APPEND
   plus sidecar lock unless noted.
-- **Evidence pack** — `ouroboros/evidence_packs.py`: once a task is SETTLED
-  (terminal, result-derived and owner-held obligations clear, review/debt/late receipts
-  closed, money attempts resolved and known; no timer), the
-  packer child (`ouroboros/evidence_packer.py`, spawned from the maintenance
-  sweep, never at boot) copies its context-checkpoint handles and the blobs its
-  call manifests reference into one xz stream under `observability/packs/`,
-  re-verifies every member each pass, indexes it, requires published store phase and rechecks facts/refs under publication
-  and result locks, then unlinks. A loose placement becomes a sha-verified pack member;
-  evidence bytes are kept forever. Readers try loose → indexed packs → retained roots;
-  exhausted corrupt placements report `evidence_corrupt`, never empty bytes.
+- **Evidence pack** — `ouroboros/evidence_packs.py`: SETTLED means terminal, all
+  result/owner obligations clear, review/debt/late receipts closed, money resolved
+  and known (no timer). The maintenance child (`ouroboros/evidence_packer.py`, never
+  at boot) writes checkpoints then manifest blobs into one xz stream under
+  `observability/packs/`. It re-verifies every member from disk on every unlink pass,
+  indexes it, and rechecks facts/refs under publication/result locks with store phase
+  published. Only loose placements go; bytes stay forever. Readers try loose → indexed
+  packs → retained roots; exhausted corrupt placements raise `evidence_corrupt`.
 
 ## 1. Root files
 
