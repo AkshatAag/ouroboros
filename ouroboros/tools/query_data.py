@@ -41,8 +41,6 @@ def _name(value):
 def _select(value, selector):
     if not selector:
         return value
-    if not isinstance(selector, str) or len(selector) > 512 or not _SELECTOR.fullmatch(selector):
-        raise ValueError("select accepts dotted keys, [n] and [*]")
     parts = re.findall(r"[^.\[\]]+|\[(?:\d+|\*)\]", selector)
 
     def walk(current, index):

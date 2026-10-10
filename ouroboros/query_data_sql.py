@@ -107,7 +107,6 @@ def _fetch(conn, request):
         return result
     finally:
         cursor.close()
-        conn.set_authorizer(None)
 
 
 def _execute(request):

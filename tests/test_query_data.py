@@ -306,7 +306,7 @@ def test_pack_index_sql(ctx):
     {"max_bytes": 0}, {"tail": -1}, {"max_rows": 2}, {"snapshot": False},
 ])
 def test_invalid_requests_are_rejected_before_reading(ctx, kwargs):
-    write(ctx, "logs/events.jsonl", b"")
+    assert call(ctx, op="jsonl", kind="events_log")["status"] == "unavailable"
     assert call(ctx, op="jsonl", kind="events_log", **kwargs)["status"] == "error"
 
 
