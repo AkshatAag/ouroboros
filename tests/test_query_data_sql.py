@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import sqlite3
+import sys
 import time
 
 import pytest
@@ -131,3 +133,26 @@ def test_name_tier_uses_the_store_lock(tmp_path, monkeypatch):
     ledger = ledger_path(tmp_path)
     records = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
     assert any(record.get("purpose") == "query_data" for record in records)
+
+
+def test_parent_deadline_reaps_child_and_removes_scratch(ctx, monkeypatch):
+    from ouroboros import process_custody
+    original_spawn, original_temp = process_custody.spawn_supervised, sql.tempfile.TemporaryDirectory
+    children, directories = [], []
+
+    def stalled(cmd, **kwargs):
+        proc = original_spawn([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+        children.append(proc)
+        return proc
+
+    def temporary(**kwargs):
+        directory = original_temp(**kwargs)
+        directories.append(Path(directory.name))
+        return directory
+
+    monkeypatch.setattr(process_custody, "spawn_supervised", stalled)
+    monkeypatch.setattr(sql.tempfile, "TemporaryDirectory", temporary)
+    assert run(ctx, "SELECT 1", timeout_sec=0.001) == {"status": "error", "code": "deadline"}
+    assert children[0].poll() is not None
+    assert children[0].stdin.closed and children[0].stdout.closed
+    assert directories and all(not directory.exists() for directory in directories)

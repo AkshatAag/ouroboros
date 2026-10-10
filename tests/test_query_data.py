@@ -1,0 +1,277 @@
+"""Typed sources, bounded reads, exact artifacts and real registry delivery."""
+from __future__ import annotations
+
+import gzip
+import hashlib
+import json
+import sqlite3
+
+import pytest
+
+from ouroboros import artifacts, observability, store, store_import, tool_capabilities as caps
+from ouroboros.tools.query_data import _query_data, get_tools
+from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+
+@pytest.fixture
+def ctx(tmp_path):
+    store_import.ensure_current_store(tmp_path, with_children=False)
+    store.update_task(tmp_path, "caller", lambda _: {"status": "completed", "result": "first"})
+    store.update_task(tmp_path, "second", lambda _: {"status": "completed", "result": "second"})
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    return ToolContext(repo_dir=repo, drive_root=tmp_path, task_id="caller")
+
+
+def write(ctx, relative, raw):
+    path = ctx.drive_root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return path
+
+
+def call(ctx, **kwargs):
+    text = _query_data(ctx, **kwargs)
+    assert isinstance(text, str)
+    return json.loads(text)
+
+
+def saved(ctx, result):
+    receipt = result["saved"]
+    path = ctx.drive_root / "task_results" / "artifacts" / ctx.task_id / receipt["path"]
+    raw = path.read_bytes()
+    assert receipt["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert receipt["size"] == len(raw)
+    assert receipt["source"] == result["source"]
+    return raw
+
+
+def test_task_batches_use_store_and_canonical_projection(ctx):
+    # A stale file must never override the public store document.
+    write(ctx, "task_results/caller.json", b'{"result":"stale"}')
+    result = call(ctx, op="json", kind="task_result", ids=["caller", "second"], select="result", save_as="batch.json")
+    assert result["status"] == "ok" and result["data"] == {"caller": "first", "second": "second"}
+    assert result["reconstructed"] is True
+    assert saved(ctx, result) == b'{"caller":"first","second":"second"}'
+    single = call(ctx, op="json", kind="task_result", ids=["caller"], save_as="whole.json")
+    assert json.loads(saved(ctx, single))["result"] == "first"
+    assert single["saved"]["reconstructed"] is True
+
+
+def test_exact_whole_document_and_string_projection(ctx):
+    raw = b'{ "z": 2, "primary_output": {"text":"line\\r\\n\\u03bb\\n"}, "a": 1 }\n'
+    write(ctx, "state/review_ledger/review-one.json", raw)
+    whole = call(ctx, op="json", kind="review_ledger", ids=["review-one"], save_as="record.json")
+    assert saved(ctx, whole) == raw and not whole["reconstructed"]
+    text = call(ctx, op="json", kind="review_ledger", ids=["review-one"], select="primary_output.text",
+                format="text", save_as="output.txt")
+    assert saved(ctx, text) == "line\r\nλ\n".encode("utf-8")
+    projection = call(ctx, op="json", kind="review_ledger", ids=["review-one"], select="primary_output", save_as="projection.json")
+    assert saved(ctx, projection) == '{"text":"line\\r\\nλ\\n"}'.encode("utf-8")
+    assert call(ctx, op="json", kind="review_ledger", ids=["review-one"], format="text")["status"] == "error"
+    collision = call(ctx, op="json", kind="review_ledger", ids=["review-one"], select="a", save_as="record.json")
+    assert collision["status"] == "error" and "collision" in collision["message"]
+    assert saved(ctx, whole) == raw
+
+
+@pytest.mark.parametrize("kind,path", [("queue_snapshot", "state/queue_snapshot.json"),
+                                      ("queue_dispatch", "state/queue_dispatch.json"),
+                                      ("advisory_review", "state/advisory_review.json")])
+def test_fixed_names_and_selectors(ctx, kind, path):
+    write(ctx, path, b'{"rows":[{"items":[1,2]},{"items":[3,4]}]}')
+    value = call(ctx, op="json", kind=kind, select="rows[*].items[1]")
+    assert value["data"] == [2, 4]
+    for selector in ("rows..items", "rows[-1]", "rows[0]items", "rows[8]", "rows[*].missing"):
+        assert call(ctx, op="json", kind=kind, select=selector)["status"] == "error"
+
+
+@pytest.mark.parametrize("name", ["supervisor", "events", "tools", "chat"])
+def test_jsonl_filter_tail_and_exact_rows(ctx, name):
+    lines = [b'{ "type": "read", "n": 1 }\r\n', b'{"type":"write","n":2}\n', b'{"type":"read","n":3}\n']
+    write(ctx, f"logs/{name}.jsonl", b"".join(lines))
+    result = call(ctx, op="jsonl", kind=name + "_log", filter={"field": "type", "op": "eq", "value": "read"}, tail=1, save_as="row.jsonl")
+    assert result["data"] == [{"type": "read", "n": 3}]
+    assert saved(ctx, result) == lines[-1]
+    contains = call(ctx, op="jsonl", kind=name + "_log", filter={"field": "type", "op": "contains", "value": "rea"}, select="[*].n")
+    assert contains["data"] == [1, 3]
+    assert call(ctx, op="jsonl", kind=name + "_log", filter={"field": "missing", "op": "eq", "value": 1})["data"] == []
+    assert call(ctx, op="jsonl", kind=name + "_log", filter={"bad": 1})["status"] == "error"
+
+
+def test_whole_jsonl_blank_lines_and_receipts(ctx):
+    raw = b'\n {"pass":true}\n\n'
+    write(ctx, "task_results/artifacts/caller/verification_receipts.jsonl", raw)
+    result = call(ctx, op="jsonl", kind="verification_receipts", tail=0, save_as="receipt.jsonl")
+    assert saved(ctx, result) == raw
+    assert result["data"] == [{"pass": True}]
+
+
+def test_stream_and_document_byte_limits(ctx, monkeypatch):
+    from ouroboros import query_data_sql
+    monkeypatch.setattr(query_data_sql, "MAX_BYTES", 512)
+    write(ctx, "logs/tools.jsonl", b'{"n":1}\n' * 200)
+    tail = call(ctx, op="jsonl", kind="tools_log", tail=2, max_bytes=512)
+    assert tail["data"] == [{"n": 1}, {"n": 1}] and tail["source"]["scan_truncated"]
+    assert call(ctx, op="jsonl", kind="tools_log", tail=0, max_bytes=512)["status"] == "error"
+    write(ctx, "state/queue_snapshot.json", json.dumps({"large": "x" * 600}).encode("utf-8"))
+    assert call(ctx, op="json", kind="queue_snapshot", max_bytes=512)["status"] == "error"
+    write(ctx, "logs/tools.jsonl", b'{"value":"' + b"x" * 600 + b'"}\n')
+    assert call(ctx, op="jsonl", kind="tools_log", tail=0, max_bytes=512)["status"] == "error"
+    write(ctx, "state/queue_snapshot.json", json.dumps({"large": "x" * 300}).encode("utf-8"))
+    assert call(ctx, op="json", kind="queue_snapshot", max_bytes=256)["status"] == "error"
+
+
+def child(ctx, identity, parent="caller"):
+    from ouroboros.task_custody import HEADLESS_TASKS_DIR
+    store.update_task(ctx.drive_root, identity, lambda _: {"parent_task_id": parent, "root_task_id": "caller", "status": "completed"})
+    root = ctx.drive_root / HEADLESS_TASKS_DIR / identity / "data"
+    root.mkdir(parents=True)
+    path = root / "task_drives" / identity / "delegated_runs" / "run-one.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"primary_output":{"text":"exact child output"}}', encoding="utf-8")
+    return root
+
+
+def test_owned_child_grandchild_and_nonowned_drive(ctx):
+    owned = child(ctx, "child")
+    child(ctx, "grandchild", parent="child")
+    child(ctx, "stranger", parent="unrelated")
+    for identity in ("child", "grandchild"):
+        result = call(ctx, op="json", kind="run", child_task_id=identity, ids=["run-one"],
+                      select="primary_output.text", format="text", save_as=identity + ".txt")
+        assert result["status"] == "ok", result
+        assert saved(ctx, result) == b"exact child output"
+    assert not (owned / "task_results/artifacts/caller/child.txt").exists()
+    blocked = call(ctx, op="json", kind="run", child_task_id="stranger", ids=["run-one"])
+    assert blocked["status"] == "blocked" and blocked["code"] == "access_denied"
+    # A child's shared root_task_id never grants a sibling's drive.
+    child_ctx = ToolContext(repo_dir=ctx.repo_dir, drive_root=owned, task_id="child", budget_drive_root=str(ctx.drive_root))
+    assert call(child_ctx, op="json", kind="run", child_task_id="stranger", ids=["run-one"])["status"] == "blocked"
+    assert call(child_ctx, op="json", kind="task_result", ids=["caller"], select="result")["data"] == "first"
+
+
+@pytest.mark.parametrize("identity", ["../caller", "/tmp/caller", "a/b", "a\\b", "..", "C:caller"])
+def test_names_refuse_paths(ctx, identity):
+    assert call(ctx, op="json", kind="task_result", ids=[identity])["status"] == "error"
+    assert call(ctx, op="json", kind="task_result", ids=["caller"], save_as=identity)["status"] == "error"
+    assert call(ctx, op="sql", db=identity, query="SELECT 1")["status"] == "error"
+
+
+def test_symlink_escapes_and_secrets_but_skill_reads_work(ctx, tmp_path):
+    from ouroboros.tools.core_secret_paths import is_runtime_secret_target
+    state = write(ctx, "state/skills/example/review_job.json", b'{"status":"done"}')
+    assert is_runtime_secret_target(state, ctx.repo_dir, data_root=ctx.drive_root, ctx=ctx)
+    assert call(ctx, op="json", kind="skill_state", ids=["example"])["data"] == {"status": "done"}
+    secret = write(ctx, "settings.json", b'{"value":"fake-key-for-tests"}')
+    state.unlink()
+    state.symlink_to(secret)
+    assert call(ctx, op="json", kind="skill_state", ids=["example"])["status"] == "blocked"
+    outside = tmp_path.parent / (tmp_path.name + "-outside.json")
+    outside.write_text('{"ordinary":true}', encoding="utf-8")
+    target = ctx.drive_root / "state" / "queue_snapshot.json"
+    target.symlink_to(outside)
+    assert call(ctx, op="json", kind="queue_snapshot")["status"] == "blocked"
+    target.unlink()
+    target.hardlink_to(secret)
+    assert call(ctx, op="json", kind="queue_snapshot")["status"] == "blocked"
+
+
+def test_blob_exact_bytes_projection_limits_and_packed_resolver(ctx, monkeypatch):
+    raw = '{ "text": "λ\\r\\n", "z":2 }\n'.encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    path = write(ctx, f"observability/blobs/{digest}.json.gz", gzip.compress(raw))
+    result = call(ctx, op="blob", sha256=digest, save_as="blob.json")
+    assert saved(ctx, result) == raw
+    projected = call(ctx, op="blob", sha256=digest, select="text", format="text", save_as="blob.txt")
+    assert saved(ctx, projected) == "λ\r\n".encode("utf-8")
+    ref = observability.write_blob(ctx.drive_root, {"big": "x" * 10000})
+    assert observability.read_blob_ref(ctx.drive_root, ref) == {"big": "x" * 10000}
+    with pytest.raises(ValueError, match="byte limit"):
+        observability.read_blob_ref(ctx.drive_root, ref, max_bytes=100)
+    with pytest.raises(ValueError, match="size"):
+        observability.read_blob_ref(ctx.drive_root, {key: value for key, value in ref.items() if key != "size"})
+    path.write_bytes(gzip.compress(b'{"changed":true}'))
+    assert call(ctx, op="blob", sha256=digest)["status"] == "error"
+    path.unlink()
+    seen = []
+
+    def packed(root, ref, **kwargs):
+        seen.append((root, ref, kwargs))
+        return raw
+
+    monkeypatch.setattr(observability, "read_blob_ref", packed)
+    assert call(ctx, op="blob", sha256=digest)["data"]["z"] == 2
+    assert seen[0][2]["raw_bytes"] and seen[0][2]["max_bytes"] > 0
+
+
+def test_money_defaults_snapshot_and_missing_packs_are_typed(ctx, monkeypatch):
+    from ouroboros import query_data_sql
+    requests = []
+    monkeypatch.setattr(query_data_sql, "run_sql", lambda *a, **kw: requests.append(kw) or {"status": "ok", "data": 1})
+    for snapshot in (None, False):
+        assert call(ctx, op="sql", db="money", query="SELECT 1", snapshot=snapshot)["status"] == "ok"
+    assert [request["snapshot"] for request in requests] == [True, False]
+    no_packs = call(ctx, op="sql", db="packs", query="SELECT 1")
+    assert no_packs["status"] == "unavailable" and no_packs["code"] == "no_packs"
+    assert not (ctx.drive_root / "observability/packs").exists()
+
+
+def test_pack_index_sql(ctx):
+    from ouroboros.query_data_sql import packs_index_path
+    path = packs_index_path(ctx.drive_root)
+    path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE members(name TEXT)")
+        conn.execute("INSERT INTO members VALUES ('one')")
+        conn.commit()
+    finally:
+        conn.close()
+    result = call(ctx, op="sql", db="packs", query="SELECT name FROM members")
+    assert result["data"]["rows"] == [["one"]], result
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"select": "rows..value"}, {"filter": {"field": "a..b", "op": "eq", "value": 1}},
+    {"max_bytes": 0}, {"tail": -1}, {"max_rows": 2}, {"snapshot": False},
+])
+def test_invalid_requests_are_rejected_before_reading(ctx, kwargs):
+    write(ctx, "logs/events.jsonl", b"")
+    assert call(ctx, op="jsonl", kind="events_log", **kwargs)["status"] == "error"
+
+
+def test_real_registry_light_children_and_typed_errors(ctx, monkeypatch):
+    from ouroboros import config, safety
+    monkeypatch.setattr(config, "get_runtime_mode", lambda: "light")
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    assert registry._module_load_omissions == []
+    assert "query_data" in registry._FROZEN_TOOL_MODULES
+    assert safety.TOOL_POLICY["query_data"] == safety.POLICY_SKIP
+    for names in (caps.CORE_TOOL_NAMES, caps.LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
+                  caps.ACTING_SUBAGENT_TOOL_NAMES, caps.READ_ONLY_PARALLEL_TOOLS, caps.PAGEABLE_TOOL_RESULTS):
+        assert "query_data" in names
+    for constraint in ({}, {"mode": "local_readonly_subagent"},
+                       {"mode": "acting_subagent", "surface": "self_worktree", "root_task_id": "caller"}):
+        ctx.task_constraint = constraint
+        registry.set_context(ctx)
+        assert registry.get_schema_by_name("query_data") is not None
+        result = registry.execute_result("query_data", {"op": "json", "kind": "task_result", "ids": ["caller"]})
+        assert result.status == "ok", result.text
+        denied = registry.execute_result("query_data", {"op": "sql", "query": "DELETE FROM tasks"})
+        assert denied.status == "error", denied.text
+    schema = get_tools()[0].schema["parameters"]
+    assert "path" not in schema["properties"] and "root" not in schema["properties"]
+
+
+def test_delivery_retains_the_complete_query_before_cut(ctx):
+    from tests.test_tool_result_delivery import _deliver, _row, _source_ref, _view_json
+    from tests._tool_result_delivery_shared import measured_fit
+    write(ctx, "state/queue_snapshot.json", json.dumps({"text": "large data " * 12000}).encode("utf-8"))
+    full = _query_data(ctx, op="json", kind="queue_snapshot", max_bytes=200000)
+    assert json.loads(full)["status"] == "ok"
+    messages, trace = _deliver(ctx, [_row("query", "query_data", full)], measured_fit(window=12000, reserve=2000))
+    shown = messages[0]["content"]
+    assert _view_json(shown)["complete_chars"] == len(full)
+    ref = _source_ref(shown)
+    assert artifacts.read_actor_source_bytes(ctx.drive_root, ctx.task_id, ref) == full.encode("utf-8")
+    assert trace["tool_calls"][0]["result_partial"]

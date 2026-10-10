@@ -30,7 +30,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
-    "search_code", "query_code", "plan_task",
+    "search_code", "query_code", "query_data", "plan_task",
     "run_command", "run_script",
     "start_service", "service_status", "service_logs", "stop_service",
     "vcs_status", "vcs_diff", "vcs_commit_reviewed", "commit_reviewed",
@@ -97,7 +97,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # the cheap lane and finds the work harder raises itself instead of failing or
     # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
     "switch_model",
-    "read_file", "list_files", "search_code", "query_code",
+    "read_file", "list_files", "search_code", "query_code", "query_data",
     "vcs_status", "vcs_diff",
     # Memory: a child reads, writes knowledge notes and marks in its own name (the
     # host signs both with its focus) and publishes chronicle pages and parts only as
@@ -158,7 +158,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # the cheap lane and finds the work harder raises itself instead of failing or
     # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
     "switch_model",
-    "read_file", "list_files", "search_code", "query_code",
+    "read_file", "list_files", "search_code", "query_code", "query_data",
     "vcs_status", "vcs_diff",
     "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -206,7 +206,7 @@ def acting_tool_names_for_context(ctx: object, registered_names: Iterable[str]) 
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "inspect_harness",
     "read_file", "list_files",
-    "search_code", "query_code", "recent_tasks",
+    "search_code", "query_code", "query_data", "recent_tasks",
     "web_search", "chat_history",
     "vcs_status", "vcs_diff", "service_status", "service_logs",
     "get_task_result", "list_projects", "memory_read",
@@ -285,6 +285,7 @@ TOOL_RESULT_LIMITS: dict[str, int] = {
     "run_script": 80_000,
     "search_code": 80_000,
     "query_code": 80_000,
+    "query_data": 80_000,
     "service_logs": 80_000,
     # Best-of-N patch comparison shows several candidate diffs side by side; the
     # default 15k cap would truncate after the first one and defeat the tool.
@@ -356,7 +357,7 @@ EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
 # Tools whose own affordance IS paging: selects the recovery WORDING of a
 # partial view only; it exempts nothing from source persistence.
 PAGEABLE_TOOL_RESULTS: frozenset[str] = frozenset({
-    "read_file", "chat_history", "journal_read", "tree_read", "recent_tasks", "query_code",
+    "read_file", "chat_history", "journal_read", "tree_read", "recent_tasks", "query_code", "query_data",
 })
 
 
