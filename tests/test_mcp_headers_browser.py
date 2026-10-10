@@ -285,6 +285,56 @@ def test_header_switch_stdio(direct_server_with_data, engine, saved_headers, rel
             browser.close()
 
 
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_late_status_keeps_typed_field(direct_server_with_data, loopback, engine):  # noqa: F811
+    """A status answer landing mid-typing repaints status only, never the field being typed.
+
+    Playwright's fill (select, then insert) and a person typing both lose text
+    when that answer rebuilds the card under the caret.
+    """
+    from playwright.sync_api import expect, sync_playwright
+
+    url, data_dir = direct_server_with_data['url'], direct_server_with_data['data_dir']
+    _app, http_url = loopback('http', {'X-Api-Key': CUSTOM})
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        page = browser.new_page(viewport={'width': 1440, 'height': 1000})
+        page._evidence_engine = engine
+        try:
+            held = []
+            page.route('**/api/mcp/status', lambda route: held.append(route))
+            _seed(page, url, [{'id': 'late_status', 'enabled': True, 'transport': 'streamable_http',
+                               'url': http_url, 'headers': {'X-Api-Key': CUSTOM}}])
+            saved = page.locator('[data-mcp-card]').first
+            with page.expect_request(lambda request: request.url.endswith('/api/mcp/status'), timeout=20_000):
+                saved.locator('[data-mcp-refresh]').click()
+            page.click('#btn-mcp-add-server')
+            card = page.locator('[data-mcp-card]').last
+            card.locator('[data-mcp-field="id"]').fill('typed_draft')
+            card.locator('[data-mcp-field="transport"]').select_option('stdio')
+            command = page.locator('[data-mcp-card]').last.locator('[data-mcp-field="command"]')
+            command.click()
+            page.keyboard.type('pyth')
+            page.evaluate('() => { window.__typedField = document.activeElement; }')
+            for route in held:
+                route.fulfill(response=route.fetch())
+            held.clear()
+            expect(saved.locator('.mcp-server-status')).to_have_text('1 tool discovered', timeout=20_000)
+            expect(saved.locator('[data-mcp-message]')).to_contain_text('Saved catalog refreshed')
+            assert 'echo' in saved.locator('.mcp-tools-disclosure').text_content()
+            page.keyboard.insert_text('on3')
+            assert page.evaluate('() => document.activeElement === window.__typedField'
+                                 ' && window.__typedField.isConnected'), 'the status answer replaced the typed field'
+            assert command.input_value() == 'python3'
+            command.scroll_into_view_if_needed()
+            _capture(page, 'mcp-late-status-typed')
+            page.unroute('**/api/mcp/status')
+            _save(page)
+            assert _disk(data_dir)['typed_draft']['command'] == 'python3'
+        finally:
+            browser.close()
+
+
 TENANT = "synthetic-browser-tenant-0003"
 ALPHA = "synthetic-browser-alpha-0004"
 BETA = "synthetic-browser-beta-0005"

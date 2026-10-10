@@ -9,6 +9,7 @@ class names, key API endpoints, secret masking, etc.).
 from __future__ import annotations
 
 import pathlib
+import re
 import shutil
 import subprocess
 
@@ -121,6 +122,9 @@ def test_mcp_css_defines_required_classes(settings_css: str) -> None:
     assert ".mcp-server-card" in settings_css
     assert ".mcp-server-status-ok" in settings_css
     assert ".mcp-server-status-danger" in settings_css
+    # DESIGN §2: a subsection heading is --type-body semibold, never the browser's bold h4.
+    heading = re.search(r"\.mcp-headers-fields h4 \{([^}]*)\}", settings_css)
+    assert heading and "font-size: var(--type-body);" in heading[1] and "font-weight: 600;" in heading[1]
     shared = (REPO_ROOT / "web" / "ui.css").read_text(encoding="utf-8")
     assert ".ui-control {" in shared and "textarea.ui-control" in shared
     source = (WEB / "mcp_settings.js").read_text(encoding="utf-8")

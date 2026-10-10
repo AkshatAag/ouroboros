@@ -274,6 +274,24 @@ def test_settings_save_refuses_a_masked_rename_and_writes_nothing(mcp_settings):
     assert "X-Renamed" in response.text and BEARER not in response.text and not case.saved
 
 
+def test_settings_writer_normalizes_its_own_copy_never_the_request_body(mcp_settings, monkeypatch):
+    """One private copy carries the restored headers, the dropped request flag and a canonical alias."""
+    import ouroboros.gateway.settings as gateway
+
+    case, received = mcp_settings, []
+    locked = gateway._api_settings_post_locked
+    monkeypatch.setattr(gateway, "_api_settings_post_locked",
+                        lambda request, body: received.append((body, copy.deepcopy(body))) or locked(request, body))
+    response = case.client.post("/api/settings", json={
+        "MCP_SERVERS": _served(case), gateway.ALLOW_EMPTY_REVIEW_POOL: True, "OUROBOROS_REVIEW_MAX_CYCLES": "INF"})
+    assert response.status_code == 200, response.text
+    [(body, sent)] = received
+    assert body == sent and body[gateway.ALLOW_EMPTY_REVIEW_POOL] is True
+    assert case.saved["MCP_SERVERS"][0]["headers"]["Authorization"] == BEARER
+    assert case.saved["OUROBOROS_REVIEW_MAX_CYCLES"] == "unlimited"
+    assert gateway.ALLOW_EMPTY_REVIEW_POOL not in case.saved
+
+
 @pytest.mark.serial  # the shared fixture's module is serial: it re-points the Settings file
 def test_show_reads_one_exact_saved_header_value(reveal_settings):  # noqa: F811
     case = reveal_settings

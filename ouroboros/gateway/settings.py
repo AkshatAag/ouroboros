@@ -1239,7 +1239,7 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
     try:
         if not isinstance(body, dict):
             return unsaved_error("JSON body must be an object.", 400)
-        body = dict(body)  # the owner's empty-pool confirmation is a request flag, never a setting
+        body = dict(body)  # normalized in place below; the empty-pool confirmation is a request flag, never a setting
         allow_empty_pool = body.pop(ALLOW_EMPTY_REVIEW_POOL, None) is True
         channel_key = "OUROBOROS_UPDATE_CHANNEL"
         if channel_key in body:
@@ -1250,7 +1250,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                 return unsaved_error(
                     f"{channel_key} must be one of: stable, qa, development.", 400
                 )
-            body = dict(body)
             body[channel_key] = raw_channel
         # Reject a malformed post-task evolution cadence at the API boundary: the
         # read-time getter only normalizes, and the Settings UI validates its own Save,
@@ -1274,7 +1273,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                     f"{REVIEW_MAX_CYCLES_KEY} must be a positive integer or 'unlimited'.", 400
                 )
             if raw_cycles:
-                body = dict(body)
                 body[REVIEW_MAX_CYCLES_KEY] = normalize_review_max_cycles(raw_cycles)
         # Optional task bounds (round limit, absolute lifetime): the same vocabulary, but a
         # blank, zero or malformed value is refused rather than read as "no limit" or as a
@@ -1285,7 +1283,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                 bound = parse_positive_or_unlimited(body.get(bound_key))
             except (TypeError, ValueError):
                 return unsaved_error(f"{bound_key} must be a positive integer or 'unlimited'.", 400)
-            body = dict(body)
             body[bound_key] = UNLIMITED if bound is None else bound
         body, effort_error = _effort_range_tiers(body)
         if effort_error:
@@ -1311,7 +1308,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
             pool_error = review_pool_save_judgement(canonical_subagents, stored_for_rules, allow_empty=allow_empty_pool)
             if pool_error:
                 return unsaved_error(pool_error, 400, code="empty_review_pool")
-            body = dict(body)
             body[subagents_key] = canonical_subagents
         parsed_budget: dict[str, float] = {}
         for budget_key in BUDGET_SETTING_KEYS:
@@ -1323,7 +1319,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
             if budget_value is not None:
                 parsed_budget[budget_key] = budget_value
         if parsed_budget:
-            body = dict(body)
             body.update(parsed_budget)
         old_settings = load_settings()
         from ouroboros.config import get_runtime_mode, normalize_runtime_mode as _norm_runtime_mode
@@ -1337,7 +1332,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         old_effective_settings["OUROBOROS_RUNTIME_MODE"] = current_runtime_mode
         if "MCP_SERVERS" in body:
             from ouroboros.mcp_headers import MCPHeaderPlaceholderUnmatched, validate_changed_headers
-            body = dict(body)
             try:
                 body["MCP_SERVERS"] = _rehydrate_mcp_servers_payload(
                     body.get("MCP_SERVERS"),
