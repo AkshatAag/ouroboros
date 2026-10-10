@@ -138,10 +138,14 @@ def test_the_coverage_ack_binds_to_what_delivery_actually_hands_the_model(
     long_no, long_line = max(enumerate(lines, start=1), key=lambda p: len(p[1]))
     assert len(long_line) > budget + 1000
 
-    def delivered_body(delivered, view):
+    def delivered_body(result, delivered, view):
+        import os
         from ouroboros.tools.core_file_tools import delivered_source_prefix
 
-        return len(delivered_source_prefix(view, delivered, min(len(delivered), budget)))
+        # The renderer maps the exact delivered prefix of its own rendering;
+        # the truncation marker after the cut is never source.
+        shown = len(os.path.commonprefix([result, delivered]))
+        return len(delivered_source_prefix(view, result, shown))
 
     def call(start_char):
         before = sum(b - a for a, b in delegate._READ_COVERAGE.get(identity, []))
@@ -150,7 +154,7 @@ def test_the_coverage_ack_binds_to_what_delivery_actually_hands_the_model(
         delivered = _truncate_tool_result(result, "read_file",
                                           {"path": artifact["path"], "root": "task_drive"})
         after = sum(b - a for a, b in delegate._READ_COVERAGE.get(identity, []))
-        return result, delivered_body(delivered, ctx.last_read_view), after - before
+        return result, delivered_body(result, delivered, ctx.last_read_view), after - before
 
     # Shape A: rendering just under the budget; the repeat's appended note pushes the
     # annotated result over it — the rejected finding's exact scenario.

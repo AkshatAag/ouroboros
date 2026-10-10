@@ -825,13 +825,20 @@ def _edit_text(
             f"OK: edited {_root_display_path(normalized, path)} "
             f"(line {replacement_line}; resolved_root={binding.base_path}; source={binding.source})"
         )
-        from ouroboros.tools.edit_ops import numbered_edit_preview
+        from ouroboros.tools.edit_ops import _partial_write_failure, numbered_edit_preview
 
         result += f"\nContext:\n{numbered_edit_preview(new_text, [replacement_offset])}"
         if normalized == "user_files":
-            record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
-            if record:
-                result += f"\nARTIFACT_OUTPUTS: registered user file -> artifact_store:{record.get('name')}"
+            try:
+                record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
+                if not record:
+                    raise OSError("user file recovery copy was not registered")
+            except Exception as exc:  # the edit itself landed; say so instead of a refusal
+                rel = target.relative_to(binding.base_path).as_posix()
+                return _partial_write_failure(
+                    ctx, [rel], "edit_text", "EDIT_TEXT_ERROR",
+                    f"{rel} WAS written but its user artifact registration failed: {exc}", binding)
+            result += f"\nARTIFACT_OUTPUTS: registered user file -> artifact_store:{record.get('name')}"
         if newline_note:
             result += f"\n{newline_note}"
         return result
@@ -860,6 +867,19 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     """Search repo text with optional regex, path, glob, and result cap."""
     if not query:
         return "⚠️ SEARCH_ERROR: query is required."
+    if not isinstance(query, str):
+        return "⚠️ SEARCH_ERROR: query must be a string."
+    # Validate a regex query UP FRONT, before any path fact: an invalid pattern is an
+    # error whatever the path, and the contract holds for BOTH the ripgrep path and the
+    # Python fallback. ripgrep accepts some malformed patterns permissively (e.g. an
+    # unterminated '[' yields "no matches" instead of erroring), so without this the rg
+    # path would silently swallow an invalid regex while only the fallback rejected it.
+    # Non-regex queries are matched literally and need no check.
+    if regex:
+        try:
+            re.compile(query)
+        except re.error as e:
+            return f"⚠️ SEARCH_ERROR: invalid regex: {e}"
     normalized, block = _access_or_block(ctx, root, "search")
     if block:
         return block
@@ -880,8 +900,6 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     display_path = binding.target_path.relative_to(root_path).as_posix() if normalized in {"active_workspace", "system_repo"} else path
     display_search_path = _root_display_path(normalized, display_path)
     search_root = binding.target_path
-    if not search_root.exists():
-        return f"⚠️ SEARCH_ERROR: path not found: {display_search_path}"
     if normalized != "user_files":
         # Reject a search ROOT that escapes its resource root (e.g. the requested path is an
         # in-tree symlink pointing outside — untrusted child project/deliverable trees) BEFORE
@@ -898,6 +916,10 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     )
     if protected_root_block:
         return protected_root_block
+    # An admitted, absent path is an ordinary discovery miss: a typed warning
+    # (parity with list_files/read_file), never a denial or an invalid query.
+    if not search_root.exists():
+        return f"⚠️ SEARCH_NOT_FOUND: path not found: {display_search_path}"
     protected_root_read_block = block_reason_for_path(
         ctx, search_root, "read_bytes", binding
     )
@@ -935,19 +957,6 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         if skip:
             return _drop(skip)
         return True
-
-    # Validate a regex query UP FRONT so the invalid-regex contract holds for BOTH the
-    # ripgrep path and the Python fallback. ripgrep accepts some malformed patterns
-    # permissively (e.g. an unterminated '[' yields "no matches" instead of erroring),
-    # so without this the rg path would silently swallow an invalid regex while only the
-    # fallback rejected it. Non-regex queries are matched literally and need no check.
-    # (Checked before the wall-clock budget below: an invalid regex returns immediately,
-    # so there is no point starting the timer for it.)
-    if regex:
-        try:
-            re.compile(query)
-        except re.error as e:
-            return f"⚠️ SEARCH_ERROR: invalid regex: {e}"
 
     import time as _time
     _search_t0 = _time.monotonic()  # start the wall-clock budget BEFORE rg, so a
@@ -1346,8 +1355,7 @@ def get_tools() -> List[ToolEntry]:
                 "or pass edits=[{old_str,new_str,count?}, ...] for ordered atomic "
                 "replacements in that SAME file. Do not mix the forms. "
                 "With root omitted, relative paths use active_workspace; absolute paths select their permitted physical root, including user_files for home paths. Result messages show root:path. "
-                "For different files, issue separate edit calls in parallel in ONE round; "
-                "disjoint targets can run together. edit_batch also handles several files. "
+                "For several files use edit_batch or apply_patch; editor calls run one after another in call order. "
                 "Set bucket/skill_name ONLY for root=skill_payload (skill authoring); leave empty for normal edits."
             ),
             "parameters": {"type": "object", "properties": {
@@ -1360,7 +1368,7 @@ def get_tools() -> List[ToolEntry]:
                 "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "description": _FILE_ROOT_DESCRIPTION},
                 "bucket": {"type": "string", "description": "Skill payload bucket — set ONLY when root=skill_payload; leave empty otherwise."},
                 "skill_name": {"type": "string", "description": "Skill slug — set ONLY when root=skill_payload; leave empty otherwise."},
-                "force": {"type": "boolean", "default": False, "description": "Confirm an intentional shrink or repo-lane syntax guard bypass; the bypass is disclosed."},
+                "force": {"type": "boolean", "default": False, "description": "Confirm an intentional shrink (>30% smaller)."},
             }, "required": ["path"]},
         }, _edit_text, is_code_tool=True),
         ToolEntry("send_photo", {

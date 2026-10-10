@@ -158,6 +158,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         # Exposure facts gate automatic compaction; a resumed task keeps them.
         "context_observations": {key: getattr(ctx, key) for key in (
             "_last_context_observation", "_inspected_context_view", "_pending_compaction",
+            "_historical_author_inputs",
         ) if getattr(ctx, key, None) is not None},
         "round_idx": round_idx, "tool_schemas": tool_schemas,
         "seen": sorted(seen), "owner_directives": getattr(ctx, "_owner_directives", []),
@@ -639,7 +640,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
 
     ctx = tools._ctx
     for key, value in (state.get("context_observations") or {}).items():
-        if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction"}:
+        if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction", "_historical_author_inputs"}:
             setattr(ctx, key, value)
     messages[:] = state["messages"]
     trace.update(state["trace"])

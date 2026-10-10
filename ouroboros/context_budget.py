@@ -5,7 +5,7 @@ assembled prompt and the typed context-reclaim request/receipt contract.
 
 They are deliberately SEPARATE from the REVIEW-prompt budget family
 (``ouroboros.tools.review_helpers.REVIEW_PROMPT_TOKEN_BUDGET`` and the
-``ouroboros.tools.scope_review`` window constants), which sizes reviewer
+``ouroboros.tools.scope_window`` window constants), which sizes reviewer
 prompts, not the agent's own context. Merging the two would couple unrelated
 concerns and is explicitly avoided.
 
@@ -441,7 +441,8 @@ REVIEW_LEDGER_INDEX_WARN_BYTES = 64_000_000
 # compact custody projection, never deletion.
 EVENTS_ARCHIVE_SCAN_WARN_BYTES = 100_000_000
 # Warn before the observed 242-of-253 retained-drive corpus becomes routine;
-# count only direct children because startup health is an interactive path.
+# count only direct child directories of state/headless_tasks and task_drives
+# (no recursive sizing) because startup health is an interactive path.
 RETAINED_EXECUTION_DRIVES_WARN_COUNT = 200
 
 

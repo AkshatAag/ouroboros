@@ -131,12 +131,11 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # for same-tree mail: the forward_to_worker description names its peer addressees
     # as any other task in the caller's tree (parent, sibling, any task sharing the
     # root) and says Presence observation gaps are disclosed inside the tree too.
-    # Rolled for the six owner-approved edit/read changes: numbered read views,
-    # explicit omitted-root semantics and ordered same-file edit_text replacements.
-    # Force help now explicitly names the supported repo syntax bypass too;
-    # parameter shapes and required keys are unchanged.
+    # Rolled for the owner-approved edit/read package: numbered read views,
+    # explicit omitted-root semantics and ordered same-file edit_text replacements;
+    # editor calls run in call order and `force` confirms only an intentional shrink.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "370f30bf2f5ff3c0bcca14646480a0bdb6e3d003d50013f4bbd9473966f3c096"
+        "89c37d63e2dc714c52c340bf332b92613c6bd04cfa2d899788bc212fc1505b54"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

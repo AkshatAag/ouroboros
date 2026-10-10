@@ -1,4 +1,10 @@
-"""Atomic admission transitions for the managed task queue."""
+"""Atomic admission transitions for the managed task queue.
+
+Ingress ids are guarded by token-owned reservations: ``reserve_task_admission``
+runs before the caller creates drives, attachments or workspace artifacts, a
+different token on a live id is refused as ``duplicate_task_id``, and only the
+owning token can release it. A retry cannot therefore create a second task.
+"""
 
 from __future__ import annotations
 
@@ -790,7 +796,7 @@ def subagent_schedule_preflight(
             ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
             parent_id=evt.get("parent_task_id"),
             root_task_id=str(evt.get("root_task_id") or evt.get("parent_task_id") or tid),
-            role=str(evt.get("role") or "researcher"), result_fields={},
+            role=str(evt.get("role") or "").strip(), result_fields={},
             detail=(
                 f"{label} not scheduled: the existing durable result for this task id "
                 "is unreadable, so its identity authority was preserved."

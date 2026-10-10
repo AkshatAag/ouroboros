@@ -31,7 +31,7 @@ def _big_file(lines: int = 1200) -> str:
 def test_indentation_miss_names_the_region_and_the_first_differing_line():
     out = locate_edit_miss(_big_file(), "    def compute(x):\n        return x * 800")
     assert out.startswith("old_str matches lines 800–801 ignoring whitespace (indentation differs"), out
-    assert " 800|         def compute(x):" in out and " 801|             return x * 800" in out
+    assert " 800\t        def compute(x):" in out and " 801\t            return x * 800" in out
     # The needle's first line is a SUFFIX of file line 800 (a needle may start
     # mid-line), so the first byte difference is the second line.
     assert "first difference at line 801:" in out
@@ -180,12 +180,14 @@ def test_edit_batch_miss_carries_the_locator_bounded_per_call(ws):
     assert (ws.repo_dir / "m.py").read_text(encoding="utf-8") == _big_file()
 
 
-def test_apply_patch_unique_indentation_context_is_applied():
+def test_apply_patch_indentation_miss_carries_the_locator_instead_of_adapting():
     ops, err = _parse_patch("*** Update File: m.py\n-    def compute(x):\n-        return x * 800\n+pass\n")
     assert err == ""
     new, _notes, herr = _apply_hunks_to_text(_big_file(), ops[0].hunks, "m.py")
-    assert not herr and "pass" in new
-    assert any("indentation" in note for note in _notes)
+    assert new is None
+    assert herr.startswith("hunk 1: context not found in m.py."), herr
+    assert "the hunk context matches lines 800–801 ignoring whitespace (indentation differs" in herr, herr
+    assert "read_file start_line=800 max_lines=2" in herr
 
 
 def test_apply_patch_out_of_order_hunk_applies():

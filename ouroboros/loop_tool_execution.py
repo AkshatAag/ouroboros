@@ -601,13 +601,12 @@ def _execute_browser_tool_bound(
         return {"tool_call_id": tc.get("id"), "fn_name": fn_name, "result": result,
                 "is_error": True, "args_for_log": {}, "is_code_tool": False}
     if tool_ctx is not None and generation is not None:
-        # Pin the expectation for the tool body: _ensure_browser re-checks it
-        # at the exact moment it captures the generation, which closes the
-        # check-then-run window (safety checks between here and the handler
-        # can be long). _ensure_browser's own legitimate replacements update
-        # the pin, so a mid-call error after such a replacement is never
-        # mistaken for a timeout retirement.
-        setattr(tool_ctx, "_active_browser_generation", generation)
+        from ouroboros.tools.browser import browser_call_scope
+
+        # Bind before safety checks, in this invocation's context: after a
+        # timeout the replacement worker may already be running another call.
+        with browser_call_scope(tool_ctx, generation):
+            return _execute_single_tool(tools, tc, drive_logs, task_id, invocation)
     return _execute_single_tool(tools, tc, drive_logs, task_id, invocation)
 
 
@@ -1011,6 +1010,9 @@ def _execute_with_timeout(
     tool_call_id = tc["id"]
     is_code_tool = fn_name in tools.CODE_TOOLS
     is_reviewed_mutative = fn_name in REVIEWED_MUTATIVE_TOOLS
+    # A foreground mutator's timeout is soft: it bounds the worker's inner waits,
+    # then the loop joins the handler (only a worker kill ends a hung one).
+    terminal_wait = is_reviewed_mutative or fn_name in FOREGROUND_MUTATIVE_TOOLS
     use_stateful = stateful_executor and fn_name in STATEFUL_BROWSER_TOOLS
     started_at = time.perf_counter()
     correlation = _tool_correlation(tools)
@@ -1031,7 +1033,7 @@ def _execute_with_timeout(
     live = _with_correlation({
         "ts": utc_now_iso(), "type": CALL_STARTED, "task_id": task_id, "tool": fn_name,
         "timeout_sec": None if is_reviewed_mutative else timeout_sec,
-        "terminal_wait": is_reviewed_mutative, "args": args_for_log,
+        "terminal_wait": terminal_wait, "args": args_for_log,
         **receipt, **invocation_fields(invocation),
     }, correlation, tool_call_id=tool_call_id)
     invocation["start_log"] = _append_tool_log(tools, drive_logs, dict(live))
@@ -1169,12 +1171,12 @@ def _await_stateful_tool(tools: ToolRegistry, tc: Dict[str, Any], drive_logs: pa
 _PARALLEL_SAFE_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | PARALLEL_SAFE_ENQUEUE_TOOLS
 
 
-def tool_calls_can_run_parallel(tool_calls: List[Dict[str, Any]], ctx: Any = None) -> bool:
-    """True for existing safe tools or physically disjoint editor-only rounds."""
-    if ctx is not None:
-        from ouroboros.tools.tool_resolution import editor_round_has_disjoint_effects
-        if editor_round_has_disjoint_effects(ctx, tool_calls):
-            return True
+def tool_calls_can_run_parallel(tool_calls: List[Dict[str, Any]]) -> bool:
+    """True when a tool-call round may execute in the shared ThreadPool.
+
+    Read-only-parallel tools plus fire-and-forget enqueue tools
+    (schedule_subagent) qualify; any other tool forces sequential execution.
+    """
     return (
         len(tool_calls) > 1
         and all(
@@ -1247,8 +1249,6 @@ def handle_tool_calls(
         return result
 
     can_parallel = tool_calls_can_run_parallel(tool_calls)
-    if not can_parallel:
-        can_parallel = tool_calls_can_run_parallel(tool_calls, tools._ctx)
 
     if not can_parallel:
         results = [_execute(tc) for tc in tool_calls]

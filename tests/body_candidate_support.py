@@ -96,6 +96,10 @@ def make_serving(root: pathlib.Path) -> pathlib.Path:
     git(repo, "init", "-q", "-b", "ouroboros")
     # Candidate/source byte identities must not depend on the runner's Git EOL policy.
     git(repo, "config", "core.autocrlf", "false")
+    # The body tools' own Git calls (merge, tag) run without this helper's env identity;
+    # the repo config reaches every linked candidate and needs no ambient one.
+    git(repo, "config", "user.email", "t@example.invalid")
+    git(repo, "config", "user.name", "t")
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "base")
     return repo

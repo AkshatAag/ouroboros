@@ -91,6 +91,8 @@ from ouroboros.server_maintenance import (  # noqa: F401
     _resume_interrupted_project_deletions,
     _run_startup_task_recovery,
     _startup_retired_settings_notice,
+    _startup_environment_review_notice,
+    _startup_review_pool_notice,
     _startup_custody_sweep,
     _startup_prune_sweeps,
     _startup_worktree_prune,
@@ -324,6 +326,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
 
 def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: list) -> int:
     from supervisor.message_bus import coerce_chat_identity
+    from ouroboros.chat_uploads import attachment_placeholder
 
     for upd in updates:
         cursor[0] += 1
@@ -349,7 +352,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         task_constraint = msg.get("task_constraint") if isinstance(msg.get("task_constraint"), dict) else None
         task_metadata = msg.get("task_metadata") if isinstance(msg.get("task_metadata"), dict) else None
         image_data = (image_base64, image_mime, image_caption) if image_base64 else None
-        log_text = text or image_caption or ("(image attached)" if image_base64 else "(file attached)" if (task_metadata or {}).get("chat_attachment_uploads") else "")
+        log_text = text.strip() or image_caption.strip() or attachment_placeholder(image_base64, task_metadata)
         now_iso = utc_now_iso()
         if not client_message_id:
             # Some owner transports have no client-generated id.  Give the
@@ -471,7 +474,11 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
         elif lowered == "/review" or lowered.startswith("/review "):
             # Target the requesting chat so the ack and results return to the
             # external transport owner, not the default web owner_chat_id.
-            ctx.queue_deep_self_review_task(reason="owner:/review", force=True, chat_id=chat_id)
+            # `/review <row>` names the executor (the Web selector sends it);
+            # a bare `/review` (Telegram) runs on the Main model.
+            parts = text.split(None, 1)
+            ctx.queue_deep_self_review_task(reason="owner:/review", force=True, chat_id=chat_id,
+                                            reviewer=parts[1].strip() if len(parts) > 1 else "")
         elif lowered.startswith("/evolve"):
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "on"
@@ -726,6 +733,8 @@ def _run_supervisor(settings: dict) -> None:
                     )
                 send_with_budget(int(st_boot["owner_chat_id"]), " ".join(notice), role="system", system_type="startup_notice")
         _startup_retired_settings_notice(settings)
+        _startup_environment_review_notice()
+        _startup_review_pool_notice(settings)
         from ouroboros.upgrade_notices import startup_upgrade_notices
         startup_upgrade_notices(settings)
 

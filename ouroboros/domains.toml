@@ -62,6 +62,7 @@ D19 = "Frozen contracts (ABI)"
 D20 = "Presence"
 
 [modules]
+"ouroboros/openrouter_cost.py" = "D02"
 "ouroboros/obligations.py" = "D11"
 "ouroboros/startup_migrations.py" = "D11"
 "ouroboros/startup_task_files.py" = "D11"
@@ -109,6 +110,7 @@ D20 = "Presence"
 "ouroboros/cancel_intents.py" = "D09"
 "ouroboros/model_wait.py" = "D09"
 "ouroboros/capability_evidence.py" = "D03"
+"ouroboros/response_limits.py" = "D03"
 "ouroboros/claudexor_daemon.py" = "D07"
 "ouroboros/claudexor_exit_facts.py" = "D07"
 "ouroboros/claudexor_runtime.py" = "D07"
@@ -126,6 +128,7 @@ D20 = "Presence"
 "ouroboros/config.py" = "D12"
 "ouroboros/confined_files.py" = "D18"
 "ouroboros/model_slots.py" = "D12"
+"ouroboros/search_routes.py" = "D12"
 "ouroboros/review_model_routes.py" = "D12"
 "ouroboros/runtime_limits.py" = "D12"
 "ouroboros/settings_defaults.py" = "D12"
@@ -219,6 +222,7 @@ D20 = "Presence"
 "ouroboros/gateway/_helpers.py" = "D11"
 "ouroboros/gateway/attachment_contracts.py" = "D11"
 "ouroboros/gateway/claudexor_accounts.py" = "D11"
+"ouroboros/gateway/harness_maintenance.py" = "D11"
 "ouroboros/gateway/claudexor_quota.py" = "D11"
 "ouroboros/gateway/contracts.py" = "D11"
 "ouroboros/gateway/control.py" = "D11"
@@ -260,9 +264,12 @@ D20 = "Presence"
 "ouroboros/gateway/ui_preferences.py" = "D11"
 "ouroboros/gateway/ui_i18n.py" = "D11"
 "ouroboros/gateway/ui_i18n_contracts.py" = "D11"
+"ouroboros/gateway/model_route_contracts.py" = "D11"
 "ouroboros/gateway/ws.py" = "D11"
 "ouroboros/gateways/__init__.py" = "D07"
 "ouroboros/gateways/claudexor.py" = "D07"
+"ouroboros/gateways/claudexor_maintenance.py" = "D07"
+"ouroboros/harness_maintenance.py" = "D07"
 "ouroboros/gateways/claudexor_run_events.py" = "D07"
 "ouroboros/llm_claudexor.py" = "D02"
 "ouroboros/git_shell_policy.py" = "D13"
@@ -303,6 +310,7 @@ D20 = "Presence"
 "ouroboros/loop_forced_finalization.py" = "D01"
 "ouroboros/loop_messages.py" = "D01"
 "ouroboros/loop_model_call.py" = "D01"
+"ouroboros/primary_route_observation.py" = "D01"
 "ouroboros/loop_nudges.py" = "D01"
 "ouroboros/loop_round_limits.py" = "D01"
 "ouroboros/loop_llm_call.py" = "D01"
@@ -411,6 +419,8 @@ D20 = "Presence"
 "ouroboros/review_ledger.py" = "D06"
 "ouroboros/review_native_episode.py" = "D06"
 "ouroboros/review_owner_custody.py" = "D06"
+"ouroboros/review_pool_migration.py" = "D06"
+"ouroboros/review_pool_receipts.py" = "D06"
 "ouroboros/review_projection.py" = "D06"
 "ouroboros/review_status_projection.py" = "D06"
 "ouroboros/review_records.py" = "D06"
@@ -450,6 +460,7 @@ D20 = "Presence"
 "ouroboros/skill_conflicts.py" = "D14"
 "ouroboros/skill_lifecycle_queue.py" = "D14"
 "ouroboros/skill_loader.py" = "D14"
+"ouroboros/skill_catalogue.py" = "D14"
 "ouroboros/skill_peer_inventory.py" = "D14"
 "ouroboros/skill_uninstall_state.py" = "D14"
 "ouroboros/skill_owner_attestation.py" = "D14"
@@ -513,12 +524,11 @@ D20 = "Presence"
 "ouroboros/tools/arg_feedback.py" = "D04"
 "ouroboros/tools/browser.py" = "D05"
 "ouroboros/tools/chronicle.py" = "D15"
-"ouroboros/tools/claude_advisory_review.py" = "D06"
-"ouroboros/tools/preflight_review_prompt.py" = "D06"
-"ouroboros/tools/preflight_review_run.py" = "D06"
+"ouroboros/tools/preflight_review.py" = "D06"
 "ouroboros/tools/commit_gate.py" = "D10"
 "ouroboros/tools/compact_context.py" = "D03"
 "ouroboros/tools/control.py" = "D08"
+"ouroboros/tools/control_maintenance.py" = "D08"
 "ouroboros/tools/control_scheduling.py" = "D07"
 "ouroboros/tools/control_subagent_spec.py" = "D07"
 "ouroboros/tools/control_task_results.py" = "D07"
@@ -582,6 +592,7 @@ D20 = "Presence"
 "ouroboros/tools/review_multi_model.py" = "D06"
 "ouroboros/tools/review_admission.py" = "D06"
 "ouroboros/tools/review_binary_context.py" = "D06"
+"ouroboros/tools/review_brief_coupling.py" = "D06"
 "ouroboros/tools/review_change.py" = "D06"
 "ouroboros/tools/review_change_custody.py" = "D06"
 "ouroboros/tools/review_checklist.py" = "D06"
@@ -594,10 +605,8 @@ D20 = "Presence"
 "ouroboros/tools/review_revalidation.py" = "D10"
 "ouroboros/tools/review_subject.py" = "D06"
 "ouroboros/tools/review_synthesis.py" = "D06"
-"ouroboros/tools/scope_review.py" = "D06"
 "ouroboros/tools/scope_required_sources.py" = "D06"
 "ouroboros/tools/scope_review_contract.py" = "D06"
-"ouroboros/tools/scope_review_session.py" = "D06"
 "ouroboros/tools/scope_window.py" = "D06"
 "ouroboros/tools/search.py" = "D05"
 "ouroboros/tools/services.py" = "D05"
@@ -636,6 +645,8 @@ D20 = "Presence"
 "ouroboros/verified_download.py" = "D18"
 "ouroboros/version.py" = "D10"
 "ouroboros/vision_routing.py" = "D02"
+"ouroboros/vision_image_limits.py" = "D02"
+"ouroboros/image_preparation.py" = "D02"
 "ouroboros/workspace_admission.py" = "D17"
 "ouroboros/workspace_executor.py" = "D17"
 "ouroboros/workspace_patch_rules.py" = "D17"
@@ -808,7 +819,6 @@ allowed = [
   "D06->D10",
   "D06->D12",
   "D06->D13",
-  "D06->D14",
   "D06->D16",
   "D06->D17",
   "D06->D18",
@@ -937,6 +947,7 @@ lazy_only = [
   "D01->D08",
   "D01->D10",
   "D01->D11",
+  "D02->D05",
   "D02->D11",
   "D03->D05",
   "D03->D06",
@@ -965,6 +976,7 @@ lazy_only = [
   "D06->D03",
   "D06->D05",
   "D06->D08",
+  "D06->D14",
   "D06->D15",
   "D07->D03",
   "D07->D09",
@@ -989,6 +1001,7 @@ lazy_only = [
   "D10->D11",
   "D10->D14",
   "D10->D15",
+  "D10->D16",
   "D10->D17",
   "D11->D06",
   "D11->D15",

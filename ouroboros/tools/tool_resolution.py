@@ -7,7 +7,6 @@ targets retain the same bindings.
 from __future__ import annotations
 
 import inspect
-import json
 import os
 import pathlib
 
@@ -134,18 +133,37 @@ def _payload_write_paths(name: str, args: Dict[str, Any]) -> List[str]:
     return [p for p in paths if str(p or "").strip()]
 
 
+def body_relative_path(ctx: Any, item: Any, *, own_body_copy: bool) -> str | None:
+    """Repo-relative identity of a bound target that lands on Ouroboros's body.
+
+    A target physically inside the serving repository is the body. An admitted
+    copy of the body (``own_body_copy``: the existing ``workspace_copies``
+    provenance) is the body too for targets in its own repo lanes; a foreign
+    project's copy stays foreign. ``None`` for every other target.
+    """
+    target = getattr(item, "target_path", None)
+    if target is None:
+        return None
+    bases = [system_repo_dir_for(ctx)]
+    if own_body_copy and item.root in {"active_workspace", "system_repo"} \
+            and item.source in {"active_workspace", "system_repo"}:
+        bases.append(pathlib.Path(item.base_path))
+    physical = pathlib.Path(target).resolve(strict=False)
+    for base in bases:
+        try:
+            return physical.relative_to(pathlib.Path(base).resolve(strict=False)).as_posix()
+        except ValueError:
+            continue
+    return None
+
+
 def protected_repo_write_paths(ctx: Any, name: str, args: Dict[str, Any],
                                binding: Any, *, workspace_mode: bool,
                                acting_system_worktree: bool) -> list[str]:
-    """Only physical repo members of a mixed binding reach the protected gate."""
+    """Only members of a mixed binding that land on the body reach the protected gate."""
     if binding is not None:
-        from ouroboros.tool_access import path_is_relative_to
-
-        repo = system_repo_dir_for(ctx)
-        return [pathlib.Path(item.target_path).relative_to(repo).as_posix()
-                for item in _binding_items(binding)
-                if item.target_path is not None
-                and path_is_relative_to(pathlib.Path(item.target_path), repo)]
+        return [rel for item in _binding_items(binding)
+                if (rel := body_relative_path(ctx, item, own_body_copy=acting_system_worktree)) is not None]
     root = str(args.get("root") or "active_workspace")
     if (workspace_mode and not acting_system_worktree) or root not in {"active_workspace", "system_repo"}:
         return []
@@ -568,50 +586,6 @@ def _binding_items(binding: Any) -> tuple[Any, ...]:
     if binding is None:
         return ()
     return binding if isinstance(binding, tuple) else (binding,)
-
-
-def editor_round_has_disjoint_effects(ctx: Any, calls: list[dict[str, Any]]) -> bool:
-    """Preflight physical file and shared publication effects for editor-only rounds."""
-    editors = {"edit_text", "edit_batch", "apply_patch"}
-    if len(calls) < 2 or any(str(c.get("function", {}).get("name") or "") not in editors for c in calls):
-        return False
-    seen: set[tuple[Any, ...]] = set()
-    for call in calls:
-        function = call.get("function") or {}
-        name = str(function.get("name") or "")
-        try:
-            raw = function.get("arguments") or "{}"
-            args = json.loads(raw) if isinstance(raw, str) else dict(raw)
-            if not isinstance(args, dict):
-                return False
-            if _normalize_dispatch_path_args_result(ctx, name, args).required_root:
-                return False
-            paths = _payload_write_paths(name, args)
-            bindings = _binding_items(_build_builtin_target_binding(ctx, name, args))
-            if not paths or len(paths) != len(bindings):
-                return False
-            effects: set[tuple[Any, ...]] = set()
-            for binding in bindings:
-                target = pathlib.Path(binding.target_path)
-                effects.add(("path", str(target.resolve(strict=False))))
-                try:
-                    stat = target.stat()
-                    effects.add(("inode", stat.st_dev, stat.st_ino))
-                except OSError:
-                    pass
-                # The shared artifact manifest and skill revision are one
-                # effect even when two paths are physically disjoint.
-                if binding.root == "user_files":
-                    effects.add(("user-artifacts", str(binding.state_drive_root)))
-                if binding.skill_name:
-                    effects.add(("skill-revision", str(binding.state_drive_root), binding.skill_name))
-                effects.add(("workspace-output-name", target.name))
-            if effects & seen:
-                return False
-            seen.update(effects)
-        except Exception:  # Footprint preflight is advisory; actual dispatch owns typed refusals.
-            return False
-    return True
 
 
 def _binding_set_targets_system_repo(ctx: Any, binding: Any) -> bool:

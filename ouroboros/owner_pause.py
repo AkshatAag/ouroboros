@@ -630,8 +630,11 @@ def submit_tool(source: Any, name: str, submit: Any, function: Any, *args: Any):
         return submit(context.run, function, *args)
 
 
-def run_operation(source: Any, function: Any, *args: Any, **kwargs: Any):
+def run_operation(source: Any, function: Any, /, *args: Any, **kwargs: Any):
     """Submit an opaque synchronous call; join outside the short launch lock.
+
+    The forwarders' own parameters are positional-only: every keyword, such as
+    a tool argument named ``source`` or ``function``, belongs to the callee.
 
     The worker owns only this call. Its copied context does not authorize any
     nested process, model or delegated submission after a subsequent Pause.
@@ -645,7 +648,7 @@ def run_operation(source: Any, function: Any, *args: Any, **kwargs: Any):
         return future.result()
 
 
-def run_tool_handler(source: Any, function: Any, *args: Any, **kwargs: Any):
+def run_tool_handler(source: Any, function: Any, /, *args: Any, **kwargs: Any):
     """The host joins the actual body, including its exception unwind.
 
     A caller's outer timeout cannot reach this finally while the body still runs.
@@ -666,7 +669,7 @@ def run_tool_handler(source: Any, function: Any, *args: Any, **kwargs: Any):
             active[2]["settled"] = True
 
 
-def submit_async_operation(source: Any, function: Any, *args: Any, **kwargs: Any):
+def submit_async_operation(source: Any, function: Any, /, *args: Any, **kwargs: Any):
     """Submit to the current event loop without executing the body under a lock."""
     import asyncio
 

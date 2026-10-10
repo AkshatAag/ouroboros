@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import pathlib
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.skill_payload_policy import (
@@ -112,8 +113,9 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
     ``body_chars`` (source characters), ``partial_head`` (the body opens with
     a partial line), ``line_ends`` (display offsets of COMPLETE lines — the partial head excluded — on the very line
     definition the renderer cut by, so a consumer that cuts the body further
-    counts complete lines from them and never recounts newlines), plus the
-    requested ``start_line``/``start_char``.
+    counts complete lines from them and never recounts newlines), ``display_map``
+    (the compact descriptor ``display_source_segments`` rebuilds the numbered
+    rows from), plus the requested ``start_line``/``start_char``.
     An empty delivery (cursor at or past the window's end, or a start past EOF)
     is an EMPTY range (``end_line < first_line``), never an inverted claim. A
     consumer that must know what a read delivered (the native review episode's
@@ -155,20 +157,17 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
         body, header, partial_head, first_line = window, f"# {path} — lines {start}\u2013{end} of {total}\n", False, start
     if not body:
         first_line = end + 1  # nothing complete was delivered: an EMPTY range, never an inverted one
-    # Display offsets are deliberately separate from source offsets.  A number
+    # Display offsets are deliberately separate from source offsets: a number
     # prefix can be delivered without delivering any character of the file.
     display_parts: List[str] = []
-    display_segments: List[Tuple[int, int, int]] = []
     display_line_ends: List[int] = []
     display_pos = 0
-    source_pos = 0
     visible_line = start + whole if offset else start
-    for number, line in enumerate(body.splitlines(keepends=True), visible_line):
-        prefix = f"{number:>6}\t"
+    rows = body.splitlines(keepends=True)
+    for number, line in enumerate(rows, visible_line):
+        prefix = _display_prefix(number)
         display_parts.extend((prefix, line))
-        display_segments.append((display_pos + len(prefix), display_pos + len(prefix) + len(line), source_pos))
         display_pos += len(prefix) + len(line)
-        source_pos += len(line)
         if not partial_head or number != visible_line:
             display_line_ends.append(display_pos)
     displayed = "".join(display_parts)
@@ -177,7 +176,7 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
         extent.update({"start_line": start, "end_line": end, "total_lines": total, "start_char": offset,
                        "first_line": first_line, "body_start": len(header), "body_chars": len(body),
                        "partial_head": partial_head, "line_ends": tuple(display_line_ends),
-                       "display_segments": tuple(display_segments),
+                       "display_map": {"scheme": _DISPLAY_SCHEME, "first_number": visible_line, "rows": len(rows)},
                        "complete_chars": len(content),
                        "complete_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
                        "source_start_char": source_start, "source_end_char": source_start + len(body),
@@ -186,47 +185,88 @@ def _render_line_slice(path: str, content: str, max_lines: int = 2000, start_lin
     return rendered
 
 
-def display_source_map_valid(view: Dict[str, Any]) -> bool:
-    """Validate the renderer's compact display to source segment map."""
-    body_start = view.get("body_start")
-    segments = view.get("display_segments")
-    if type(body_start) is not int or body_start < 0 or not isinstance(segments, (list, tuple)):
-        return False
-    previous_end = 0
-    source_total = 0
-    for segment in segments:
-        if (not isinstance(segment, (tuple, list)) or len(segment) != 3
-                or any(type(value) is not int for value in segment)):
-            return False
-        begin, end, source_at = segment
-        if begin < previous_end or end < begin or source_at != source_total:
-            return False
-        previous_end = end
-        source_total += end - begin
-    if source_total != view.get("body_chars"):
-        return False
-    return True
+# The numbered display is deterministic: row k is ``_display_prefix(first_number + k)``
+# followed by one source line on read_file's ``splitlines`` definition. A view
+# carries only this descriptor (a 2,000-line read stays a few bytes of facts);
+# consumers rebuild row coordinates from the rendered text and validate them.
+_DISPLAY_SCHEME = "numbered_rows_v1"
+_DISPLAY_BOUNDARY = re.compile("[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+
+
+def _display_prefix(number: int) -> str:
+    return f"{number:>6}\t"
+
+
+def display_source_segments(view: Dict[str, Any], rendered: str) -> Optional[List[Tuple[int, int, int]]]:
+    """Rows of a numbered read as ``(display_begin, display_end, source_at)``.
+
+    Display offsets are absolute in ``rendered``; ``source_at`` counts source
+    characters from the window start. Rows are rebuilt from the deterministic
+    display and checked against the view's descriptor; a rendering cut short
+    yields the rows it still holds. ``None`` when the text is not this display.
+    """
+    body_start, chars, shape = view.get("body_start"), view.get("body_chars"), view.get("display_map")
+    if (type(body_start) is not int or type(chars) is not int or body_start < 0 or chars < 0
+            or not isinstance(shape, dict) or shape.get("scheme") != _DISPLAY_SCHEME
+            or type(shape.get("first_number")) is not int or type(shape.get("rows")) is not int):
+        return None
+    segments: List[Tuple[int, int, int]] = []
+    pos, source_at = body_start, 0
+    for number in range(shape["first_number"], shape["first_number"] + shape["rows"]):
+        prefix = _display_prefix(number)
+        visible = rendered[pos:pos + len(prefix)]
+        if visible != prefix:  # a cut inside or before this prefix ends the delivered rows
+            return segments if pos + len(visible) == len(rendered) and prefix.startswith(visible) else None
+        begin = pos + len(prefix)
+        cap = begin + chars - source_at
+        found = _DISPLAY_BOUNDARY.search(rendered, begin, cap)
+        stop = found.end() if found else min(cap, len(rendered))
+        if found and found.group() == "\r" and stop < cap and rendered.startswith("\n", stop):
+            stop += 1
+        segments.append((begin, stop, source_at))
+        source_at += stop - begin
+        pos = stop
+    return segments if source_at == chars or pos == len(rendered) else None
+
+
+def display_intervals_to_source(view: Dict[str, Any], rendered: str,
+                                shown: List[Tuple[int, int]]) -> Optional[List[Tuple[int, int]]]:
+    """File character intervals actually delivered by ``shown`` display intervals.
+
+    ``shown`` are half-open offsets in ``rendered`` that reached the reader (one
+    prefix, or a head and a tail around a hidden gap). Only source characters
+    inside them count: number prefixes and hidden spans credit nothing. Results
+    use the view's ``range_basis`` and start at its ``source_start_char``.
+    """
+    segments = display_source_segments(view, rendered)
+    base = view.get("source_start_char")
+    if segments is None or type(base) is not int:
+        return None
+    credited: List[Tuple[int, int]] = []
+    for low, high in sorted(shown):
+        for begin, stop, source_at in segments:
+            first, last = max(begin, low), min(stop, high)
+            if first >= last:
+                continue
+            interval = (base + source_at + first - begin, base + source_at + last - begin)
+            if credited and interval[0] <= credited[-1][1]:
+                credited[-1] = (credited[-1][0], max(credited[-1][1], interval[1]))
+            else:
+                credited.append(interval)
+    return credited
 
 
 def delivered_source_prefix(view: Dict[str, Any], rendered: str, shown: int) -> str:
     """Source characters in a delivered read_file display prefix.
 
     The renderer owns this mapping; consumers must not strip number prefixes
-    with independent parsers. A cut within a prefix contributes zero chars.
+    with independent parsers. Rows are rebuilt from the delivered prefix alone,
+    so a marker appended after the cut is never read as source; a cut within a
+    prefix contributes zero chars.
     """
-    if not display_source_map_valid(view):
-        return ""
-    body_start = view["body_start"]
-    segments = view["display_segments"]
-    limit = max(0, min(len(rendered), shown) - body_start)
-    pieces = []
-    for begin, end, _ in segments:
-        if limit <= begin:
-            break
-        if body_start + min(end, limit) > len(rendered):
-            return ""
-        pieces.append(rendered[body_start + begin:body_start + min(end, limit)])
-    return "".join(pieces)
+    delivered = rendered[:max(0, shown)]
+    segments = display_source_segments(view, delivered) or []
+    return "".join(delivered[begin:stop] for begin, stop, _ in segments)
 
 
 def _read_source_text(target: pathlib.Path, extent: Optional[Dict[str, Any]]) -> str:

@@ -701,6 +701,7 @@ def test_partial_write_marks_advisory_stale_and_says_so(tmp_path, monkeypatch):
     repo.mkdir()
     (repo / "one.py").write_text("A = 1\n", encoding="utf-8")
     (repo / "two.py").write_text("B = 1\n", encoding="utf-8")
+    (repo / "three.py").write_text("C = 1\n", encoding="utf-8")
     ctx = _FakeCtx(repo)
     monkeypatch.setattr(edit_ops, "_resolve_edit_target", _fake_resolver(ctx))
     real_write = edit_ops.write_text
@@ -713,10 +714,14 @@ def test_partial_write_marks_advisory_stale_and_says_so(tmp_path, monkeypatch):
     monkeypatch.setattr(edit_ops, "write_text", flaky)
     result = edit_ops._apply_patch(
         ctx,
-        "*** Update File: one.py\n-A = 1\n+A = 2\n*** Update File: two.py\n-B = 1\n+B = 2\n",
+        "*** Update File: one.py\n-A = 1\n+A = 2\n*** Update File: two.py\n-B = 1\n+B = 2\n"
+        "*** Update File: three.py\n-C = 1\n+C = 2\n",
     )
     assert "EDIT_OPS_PARTIAL_WRITE_FAILED" in result and "PARTIALLY APPLIED" in result and "one.py" in result
+    assert "write failed for two.py" in result and "Not attempted: three.py." in result
+    assert "Do not repeat this call" in result and "Re-read them before retrying" not in result
     assert (repo / "one.py").read_text() == "A = 2\n"
+    assert (repo / "two.py").read_text() == "B = 1\n" and (repo / "three.py").read_text() == "C = 1\n"
     assert invalidated == [("one.py",)]
 
 

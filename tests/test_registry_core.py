@@ -390,7 +390,7 @@ def test_registry_uses_typed_required_root_not_note_or_tool_name(tmp_path, monke
             "CORE_PROTECTION_BLOCKED",
             "⚠️ CORE_PROTECTION_BLOCKED: runtime_mode='advanced' refuses to run tool "
             "'write_file' against protected safety-critical path: BIBLE.md. Switch to "
-            "runtime_mode='pro' and let the normal triad + scope review cover the protected "
+            "runtime_mode='pro' and let the normal review panel cover the protected "
             "core/contract/release change before commit.",
             "protected_blocked",
         ),
@@ -653,8 +653,8 @@ def test_light_binding_root_redirect_is_native_without_invented_metadata(
     args = {"root": "active_workspace", "path": target, "content": "<html></html>"}
     text = (
         "⚠️ ROOT_REQUIRED_USER_FILES: an absolute home path "
-        f"({target!r}) was given but root defaulted to 'active_workspace'. "
-        "Pass root='user_files' to write under the owner's home, e.g. "
+        f"({target!r}) is outside root='active_workspace'. "
+        "Pass root='user_files' (or omit root) to write under the owner's home, e.g. "
         "write_file(root='user_files', path='Desktop/file.html', content=...)."
     )
     expected = ToolResult(status="blocked", code="ROOT_REQUIRED_USER_FILES", text=text)
@@ -767,8 +767,8 @@ def test_light_actionable_redirects_keep_legacy_mapping_without_light_remap(
         args = {"root": "active_workspace", "path": target, "content": "<html></html>"}
         expected_text = (
             "⚠️ ROOT_REQUIRED_USER_FILES: an absolute home path "
-            f"({target!r}) was given but root defaulted to 'active_workspace'. "
-            "Pass root='user_files' to write under the owner's home, e.g. "
+            f"({target!r}) is outside root='active_workspace'. "
+            "Pass root='user_files' (or omit root) to write under the owner's home, e.g. "
             "write_file(root='user_files', path='Desktop/file.html', content=...)."
         )
 

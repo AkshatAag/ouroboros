@@ -476,16 +476,19 @@ body.resizing-panels { user-select: none; }
 
 .project-handoff-heading {
     display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    padding: var(--space-3);
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
 }
+
+.project-handoff-phase { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-2); }
+.project-handoff .chat-quiz-project { margin-top: var(--space-3); }
 
 .project-handoff-title {
     min-width: 0;
     overflow-wrap: anywhere;
-    font-size: var(--type-body);
+    font-size: var(--type-section);
+    font-weight: 600;
     color: var(--text-primary);
 }
 
@@ -501,6 +504,7 @@ body.resizing-panels { user-select: none; }
 
 .project-handoff > .sender { display: none; }
 .project-handoff .message { padding: 0; }
+.chat-bubble.system.project-handoff .msg-time { color: var(--text-meta); }
 
 .nav-section {
     display: flex;
@@ -1304,6 +1308,13 @@ body.resizing-panels { user-select: none; }
     max-width: none;
     text-align: left;
     overflow-wrap: anywhere;
+}
+/* Main's header floats over messages; Project's status bar is in normal flow.
+   Keep the reading backing local to the overlay, never a filled Project row. */
+.chat-page-header > .chat-history-status {
+    justify-self: start;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
     background: var(--bg-primary);
 }
 
@@ -1910,8 +1921,12 @@ body.resizing-panels { user-select: none; }
     background: var(--accent-10);
 }
 
-.chat-live-card:not([data-finished="1"]) .chat-live-phase:is(.working, .thinking, .progress, .calling, .context) {
+.chat-live-phase[data-motion="1"], .chat-live-phase-secondary[data-motion="1"] {
     animation: thinking-pulse 1.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .chat-live-phase[data-motion="1"], .chat-live-phase-secondary[data-motion="1"] { animation: none; }
 }
 
 /* Phase pills are status chips with class-named tones; the triple is the
@@ -6651,11 +6666,11 @@ textarea.chat-input {
     }
 }
 
-/* Review lanes (6.2) + agent accounts (D30).
+/* Agent accounts (D30).
    Borders read the theme's --divider like every other panel surface. They used
    to name --border, which this dark-only :root never declares, so all three
    rules silently took their literal grey fallback instead of the token. */
-/* === design-system:migrated-begin (harness accounts + reviewer slots + Dashboard Updates tab) ===
+/* === design-system:migrated-begin (harness accounts + Dashboard Updates tab) ===
    Down to the matching end marker: docs/DESIGN.md tokens only, guarded by
    tests/test_web_typography_static.py. The rest of this file is a later pass. */
 /* Subsection rhythm: a group is its head (heading + that group's own Add
@@ -6733,6 +6748,36 @@ textarea.chat-input {
     line-height: var(--line-meta);
 }
 .agent-family-rows { display: flex; flex-direction: column; gap: 8px; }
+.harness-maintenance-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    min-width: 0;
+}
+.harness-maintenance-line {
+    flex: 1 1 auto;
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    color: var(--text-meta);
+    overflow-wrap: anywhere;
+}
+.harness-maintenance-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.harness-maintenance-notice,
+.harness-maintenance-details {
+    flex-basis: 100%;
+    min-width: 0;
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    color: var(--text-meta);
+    overflow-wrap: anywhere;
+}
+.harness-maintenance-notice[data-tone="warn"] { color: var(--status-warn-fg); }
+.harness-maintenance-details summary { color: var(--text-primary); cursor: pointer; }
+.harness-maintenance-details dl { margin: var(--space-2) 0; }
+.harness-maintenance-details dt { color: var(--text-meta); }
+.harness-maintenance-details dd { margin: 0 0 var(--space-1); color: var(--text-primary); }
+.harness-maintenance-details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* Account rows are purpose-built (identity left, actions right), not the
    settings key/value grid — .settings-custom-secret-row's 0.65fr/1.35fr
    columns inverted the proportions and its align-items:end sank the text.
@@ -8068,8 +8113,7 @@ textarea.chat-input {
 
 
 
-.form-field input:not(.ui-control):not(.ui-checkbox), .form-field select:not(.ui-control):not(.ui-checkbox),
-.reviewer-slot-controls input:not(.ui-control):not(.ui-checkbox), .reviewer-slot-controls select:not(.ui-control):not(.ui-checkbox) {
+.form-field input:not(.ui-control):not(.ui-checkbox), .form-field select:not(.ui-control):not(.ui-checkbox) {
     padding: 8px 12px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--divider);

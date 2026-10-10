@@ -384,6 +384,9 @@ def _record_transcript_prefix(ctx, messages, round_idx, accumulated_usage,
     from ouroboros.tools.compact_context import record_context_view
 
     record_context_view(ctx, messages, tool_schemas, physical_capture=getattr(ctx, "_usable_main_capture", None))
+    from ouroboros.context_input_selection import capture_historical_inputs
+
+    capture_historical_inputs(ctx)
     fact = _observe_transcript_send(ctx, messages, round_idx=round_idx)
     if not fact:
         return
@@ -402,6 +405,8 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._delivery_evidence_revision, ctx._delivery_evidence_fingerprint = 0, ""
     ctx.model_turn_state, ctx._authoring_handover, ctx._pending_model_wait_handover = ModelTurnState(), None, None
     ctx.route_wait_on_primary, ctx.active_role_override, ctx._route_facts_pending = False, None, ""
+    ctx._primary_route_observation, ctx._accepted_route_binding, ctx._primary_return_requested = None, None, None
+    ctx._accepted_model_route = None
 
 
 def _initial_round_route(ctx: Any, llm: LLMClient, initial_effort: str) -> tuple:

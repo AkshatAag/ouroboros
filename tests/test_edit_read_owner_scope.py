@@ -9,9 +9,6 @@ from ouroboros.tool_access import resource_root_path
 from ouroboros.tools.core_file_tools import delivered_source_prefix
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = pytest.mark.serial
-
-
 @pytest.fixture
 def file_tools(tmp_path, monkeypatch):
     home, system, workspace, data = (tmp_path / name for name in ("home", "repo", "workspace", "data"))
@@ -53,12 +50,12 @@ def test_batch_and_patch_use_each_writable_root_through_registry(file_tools, roo
         {"path": "sample.txt", "old_str": "beta", "new_str": "BETA"},
     ]})
     assert batch.startswith("✅"), batch
-    assert "| ALPHA" in batch and "| BETA" in batch
+    assert "\tALPHA" in batch and "\tBETA" in batch
     patch = registry.execute("apply_patch", {"root": root, **_selectors(root), "patch":
         "*** Update File: sample.txt\n-ALPHA\n+one\n-BETA\n+two\n"})
     assert patch.startswith("✅"), patch
     assert target.read_text() == "one\ntwo\n"
-    assert "| one" in patch
+    assert "\tone" in patch
 
 
 def test_edit_text_list_is_atomic_and_singleton_reports_old_site(file_tools):
@@ -66,7 +63,7 @@ def test_edit_text_list_is_atomic_and_singleton_reports_old_site(file_tools):
     target = workspace / "notes.txt"
     target.write_text("new\nold\nend\n")
     result = registry.execute("edit_text", {"path": "notes.txt", "old_str": "old", "new_str": "new"})
-    assert "line 2" in result and "     2| new" in result, result
+    assert "line 2" in result and "     2\tnew" in result, result
     failed = registry.execute("edit_text", {"path": "notes.txt", "edits": [
         {"old_str": "end", "new_str": "done"}, {"old_str": "missing", "new_str": "x"},
     ]})
@@ -75,7 +72,7 @@ def test_edit_text_list_is_atomic_and_singleton_reports_old_site(file_tools):
         {"old_str": "end", "new_str": "done"}, {"old_str": "done", "new_str": "finish"},
     ]})
     assert success.startswith("✅") and target.read_text() == "new\nnew\nfinish\n"
-    assert "     3| finish" in success
+    assert "     3\tfinish" in success
     mixed = registry.execute("edit_text", {"path": "notes.txt", "old_str": "new", "new_str": "x",
                                             "edits": [{"old_str": "finish", "new_str": "end"}]})
     assert "not both" in mixed and target.read_text() == "new\nnew\nfinish\n"
@@ -114,7 +111,7 @@ def test_patch_preview_tracks_placed_change_with_repeated_lines(file_tools, root
         "*** Update File: repeated.txt\n c\n-a\n+c\n a\n"})
     assert result.startswith("✅"), result
     assert target.read_text().splitlines()[4] == "c"
-    assert "     5| c" in result, result
+    assert "     5\tc" in result, result
 
 
 @pytest.mark.parametrize("tool", ["edit_text", "edit_batch", "apply_patch"])
@@ -147,11 +144,11 @@ def test_patch_previews_remap_chained_sites_and_long_context(file_tools):
         "*** Update File: long.txt\n@@ line-0\n+inserted\n"})
     assert result.startswith("✅"), result
     assert target.read_text().splitlines()[21] == "changed"
-    assert "    22| changed" in result and "     2| inserted" in result, result
+    assert "    22\tchanged" in result and "     2\tinserted" in result, result
     deleted = registry.execute("apply_patch", {"patch":
         "*** Update File: long.txt\n-changed\n-line-21\n"})
     assert deleted.startswith("✅"), deleted
-    assert "    22| line-22" in deleted, deleted
+    assert "    22\tline-22" in deleted, deleted
 
 
 def test_patch_chaining_preserves_earlier_site_inside_unchanged_context(file_tools):
@@ -164,7 +161,7 @@ def test_patch_chaining_preserves_earlier_site_inside_unchanged_context(file_too
         f"*** Update File: context.txt\n{context}-line-25\n+second\n"})
     assert result.startswith("✅"), result
     assert target.read_text().splitlines()[20] == "changed"
-    assert "    21| changed" in result and "    26| second" in result, result
+    assert "    21\tchanged" in result and "    26\tsecond" in result, result
 
 
 def test_light_payload_and_control_data_mix_does_not_widen_authority(file_tools, monkeypatch):
@@ -219,16 +216,16 @@ def test_patch_add_delete_authority_and_data_recovery(file_tools, root):
         refused = registry.execute("apply_patch", {"root": root, **_selectors(root), "patch":
             f"*** Delete File: {file_path}\n"})
         assert "force=true" in refused and target.exists()
+    target.write_bytes(b"created\r\nuntracked edit\n")  # bytes no repository could restore
     deleted = registry.execute("apply_patch", {"root": root, **_selectors(root), "force": True,
                                                "patch": f"*** Delete File: {file_path}\n"})
     assert deleted.startswith("✅") and not target.exists(), deleted
-    if root not in {"active_workspace", "system_repo"}:
-        from ouroboros.artifacts import registered_task_artifact
+    from ouroboros.artifacts import registered_task_artifact
 
-        assert "Recovery copies:" in deleted
-        name = deleted.split("artifact_store:")[-1].splitlines()[0]
-        record = registered_task_artifact(data, "edit-owner-scope", name)
-        assert record and pathlib.Path(record["path"]).read_bytes() == b"created\n"
+    assert "Recovery copies:" in deleted
+    name = deleted.split("artifact_store:")[-1].split(" (sha256", 1)[0]
+    record = registered_task_artifact(data, "edit-owner-scope", name)
+    assert record and record["immutable"] and pathlib.Path(record["path"]).read_bytes() == b"created\r\nuntracked edit\n"
 
 
 def test_repo_protection_survives_aliases_and_add_delete(file_tools):
@@ -256,12 +253,14 @@ def test_patch_out_of_order_indent_and_ambiguous_anchor():
     patch = ("*** Update File: f.txt\n"
              "-last\n+LAST\n"
              "@@ def first\n"
-             "-    old\n+    new\n")
+             "-        old\n+        new\n")
     ops, error = _parse_patch(patch)
     assert not error
     changed, notes, failure = _apply_hunks_to_text("def first\n        old\nlast\n", ops[0].hunks, "f.txt")
-    assert not failure and changed == "def first\n        new\nLAST\n"
-    assert any("indentation" in note for note in notes)
+    assert not failure and changed == "def first\n        new\nLAST\n" and not notes
+    shifted = _parse_patch("*** Update File: f.txt\n@@ def first\n-    old\n+    new\n")[0][0].hunks
+    changed, _, failure = _apply_hunks_to_text("def first\n        old\nlast\n", shifted, "f.txt")
+    assert changed is None and "context not found" in failure and "indentation differs" in failure
     ambiguous, _, failure = _apply_hunks_to_text("marker\nmarker\n", _parse_patch(
         "*** Update File: f.txt\n@@ marker\n+insert\n")[0][0].hunks, "f.txt")
     assert ambiguous is None and "ambiguous" in failure
@@ -275,40 +274,44 @@ def test_patch_original_spans_overlap_and_uniform_indent_failure():
     hunks = _parse_patch(overlapping)[0][0].hunks
     changed, _, failure = _apply_hunks_to_text("a\nb\n", hunks, "f.txt")
     assert changed is None and "overlap" in failure
-    nonuniform = ("*** Update File: f.txt\n"
-                  "-  first\n+  FIRST\n"
-                  "-    second\n+    SECOND\n")
-    hunks = _parse_patch(nonuniform)[0][0].hunks
-    changed, _, failure = _apply_hunks_to_text("    first\n       second\n", hunks, "f.txt")
-    assert changed is None and "not uniform" in failure
+    shifted = ("*** Update File: f.txt\n"
+               "-  first\n+  FIRST\n")
+    hunks = _parse_patch(shifted)[0][0].hunks
+    changed, _, failure = _apply_hunks_to_text("    first\n", hunks, "f.txt")
+    assert changed is None and "context not found" in failure
 
 
 @pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
                                   "task_drive", "artifact_store", "user_files", "skill_payload"])
-def test_patch_combines_uniform_indent_and_trailing_space(file_tools, root):
+def test_patch_trailing_space_keeps_file_bytes_and_never_shifts_indentation(file_tools, root):
     registry, _, *_ = file_tools
     base = _target(file_tools, root)
     base.mkdir(parents=True, exist_ok=True)
     target = base / "combined.txt"
     target.write_text("    anchor   \n    old   \n")
+    path = str(target) if root == "user_files" else target.name
+    shifted = registry.execute("apply_patch", {"root": root, **_selectors(root), "patch":
+        f"*** Update File: {path}\n   anchor\n-  old\n+  new\n"})
+    assert "context not found" in shifted and "indentation differs" in shifted, shifted
+    assert target.read_text() == "    anchor   \n    old   \n"
     result = registry.execute("apply_patch", {"root": root, **_selectors(root), "patch":
-        "*** Update File: combined.txt\n   anchor\n-  old\n+  new\n"})
+        f"*** Update File: {path}\n     anchor\n-    old\n+    new\n"})
     assert result.startswith("✅"), result
     assert target.read_text() == "    anchor   \n    new\n"
-    assert "indentation+trailing" in result and "shifted by +2" in result
+    assert "ignoring trailing whitespace" in result and "shifted" not in result
 
 
-def test_combined_whitespace_keeps_ambiguity_and_content_refusals():
+def test_trailing_whitespace_keeps_ambiguity_and_content_refusals():
     from ouroboros.tools.edit_ops import _apply_hunks_to_text, _parse_patch
 
-    hunk = _parse_patch("*** Update File: f.txt\n-  old\n+  new\n")[0][0].hunks
-    changed, _, failure = _apply_hunks_to_text("    old   \n      old \n", hunk, "f.txt")
+    hunk = _parse_patch("*** Update File: f.txt\n-old\n+new\n")[0][0].hunks
+    changed, _, failure = _apply_hunks_to_text("old   \nold \n", hunk, "f.txt")
     assert changed is None and "ambiguous" in failure
-    changed, _, failure = _apply_hunks_to_text("    OLD   \n", hunk, "f.txt")
+    changed, _, failure = _apply_hunks_to_text("OLD   \n", hunk, "f.txt")
     assert changed is None and "context not found" in failure
-    mixed = _parse_patch("*** Update File: f.txt\n   anchor\n-  old\n+  new\n")[0][0].hunks
-    changed, _, failure = _apply_hunks_to_text("    anchor   \n     old   \n", mixed, "f.txt")
-    assert changed is None and "not uniform" in failure
+    shifted = _parse_patch("*** Update File: f.txt\n   anchor\n-  old\n+  new\n")[0][0].hunks
+    changed, _, failure = _apply_hunks_to_text("    anchor   \n    old   \n", shifted, "f.txt")
+    assert changed is None and "context not found" in failure
 
 
 @pytest.mark.parametrize("tool", ["write_file", "edit_text", "edit_batch", "apply_patch"])
@@ -354,7 +357,7 @@ def test_data_delete_failed_recovery_keeps_source(file_tools, monkeypatch):
     def fail_capture(*_args, **_kwargs):
         raise OSError("capture unavailable")
 
-    monkeypatch.setattr(artifacts, "store_task_artifact_bytes", fail_capture)
+    monkeypatch.setattr(artifacts, "copy_file_to_task_artifacts", fail_capture)
     result = registry.execute("apply_patch", {"root": "artifact_store", "force": True,
         "patch": "*** Delete File: saved.txt\n"})
     assert "recovery capture failed" in result and source.read_text() == "keep\n"
@@ -369,7 +372,7 @@ def test_crlf_notice_and_earlier_replacement_sites(file_tools):
         {"path": "sequence.txt", "old_str": "alpha\nbeta\nlast", "new_str": "done"},
     ]})
     assert result.startswith("✅") and "CRLF" in result
-    assert "     1| done" in result
+    assert "     1\tdone" in result
     assert target.read_bytes() == b"done\n"
 
 
@@ -380,82 +383,33 @@ def _call(call_id, name, arguments):
             "arguments": json.dumps(arguments)}}
 
 
-def test_editor_parallel_footprints_and_model_delivery(file_tools):
-    import threading
+def test_editor_round_runs_in_call_order_and_each_call_sees_the_previous(file_tools):
     from ouroboros.loop_tool_execution import StatefulToolExecutor, handle_tool_calls, tool_calls_can_run_parallel
     from ouroboros.tool_capabilities import FOREGROUND_MUTATIVE_TOOLS
-    from ouroboros.tools.core import _edit_text
 
     registry, ctx, _, _, workspace, data, _ = file_tools
     (workspace / "a.txt").write_text("one\n")
     (workspace / "b.txt").write_text("two\n")
-    barrier = threading.Barrier(2)
-
-    def held_editor(call_ctx, _resolved_binding=None, **kwargs):
-        barrier.wait(timeout=10)
-        return _edit_text(call_ctx, _resolved_binding=_resolved_binding, **kwargs)
-
-    registry.override_handler("edit_text", held_editor)
-    calls = [_call("one", "edit_text", {"path": "a.txt", "old_str": "one", "new_str": "ONE"}),
-             _call("two", "edit_text", {"path": "b.txt", "old_str": "two", "new_str": "TWO"})]
-    assert tool_calls_can_run_parallel(calls, ctx)
+    calls = [_call("before", "read_file", {"path": "a.txt"}),
+             _call("first", "edit_text", {"path": "a.txt", "old_str": "one", "new_str": "ONE"}),
+             _call("other", "edit_batch", {"edits": [{"path": "b.txt", "old_str": "two", "new_str": "TWO"}]}),
+             _call("second", "edit_text", {"path": "a.txt", "old_str": "ONE", "new_str": "AFTER"}),
+             _call("after", "read_file", {"path": "a.txt"})]
+    disjoint = [calls[1], calls[2]]
+    assert not tool_calls_can_run_parallel(disjoint) and not tool_calls_can_run_parallel(calls)
+    assert {"write_file", "edit_text", "edit_batch", "apply_patch"} <= FOREGROUND_MUTATIVE_TOOLS
     messages, trace = [], {"tool_calls": []}
     logs = data / "logs"
     logs.mkdir()
     stateful = StatefulToolExecutor()
     try:
-        errors = handle_tool_calls(calls, registry, logs, ctx.task_id, stateful,
-                                   messages, trace, lambda _text: None)
-    finally:
-        stateful.shutdown()
-    assert errors == 0 and [m["tool_call_id"] for m in messages] == ["one", "two"], messages
-    assert "| ONE" in messages[0]["content"] and "| TWO" in messages[1]["content"]
-    assert (workspace / "a.txt").read_text() == "ONE\n"
-    assert (workspace / "b.txt").read_text() == "TWO\n"
-    assert {"write_file", "edit_text", "edit_batch", "apply_patch"} <= FOREGROUND_MUTATIVE_TOOLS
-    alias = workspace / "alias.txt"
-    alias.symlink_to(workspace / "a.txt")
-    overlapping = [_call("x", "edit_text", {"path": "a.txt", "old_str": "ONE", "new_str": "A"}),
-                   _call("y", "edit_text", {"path": "alias.txt", "old_str": "A", "new_str": "B"})]
-    assert not tool_calls_can_run_parallel(overlapping, ctx)
-    same_name = [_call("x", "edit_text", {"path": "x/a.txt", "old_str": "x", "new_str": "X"}),
-                 _call("y", "edit_text", {"path": "y/a.txt", "old_str": "y", "new_str": "Y"})]
-    assert not tool_calls_can_run_parallel(same_name, ctx)
-    mixed = [_call("r", "read_file", {"path": "a.txt"}), overlapping[0]]
-    assert not tool_calls_can_run_parallel(mixed, ctx)
-    registry.override_handler("edit_text", _edit_text)
-    ordered = [_call("before", "read_file", {"path": "a.txt"}),
-               _call("change", "edit_text", {"path": "a.txt", "old_str": "ONE", "new_str": "AFTER"}),
-               _call("after", "read_file", {"path": "a.txt"})]
-    messages, trace = [], {"tool_calls": []}
-    stateful = StatefulToolExecutor()
-    try:
-        assert handle_tool_calls(ordered, registry, logs, ctx.task_id, stateful,
+        assert handle_tool_calls(calls, registry, logs, ctx.task_id, stateful,
                                  messages, trace, lambda _text: None) == 0
     finally:
         stateful.shutdown()
-    assert [row["tool_call_id"] for row in messages] == ["before", "change", "after"]
-    assert "\tONE" in messages[0]["content"] and "\tAFTER" in messages[2]["content"]
-    assert (workspace / "a.txt").read_text() == "AFTER\n"
-
-
-def test_shared_skill_revision_and_user_artifact_namespace_serialize(file_tools):
-    from ouroboros.loop_tool_execution import tool_calls_can_run_parallel
-
-    _, ctx, home, _, _, _, payload = file_tools
-    (payload / "one.txt").write_text("a")
-    (payload / "two.txt").write_text("b")
-    selectors = {"root": "skill_payload", "bucket": "external", "skill_name": "demo"}
-    skill_calls = [_call("one", "edit_text", {**selectors, "path": "one.txt", "old_str": "a", "new_str": "A"}),
-                   _call("two", "edit_text", {**selectors, "path": "two.txt", "old_str": "b", "new_str": "B"})]
-    assert not tool_calls_can_run_parallel(skill_calls, ctx)
-    (home / "one.txt").write_text("a")
-    (home / "two.txt").write_text("b")
-    user_calls = [_call("one", "edit_text", {"root": "user_files", "path": str(home / "one.txt"),
-                                            "old_str": "a", "new_str": "A"}),
-                  _call("two", "edit_text", {"root": "user_files", "path": str(home / "two.txt"),
-                                            "old_str": "b", "new_str": "B"})]
-    assert not tool_calls_can_run_parallel(user_calls, ctx)
+    assert [row["tool_call_id"] for row in messages] == ["before", "first", "other", "second", "after"]
+    assert "\tone" in messages[0]["content"] and "\tAFTER" in messages[4]["content"]
+    assert (workspace / "a.txt").read_text() == "AFTER\n" and (workspace / "b.txt").read_text() == "TWO\n"
 
 
 def test_module_preview_uses_placed_sites_without_diff_matching(file_tools, monkeypatch):
@@ -473,25 +427,7 @@ def test_module_preview_uses_placed_sites_without_diff_matching(file_tools, monk
         '*** Update File: module.txt\n-    return value + 700\n+    return value + 7010\n'})
     assert result.startswith('✅'), result
     assert target.read_text() == source.replace('    return value + 700\n', '    return value + 7010\n')
-    assert '2102|     return value + 7010' in result
-
-
-def test_footprint_failure_falls_back_to_actual_dispatch(file_tools, monkeypatch):
-    from ouroboros.tools import tool_resolution
-    from ouroboros.loop_tool_execution import tool_calls_can_run_parallel
-
-    _, ctx, *_ = file_tools
-    calls = [_call('one', 'edit_text', {'path': 'a.txt', 'old_str': 'a', 'new_str': 'A'}),
-             _call('two', 'edit_text', {'path': 'b.txt', 'old_str': 'b', 'new_str': 'B'})]
-
-    class FootprintUnavailable(Exception):
-        pass
-
-    def unavailable(*args, **kwargs):
-        raise FootprintUnavailable('the registry will report the real refusal')
-
-    monkeypatch.setattr(tool_resolution, '_build_builtin_target_binding', unavailable)
-    assert not tool_calls_can_run_parallel(calls, ctx)
+    assert '2102\t    return value + 7010' in result
 
 
 def test_user_output_registration_is_visible_and_recoverable(file_tools):
@@ -521,13 +457,14 @@ def test_omitted_root_write_file_registry_and_direct_handler(file_tools):
     assert source.read_text() == 'second\n'
 
 
-def test_indentation_shift_is_named_in_result():
+def test_indentation_difference_shows_the_region_instead_of_shifting():
     from ouroboros.tools.edit_ops import _parse_patch, _apply_hunks_to_text
 
     hunks = _parse_patch('*** Update File: f.txt\n-  before\n+  after\n')[0][0].hunks
     result, notes, error = _apply_hunks_to_text('    before\n', hunks, 'f.txt')
-    assert not error and result == '    after\n'
-    assert any('+2 leading characters' in note for note in notes)
+    assert result is None and not notes
+    assert 'indentation differs: file 4 leading chars, needle 2' in error
+    assert "1\t    before" in error and 'read_file start_line=1 max_lines=1' in error
 
 
 def test_payload_reached_by_repo_label_is_not_git_recoverable(file_tools):
@@ -592,20 +529,20 @@ def test_unicode_edit_sites_agree_with_numbered_reader(file_tools, root):
     read = registry.execute("read_file", args)
     assert "     2\told" in read
     singleton = registry.execute("edit_text", {**args, "old_str": "old", "new_str": "new"})
-    assert "     2| new" in singleton, singleton
+    assert "     2\tnew" in singleton, singleton
     if root in {"active_workspace", "system_repo", "skill_payload"}:
         assert "line 2" in singleton
     listed = registry.execute("edit_text", {**args, "edits": [{"old_str": "new", "new_str": "next"}]})
-    assert "     2| next" in listed, listed
+    assert "     2\tnext" in listed, listed
     batched = registry.execute("edit_batch", {"root": root, **_selectors(root), "edits": [
         {"path": path, "old_str": "next", "new_str": "last"}]})
-    assert "     2| last" in batched, batched
+    assert "     2\tlast" in batched, batched
     # Patch grammar uses LF-delimited context. Exercise its numbered receipt
     # after an unchanged Unicode boundary, without changing that grammar.
     target.write_text("first\u2028middle\nlast\n", encoding="utf-8")
     patched = registry.execute("apply_patch", {"root": root, **_selectors(root), "patch":
         f"*** Update File: {path}\n-last\n+final\n"})
-    assert "     3| final" in patched, patched
+    assert "     3\tfinal" in patched, patched
 
 
 @pytest.mark.parametrize("root", ["active_workspace", "system_repo", "runtime_data",
@@ -613,8 +550,6 @@ def test_unicode_edit_sites_agree_with_numbered_reader(file_tools, root):
 @pytest.mark.parametrize("denied", ["delete", "read_bytes", "copy"])
 def test_delete_checks_its_own_policy_and_recovery_authority(file_tools, root, denied):
     registry, ctx, _, _, _, data, _ = file_tools
-    if root in {"active_workspace", "system_repo"} and denied != "delete":
-        pytest.skip("Repo deletion does not read bytes for a data recovery copy")
     base = _target(file_tools, root)
     base.mkdir(parents=True, exist_ok=True)
     target = base / "protected.txt"
@@ -627,7 +562,7 @@ def test_delete_checks_its_own_policy_and_recovery_authority(file_tools, root, d
     assert "NOTHING was written" in result, result
     assert target.read_text() == "preserved\n" and not (base / "untouched.txt").exists()
     output = data / "task_results" / "artifacts" / "edit-owner-scope"
-    assert not list(output.glob("deleted-*.bak"))
+    assert not list(output.glob("protected-*.txt"))
 
 
 def test_public_root_schema_does_not_invent_an_explicit_default(file_tools):
@@ -653,7 +588,7 @@ def test_terminal_line_deletion_keeps_old_match_number(file_tools, root):
     result = registry.execute("edit_text", {"root": root, **_selectors(root), "path": path,
                                             "old_str": "last\n", "new_str": "", "force": True})
     assert "line 2" in result, result
-    assert "     1| first" in result and "nearest surviving" in result
+    assert "     1\tfirst" in result and "nearest surviving" in result
     assert target.read_text() == "first\n"
 
 
@@ -663,6 +598,7 @@ def test_empty_post_edit_preview_does_not_invent_a_source_line():
     assert numbered_edit_preview("", [0]) == "(empty file after edit; no surviving source lines)"
 
 
+@pytest.mark.serial  # a real local HTTP model stand-in
 def test_editor_results_reach_the_actual_keyless_http_model_send(file_tools, tmp_path, monkeypatch):
     import json
     from ouroboros.llm import LLMClient
@@ -707,8 +643,8 @@ def test_editor_results_reach_the_actual_keyless_http_model_send(file_tools, tmp
         wire = json.loads(pathlib.Path(model.received[0]["path"]).read_bytes())
         delivered = [row for row in wire["messages"] if row["role"] == "tool"]
         assert [row["tool_call_id"] for row in delivered] == ["wire-a", "wire-b"]
-        assert "     1| ALPHA" in delivered[0]["content"]
-        assert "     1| BETA" in delivered[1]["content"]
+        assert "     1\tALPHA" in delivered[0]["content"]
+        assert "     1\tBETA" in delivered[1]["content"]
 
 
 @pytest.mark.parametrize("root", ["runtime_data", "task_drive", "artifact_store", "user_files", "skill_payload"])
@@ -729,30 +665,28 @@ def test_data_edit_keeps_existing_non_json_text_capability(file_tools, root, too
     result = registry.execute(tool, arguments)
     assert result.startswith(("OK: edited", "✅")), result
     assert target.read_text() == "// comment\nnew configuration\n"
-    assert "SYNTAX_GUARD_BYPASSED" not in result
+    assert "SYNTAX_WARNING" not in result
 
 
-@pytest.mark.parametrize("force", [False, True])
-@pytest.mark.parametrize("tool", ["edit_text", "edit_batch", "apply_patch"])
-def test_repo_syntax_guard_refusal_and_explicit_bypass(file_tools, tool, force):
+@pytest.mark.parametrize("form", ["edit_text", "edit_text_list", "edit_batch", "apply_patch"])
+def test_repo_syntax_failure_is_reported_after_the_edit_lands(file_tools, form):
     registry, _, _, _, workspace, *_ = file_tools
     target = workspace / "config.json"
     target.write_text('{"value": 1}\n')
-    if tool == "edit_text":
+    tool = "edit_text" if form.startswith("edit_text") else form
+    if form == "edit_text":
         arguments = {"path": "config.json", "old_str": "1", "new_str": "invalid"}
-    elif tool == "edit_batch":
+    elif form == "edit_text_list":
+        arguments = {"path": "config.json", "edits": [{"old_str": "1", "new_str": "invalid"}]}
+    elif form == "edit_batch":
         arguments = {"edits": [{"path": "config.json", "old_str": "1", "new_str": "invalid"}]}
     else:
         arguments = {"patch": '*** Update File: config.json\n-{"value": 1}\n+{"value": invalid}\n'}
-    arguments["force"] = force
     result = registry.execute(tool, arguments)
-    assert "SYNTAX" in result, result
-    if force:
-        assert "SYNTAX_GUARD_BYPASSED" in result, result
-        assert target.read_text() == '{"value": invalid}\n'
-    else:
-        assert "force=true" in result, result
-        assert target.read_text() == '{"value": 1}\n'
+    assert result.startswith(("✅", "OK")), result
+    assert "SYNTAX_WARNING" in result and "the edit WAS applied" in result, result
+    assert "WRITE_BLOCKED" not in result and "force" not in result
+    assert target.read_text() == '{"value": invalid}\n'
 
 
 def test_duplicate_occurrence_lines_use_reader_unicode_boundaries():
@@ -761,3 +695,207 @@ def test_duplicate_occurrence_lines_use_reader_unicode_boundaries():
     updated, error = _str_match_replace("first\u2028same\u2029third\nsame\n", "same", "new", "sample.txt", "EDIT_TEXT_ERROR")
     assert updated is None
     assert "Occurrences at: line 2, line 4" in error
+
+
+@pytest.mark.parametrize("own_body", [True, False])
+@pytest.mark.parametrize("tool", ["write_file", "edit_text", "edit_batch", "apply_patch"])
+def test_admitted_body_copy_keeps_protected_paths_for_every_writer(tmp_path, monkeypatch, tool, own_body):
+    system, copy, data = (tmp_path / name for name in ("repo", "copy", "data"))
+    for directory in (system, copy, data):
+        directory.mkdir()
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    bible = copy / "BIBLE.md"
+    bible.write_text("constitution\n")
+    ctx = ToolContext(repo_dir=system, drive_root=data, workspace_root=str(copy),
+                      workspace_mode="self_worktree", task_id="body-copy-child")
+    ctx.task_constraint = {"mode": "acting_subagent", "surface": "self_worktree", "write_root": str(copy)}
+    ctx.task_metadata = {"delegation_role": "subagent", "workspace_copy": {
+        "execution_root": str(copy), "source_root": str(system), "source_is_system_repo": own_body}}
+    registry = ToolRegistry(repo_dir=system, drive_root=data)
+    registry.set_context(ctx)
+    arguments = {"write_file": {"path": "BIBLE.md", "content": "erased\n", "force": True},
+                 "edit_text": {"path": "BIBLE.md", "old_str": "constitution", "new_str": "erased"},
+                 "edit_batch": {"edits": [{"path": "BIBLE.md", "old_str": "constitution", "new_str": "erased"}]},
+                 "apply_patch": {"patch": "*** Update File: BIBLE.md\n-constitution\n+erased\n"}}[tool]
+    result = registry.execute(tool, arguments)
+    if own_body:  # the admitted copy of the body keeps the body's protected set
+        assert "BLOCKED" in result.upper() and bible.read_text() == "constitution\n", result
+    else:  # a foreign project's BIBLE.md is that project's ordinary file
+        assert result.startswith(("✅", "OK")) and bible.read_text() == "erased\n", result
+
+
+def test_handler_policy_protects_an_admitted_body_copy_without_the_registry(tmp_path, monkeypatch):
+    from ouroboros.tools.core import _edit_text
+
+    system, copy, data = (tmp_path / name for name in ("repo", "copy", "data"))
+    for directory in (system, copy, data):
+        directory.mkdir()
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    (copy / "BIBLE.md").write_text("constitution\n")
+    ctx = ToolContext(repo_dir=system, drive_root=data, workspace_root=str(copy),
+                      workspace_mode="self_worktree", task_id="body-copy-direct")
+    ctx.task_metadata = {"workspace_copy": {"execution_root": str(copy), "source_root": str(system),
+                                            "source_is_system_repo": True}}
+    result = _edit_text(ctx, "BIBLE.md", "constitution", "erased", root="active_workspace")
+    assert "BLOCKED" in result.upper() and (copy / "BIBLE.md").read_text() == "constitution\n", result
+
+
+@pytest.mark.parametrize("tool", ["edit_text", "edit_batch", "apply_patch"])
+def test_misses_cite_reader_lines_across_unicode_line_boundaries(file_tools, tool):
+    registry, _, _, _, workspace, *_ = file_tools
+    (workspace / "u.txt").write_text("first\u2028second\nthird\n    target here\n", encoding="utf-8")
+    assert "     4\t    target here" in registry.execute("read_file", {"path": "u.txt"})
+    if tool == "edit_text":
+        arguments = {"path": "u.txt", "old_str": "target  here", "new_str": "x"}
+    elif tool == "edit_batch":
+        arguments = {"edits": [{"path": "u.txt", "old_str": "target  here", "new_str": "x"}]}
+    else:
+        arguments = {"patch": "*** Update File: u.txt\n-  target here\n+x\n"}
+    miss = registry.execute(tool, arguments)
+    assert "matches line 4 ignoring whitespace" in miss and "read_file start_line=4 max_lines=1" in miss, miss
+    assert "4\t    target here" in miss and (workspace / "u.txt").read_text().endswith("    target here\n")
+
+
+def test_numbered_read_maps_head_and_tail_without_crediting_prefixes_or_the_gap():
+    import json
+    from ouroboros.tools.core_file_tools import (
+        _render_line_slice, delivered_source_prefix, display_intervals_to_source, display_source_segments)
+
+    content = "".join(f"row {i:04d}\n" for i in range(2000))
+    view: dict = {}
+    rendered = _render_line_slice("big.txt", content, max_lines=2000, extent=view)
+    # The display descriptor stays a few bytes for 2,000 numbered rows.
+    assert len(json.dumps(view["display_map"])) < 100
+    body = view["body_start"]
+    head_end = body + len("     1\t") + 4           # the first row's prefix plus "row "
+    tail_start = len(rendered) - len("row 1999\n")   # exactly the last row's source
+    assert display_intervals_to_source(view, rendered, [(0, head_end), (tail_start, len(rendered))]) == [
+        (0, 4), (len(content) - 9, len(content))]
+    # A tail that also shows the last prefix credits the same source; prefixes alone credit nothing.
+    assert display_intervals_to_source(view, rendered, [(tail_start - 7, len(rendered))]) == [
+        (len(content) - 9, len(content))]
+    assert display_intervals_to_source(view, rendered, [(0, body + 6)]) == []
+    assert delivered_source_prefix(view, rendered, head_end) == "row "
+    assert display_source_segments(view, rendered.replace("\t", " ", 1)) is None
+
+
+def test_user_file_edit_reports_a_landed_write_when_registration_fails(file_tools, monkeypatch):
+    from ouroboros.tools import core
+
+    registry, _, home, *_ = file_tools
+    source = home / "notes.txt"
+    source.write_text("alpha\n")
+
+    def failed(*_args, **_kwargs):
+        raise OSError("artifact store unavailable")
+
+    monkeypatch.setattr(core, "copy_file_to_task_artifacts", failed)
+    result = registry.execute("edit_text", {"path": str(source), "old_str": "alpha", "new_str": "beta"})
+    assert "EDIT_OPS_PARTIAL_WRITE_FAILED" in result and "WAS written" in result, result
+    assert "Do not repeat this call" in result and source.read_text() == "beta\n"
+
+
+def test_deleting_a_registered_immutable_artifact_never_counts_it_as_its_own_copy(file_tools):
+    from ouroboros.artifacts import store_task_artifact_bytes
+
+    registry, _, _, _, _, data, _ = file_tools
+    receipt = store_task_artifact_bytes(data, "edit-owner-scope", "kept.txt", b"only copy\n")
+    target = data / "task_results" / "artifacts" / "edit-owner-scope" / receipt["path"]
+    result = registry.execute("apply_patch", {"root": "artifact_store", "force": True,
+                                              "patch": "*** Delete File: kept.txt\n"})
+    assert "recovery capture failed" in result and "Nothing was deleted" in result, result
+    assert target.read_bytes() == b"only copy\n"
+
+
+def _body_copy_registry(tmp_path, monkeypatch, *, mode="advanced", grant=False):
+    system, copy, data = (tmp_path / name for name in ("repo", "copy", "data"))
+    for directory in (system, copy, data):
+        directory.mkdir(parents=True)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    (copy / "BIBLE.md").write_text("constitution\n")
+    (copy / "alias.md").symlink_to(copy / "BIBLE.md")
+    ctx = ToolContext(repo_dir=system, drive_root=data, workspace_root=str(copy),
+                      workspace_mode="self_worktree", task_id="body-copy-grants")
+    ctx.task_constraint = {"mode": "acting_subagent", "surface": "self_worktree", "write_root": str(copy),
+                           **({"protected_paths_grant": True} if grant else {})}
+    ctx.task_metadata = {"delegation_role": "subagent", "workspace_copy": {
+        "execution_root": str(copy), "source_root": str(system), "source_is_system_repo": True}}
+    registry = ToolRegistry(repo_dir=system, drive_root=data)
+    registry.set_context(ctx)
+    return registry, copy
+
+
+def test_admitted_body_copy_protection_covers_aliases_add_delete_and_keeps_grants(tmp_path, monkeypatch):
+    registry, copy = _body_copy_registry(tmp_path / "advanced", monkeypatch)
+    for tool, arguments in (
+        ("edit_batch", {"edits": [{"path": "alias.md", "old_str": "constitution", "new_str": "erased"}]}),
+        ("apply_patch", {"patch": "*** Delete File: BIBLE.md\n"}),
+        ("apply_patch", {"patch": "*** Add File: ouroboros/safety.py\n+UNSAFE = True\n"}),
+    ):
+        result = registry.execute(tool, arguments)
+        assert "BLOCKED" in result.upper(), (tool, result)
+    assert (copy / "BIBLE.md").read_text() == "constitution\n" and not (copy / "ouroboros").exists()
+    # Pro keeps the existing rule for an acting child: the protected grant is required.
+    registry, copy = _body_copy_registry(tmp_path / "pro", monkeypatch, mode="pro")
+    refused = registry.execute("edit_text", {"path": "BIBLE.md", "old_str": "constitution", "new_str": "x"})
+    assert "BLOCKED" in refused.upper() and (copy / "BIBLE.md").read_text() == "constitution\n"
+    registry, copy = _body_copy_registry(tmp_path / "granted", monkeypatch, mode="pro", grant=True)
+    granted = registry.execute("edit_text", {"path": "BIBLE.md", "old_str": "constitution", "new_str": "amended"})
+    assert granted.startswith(("✅", "OK")) and (copy / "BIBLE.md").read_text() == "amended\n", granted
+
+
+@pytest.mark.parametrize("tool", ["edit_text", "edit_batch", "apply_patch"])
+def test_copied_read_numbers_get_a_hint_and_are_never_stripped(file_tools, tool):
+    registry, _, _, _, workspace, *_ = file_tools
+    target = workspace / "n.txt"
+    target.write_text("first\nold value\nnext\n")
+    copied = "     2\told value\n     3\tnext"
+    if tool == "edit_text":
+        arguments = {"path": "n.txt", "old_str": copied, "new_str": "x"}
+    elif tool == "edit_batch":
+        arguments = {"edits": [{"path": "n.txt", "old_str": copied, "new_str": "x"}]}
+    else:
+        arguments = {"patch": "*** Update File: n.txt\n-     2\told value\n+x\n"}
+    result = registry.execute(tool, arguments)
+    assert "carries read_file line numbers" in result and "matches at line 2" in result, result
+    assert target.read_text() == "first\nold value\nnext\n"
+    # Genuine tab-separated text that merely starts with digits stays an ordinary exact edit.
+    (workspace / "t.tsv").write_text("12\tvalue\n13\tother\n")
+    exact = registry.execute("edit_text", {"path": "t.tsv", "old_str": "12\tvalue", "new_str": "12\tnew"})
+    assert exact.startswith("OK") or exact.startswith("✅"), exact
+
+
+def test_repeated_anchor_is_a_lower_bound_and_repeated_context_is_refused():
+    from ouroboros.tools.edit_ops import _apply_hunks_to_text, _parse_patch
+
+    text = "def f():\n    a = 1\ndef f():\n    b = 2\n"
+    unique = _parse_patch("*** Update File: f.py\n@@ def f():\n-    b = 2\n+    b = 3\n")[0][0].hunks
+    changed, _notes, failure = _apply_hunks_to_text(text, unique, "f.py")
+    assert not failure and changed == "def f():\n    a = 1\ndef f():\n    b = 3\n"
+    repeated = "def f():\n    a = 1\ndef f():\n    a = 1\n"
+    same = _parse_patch("*** Update File: f.py\n@@ def f():\n-    a = 1\n+    a = 9\n")[0][0].hunks
+    changed, _notes, failure = _apply_hunks_to_text(repeated, same, "f.py")
+    assert changed is None and "ambiguous" in failure and "line 2, line 4" in failure
+
+
+def test_repo_lane_delete_keeps_exact_dirty_tracked_and_binary_bytes(file_tools):
+    import subprocess
+    from ouroboros.artifacts import registered_task_artifact
+
+    registry, _, _, _, workspace, data, _ = file_tools
+    def git(*args):
+        subprocess.run(["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", *args],
+                       cwd=workspace, check=True, capture_output=True)
+    git("init", "-q")
+    (workspace / "tracked.txt").write_bytes(b"committed\n")
+    git("add", "tracked.txt")
+    git("commit", "-q", "-m", "base")
+    (workspace / "tracked.txt").write_bytes(b"committed\nuncommitted work\r\n")  # dirty: Git cannot restore it
+    (workspace / "blob.bin").write_bytes(bytes(range(256)) * 4)
+    for name in ("tracked.txt", "blob.bin"):
+        before = (workspace / name).read_bytes()
+        result = registry.execute("apply_patch", {"patch": f"*** Delete File: {name}\n"})
+        assert result.startswith("✅") and not (workspace / name).exists(), result
+        copy = result.split("artifact_store:")[-1].split(" (sha256", 1)[0]
+        record = registered_task_artifact(data, "edit-owner-scope", copy)
+        assert record and record["immutable"] and pathlib.Path(record["path"]).read_bytes() == before
