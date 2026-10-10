@@ -45,8 +45,8 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
   call manifests reference into one xz stream under `observability/packs/`,
   re-verifies every member from disk on each pass, indexes it, then unlinks the
   loose files. A loose placement is replaced by a sha-verified pack member;
-  evidence bytes are kept forever. Every reader resolves loose → index → pack;
-  a damaged member is an explicit `evidence_corrupt` failure, never empty bytes.
+  evidence bytes are kept forever. Readers try loose → indexed packs → retained roots;
+  exhausted corrupt placements report `evidence_corrupt`, never empty bytes.
 
 ## 1. Root files
 

@@ -338,13 +338,9 @@ def read_blob_ref(
     from ouroboros.evidence_packs import blob_bytes, blob_ref_fields
 
     _sha256, kind, size = blob_ref_fields(ref)
-    if kind != expected_kind:
-        raise ValueError("observability blob ref has an unexpected kind or encoding")
     if size < 0 and max_bytes is None:
         raise ValueError("observability blob ref has no valid size")
-    raw = blob_bytes(drive_root, ref)
-    if max_bytes is not None and len(raw) > max_bytes:
-        raise ValueError("blob exceeds byte limit")
+    raw = blob_bytes(drive_root, ref, expected_kind=expected_kind, max_bytes=max_bytes)
     if raw_bytes:
         return raw
     return json.loads(raw.decode("utf-8")) if kind == "json" else raw.decode("utf-8", errors="replace")

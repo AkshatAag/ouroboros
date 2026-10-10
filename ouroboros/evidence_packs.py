@@ -347,41 +347,44 @@ def index_upsert(root: Any, pack_path: pathlib.Path, sidecar: Dict[str, Any]) ->
         _VALIDATED.pop(str(packs_dir(root) / INDEX_NAME), None)
 
 
-def _locate(root: pathlib.Path, *, sha256: str = "", task_id: str = "", rel_path: str = "",
-            ) -> Optional[Tuple[pathlib.Path, Dict[str, Any]]]:
-    """``(pack path, member)`` of a packed blob (by sha) or handle (by task + rel path)."""
+def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id: str = "", rel_path: str = "",
+                ) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
+    """All indexed placements, or healthy sidecar rows when the cache is unavailable."""
     if not packs_dir(root).is_dir():
-        return None  # a root without packs is left untouched (no cache, no lock file)
+        return []  # a root without packs is left untouched (no cache, no lock file)
     try:
         with open_index(root) as conn:
             if rel_path:
-                row = conn.execute(
+                rows = conn.execute(
                     "SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind FROM handles h "
                     "JOIN members m ON m.sha256=h.sha256 AND m.task_id=h.task_id AND m.generation=h.generation "
                     "JOIN packs p ON p.task_id=h.task_id AND p.generation=h.generation "
-                    "WHERE h.task_id=? AND h.rel_path=? AND m.kind=?", (task_id, rel_path, CHECKPOINT)).fetchone()
+                    "WHERE h.task_id=? AND h.rel_path=? AND m.kind=?", (task_id, rel_path, CHECKPOINT)).fetchall()
             else:
-                row = conn.execute(
+                rows = conn.execute(
                     "SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind FROM members m "
                     "JOIN packs p ON p.task_id=m.task_id AND p.generation=m.generation "
-                    "WHERE m.sha256=? AND m.kind<>? ORDER BY p.task_id, p.generation LIMIT 1", (sha256, CHECKPOINT)).fetchone()
-            if row is None:
+                    "WHERE m.sha256=? AND m.kind=? ORDER BY p.task_id, p.generation", (sha256, kind)).fetchall()
+            if not rows:
                 error_row = conn.execute("SELECT value FROM meta WHERE key='sidecar_errors'").fetchone()
                 if error_row and json.loads(error_row[0]):
                     raise SidecarCorrupt(json.loads(error_row[0])[0])
-                return None
-        return packs_dir(root) / row["pack"], {"sha256": row["sha256"], "offset": row["offset"], "size": row["size"], "kind": row["kind"]}
+        return [(packs_dir(root) / row["pack"], dict(row)) for row in rows]
     except (store.StoreError, sqlite3.Error, OSError):
         pass  # the cache is unavailable: the sidecars are the authority
-    errors = []
+    errors, found = [], []
     for sidecar_path, sidecar in list_sidecars(root, errors=errors):
         for member in sidecar["members"]:
             if (rel_path and sidecar["task_id"] == task_id and member["kind"] == CHECKPOINT and member.get("path") == rel_path) or (
-                    not rel_path and member["sha256"] == sha256 and member["kind"] != CHECKPOINT):
-                return sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])), member
-    if errors:
+                    not rel_path and member["sha256"] == sha256 and member["kind"] == kind):
+                found.append((sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])), member))
+    if errors and not found:
         raise errors[0]
-    return None
+    return found
+
+
+def _locate(root: pathlib.Path, **identity: str) -> Optional[Tuple[pathlib.Path, Dict[str, Any]]]:
+    return next(iter(_placements(root, **identity)), None)
 
 
 # ---- the resolver: loose -> index -> pack ------------------------------------
@@ -414,34 +417,55 @@ def _blob_roots(root: pathlib.Path, ref: Dict[str, Any], sha256: str, kind: str)
     return roots
 
 
-def read_loose_gzip(path: pathlib.Path) -> bytes:
+def read_loose_gzip(path: pathlib.Path, max_bytes: Optional[int] = None) -> bytes:
     with gzip.open(path, "rb") as handle:
-        return handle.read()
+        raw = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+    if max_bytes is not None and len(raw) > max_bytes:
+        raise ValueError("blob exceeds byte limit")
+    return raw
 
 
-def blob_bytes(root: Any, ref: Any) -> bytes:
-    """The exact raw bytes of one CAS blob: the loose gzip file, else the pack a sidecar
-    indexes it in, verified; retained child roots the ref names are tried the same way."""
+def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_bytes: Optional[int] = None) -> bytes:
+    """Verified loose bytes, then every pack placement, then admissible retained roots."""
     root = pathlib.Path(root)
     sha256, kind, size = blob_ref_fields(ref)
+    if expected_kind is not None and kind != expected_kind:
+        raise ValueError("observability blob ref has an unexpected kind or encoding")
+    if max_bytes is not None and size > max_bytes:
+        raise ValueError("blob exceeds byte limit")
     failure: Optional[Exception] = None
     for candidate in _blob_roots(root, ref, sha256, kind):
         loose = candidate / "observability" / "blobs" / f"{sha256}.{kind}.gz"
         try:
-            raw = read_loose_gzip(loose)
+            raw = read_loose_gzip(loose, max_bytes)
             if size in (-1, len(raw)) and hashlib.sha256(raw).hexdigest() == sha256:
                 return raw
-            failure = failure or ValueError("observability blob ref failed size or sha256 verification")
+            failure = EvidenceCorrupt("evidence_corrupt: observability blob ref failed size or sha256 verification")
         except FileNotFoundError as exc:
             failure = failure or exc
-        except (OSError, EOFError, zlib.error) as exc:
-            failure = failure or exc
-        located = _locate(candidate, sha256=sha256)
-        if located is not None:
-            raw = member_bytes(*located)
-            if size not in (-1, len(raw)):
-                raise EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref")
-            return raw
+        except ValueError as exc:
+            failure = exc
+        except (OSError, EOFError, zlib.error):
+            failure = EvidenceCorrupt(f"evidence_corrupt: unreadable loose blob {loose.name}")
+        try:
+            placements = _placements(candidate, sha256=sha256, kind=kind)
+        except (OSError, EvidenceCorrupt) as exc:
+            failure = exc
+            continue
+        for located in placements:
+            try:
+                if max_bytes is not None and int(located[1]["size"]) > max_bytes:
+                    raise ValueError("blob exceeds byte limit")
+                raw = member_bytes(*located)
+                if size not in (-1, len(raw)):
+                    raise EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref")
+                return raw
+            except FileNotFoundError as exc:
+                failure = failure or exc
+            except ValueError as exc:
+                failure = exc
+            except OSError:
+                failure = EvidenceCorrupt(f"evidence_corrupt: unreadable pack {located[0].name}")
     raise failure or FileNotFoundError(str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))
 
 
@@ -721,7 +745,7 @@ def loose_members(root: Any, task_id: str) -> List[Dict[str, Any]]:
                                 "path": (CHECKPOINTS_REL / entry.name).as_posix(), "source": pathlib.Path(entry.path)})
     for kind, sha256, size in manifest_blob_refs(root, task_id):
         loose = root / "observability" / "blobs" / f"{sha256}.{kind}.gz"
-        if loose.is_file() or _locate(root, sha256=sha256) is not None:  # a shared sha is duplicated per pack
+        if loose.is_file() or _locate(root, sha256=sha256, kind=kind) is not None:  # a shared sha is duplicated per pack
             members.append({"sha256": sha256, "kind": kind, "size": size, "source": loose})
     return members
 

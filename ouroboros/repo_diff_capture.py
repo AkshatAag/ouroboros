@@ -578,13 +578,9 @@ def write_blob_stream(drive_root: pathlib.Path, chunks: Any, *, kind: str = "bin
 
 def read_blob_bytes(drive_root: pathlib.Path, ref: Dict[str, Any], *, expected_kind: str = "bin") -> bytes:
     """Read and verify one content-addressed BYTES blob below this drive root (loose, else its pack)."""
-    from ouroboros.evidence_packs import blob_bytes, blob_ref_fields
+    from ouroboros.evidence_packs import blob_bytes
 
-    if not isinstance(ref, dict):
-        raise ValueError("observability blob ref must be an object")
-    if blob_ref_fields(ref)[1] != expected_kind:
-        raise ValueError("observability blob ref has an unexpected kind or encoding")
-    return blob_bytes(drive_root, ref)
+    return blob_bytes(drive_root, ref, expected_kind=expected_kind)
 
 
 def retain_private_capture(drive_root: Any, capture: RepoDiffCapture) -> Dict[str, Any]:

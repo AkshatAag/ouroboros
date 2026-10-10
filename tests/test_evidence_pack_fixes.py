@@ -1,6 +1,7 @@
 """Regressions for the dispositioned S5 pack and reader findings."""
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import pathlib
@@ -10,6 +11,7 @@ import pytest
 
 from ouroboros import evidence_packer as packer
 from ouroboros import evidence_packs as packs
+from ouroboros import observability as obs
 from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
 from tests.test_evidence_packs import _blob, _handle_path, _loose, _task
 from tests.test_evidence_packs import root as root
@@ -150,3 +152,48 @@ def test_old_index_schema_rebuilds_without_rewriting_sidecars(root):
     assert json.loads(sidecar)["format_version"] == 1
     assert read_actor_source_bytes(root, "indexed", handle).startswith(b"# focus")
     assert packs.blob_bytes(root, refs[0]).startswith(b'{"message"')
+
+
+def test_blob_resolver_tries_all_local_placements_then_retained_root(root):
+    raw = b'{"shared": "exact bytes"}'
+    refs, _ = _task(root, "a", blobs=1, payloads=[raw])
+    _task(root, "b", blobs=1, payloads=[raw])
+    packer.run_pass(root)
+    (packs.packs_dir(root) / "a.xz").write_bytes(b"bad a")
+    assert packs.blob_bytes(root, refs[0]) == raw
+    child = root / "task_drives" / "a"
+    child.mkdir(parents=True)
+    retained, _ = _task(child, "a", blobs=1, payloads=[raw])
+    packer.run_pass(child)
+    (packs.packs_dir(root) / "b.xz").write_bytes(b"bad b")
+    assert packs.blob_bytes(root, retained[0]) == raw
+    (packs.packs_dir(child) / "a.xz").write_bytes(b"bad child")
+    with pytest.raises(packs.EvidenceCorrupt, match="evidence_corrupt"):
+        packs.blob_bytes(root, retained[0])
+
+
+def test_blob_byte_cap_bounds_loose_reads_and_refuses_oversize_pack_before_decode(root, monkeypatch):
+    raw = b'{"body": "' + b"x" * 10000 + b'"}'
+    refs, _ = _task(root, "bounded", blobs=1, payloads=[raw])
+    no_size = {key: value for key, value in refs[0].items() if key != "size"}
+    sizes = []
+    original_read = gzip.GzipFile.read
+
+    def read(stream, size=-1):
+        sizes.append(size)
+        return original_read(stream, size)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(gzip.GzipFile, "read", read)
+        with pytest.raises(ValueError, match="byte limit"):
+            obs.read_blob_ref(root, no_size, max_bytes=100, raw_bytes=True)
+    assert sizes and all(0 <= size <= 101 for size in sizes)
+    assert obs.read_blob_ref(root, no_size, max_bytes=len(raw), raw_bytes=True) == raw
+    with pytest.raises(ValueError, match="size"):
+        obs.read_blob_ref(root, no_size)
+    packer.run_pass(root)
+    with monkeypatch.context() as patch:
+        patch.setattr(packs, "member_bytes", lambda *a: pytest.fail("oversize member decoded"))
+        with pytest.raises(ValueError, match="byte limit"):
+            obs.read_blob_ref(root, no_size, max_bytes=100, raw_bytes=True)
+    assert obs.read_blob_ref(root, no_size, max_bytes=len(raw), raw_bytes=True) == raw
