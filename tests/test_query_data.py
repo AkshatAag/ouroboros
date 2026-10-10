@@ -287,8 +287,8 @@ def test_money_defaults_snapshot_and_missing_packs_are_typed(ctx, monkeypatch):
 
 
 def test_pack_index_sql(ctx):
-    from ouroboros.query_data_sql import packs_index_path
-    path = packs_index_path(ctx.drive_root)
+    from ouroboros import evidence_packs
+    path = evidence_packs.packs_dir(ctx.drive_root) / evidence_packs.INDEX_NAME
     path.parent.mkdir(parents=True)
     conn = sqlite3.connect(path)
     try:

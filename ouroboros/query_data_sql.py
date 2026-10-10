@@ -24,14 +24,10 @@ HEAP_BYTES = 134217728
 PRAGMAS = {"table_info", "table_xinfo", "table_list", "index_list", "index_info"}
 
 
-def packs_index_path(root: Path) -> Path:
-    # Integration replaces this locator with the packing module's constant.
-    return root / "observability" / "packs" / "index.sqlite"
-
-
 def database_path(root: Path, db: str) -> Path:
+    from ouroboros import evidence_packs
     return {"current": store.store_path(root), "money": root / "state" / "usage.sqlite",
-            "packs": packs_index_path(root)}[db]
+            "packs": evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME}[db]
 
 
 @contextlib.contextmanager
@@ -46,12 +42,10 @@ def _source(root, db, seconds):
         with usage_store.hold(root, write=False, migrate=False, timeout_sec=seconds):
             yield usage_store.store_tier(root, wait_sec=seconds, migrate=False)
     else:
-        # The pack index shares the root's tier; serialize name-tier index reads.
-        tier = store.probe(root)[1] or store.TIER_ENFORCED
-        guard = (store.name_lock(root, "packs.lock", timeout_sec=seconds)
-                 if tier == store.TIER_NAME else contextlib.nullcontext())
-        with guard:
-            yield tier
+        from ouroboros import evidence_packs
+        # The packing module's rule: its name lock around every index access, on both tiers.
+        with store.name_lock(root, evidence_packs.INDEX_LOCK_NAME, timeout_sec=seconds):
+            yield evidence_packs.index_tier(root)
 
 
 @contextlib.contextmanager

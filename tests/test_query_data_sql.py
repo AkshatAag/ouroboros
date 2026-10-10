@@ -236,7 +236,7 @@ def test_parent_deadline_reaps_child_and_removes_scratch(ctx, monkeypatch):
     assert directories and all(not directory.exists() for directory in directories)
 
 
-@pytest.mark.parametrize("db,lock_name", [("money", "usage_attempts.lock"), ("packs", "packs.lock")])
+@pytest.mark.parametrize("db,lock_name", [("money", "usage_attempts.lock"), ("packs", "packs_index.lock")])
 def test_name_tier_money_and_index_reads_share_writer_locks(tmp_path, monkeypatch, db, lock_name):
     from ouroboros import platform_layer
     monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda _: False)
@@ -244,7 +244,8 @@ def test_name_tier_money_and_index_reads_share_writer_locks(tmp_path, monkeypatc
     if db == "money":
         usage_store.migrate_from_journal(tmp_path)
     else:
-        path = sql.packs_index_path(tmp_path)
+        from ouroboros import evidence_packs
+        path = evidence_packs.packs_dir(tmp_path) / evidence_packs.INDEX_NAME
         path.parent.mkdir(parents=True)
         conn = sqlite3.connect(path)
         try:

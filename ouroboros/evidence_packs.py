@@ -224,7 +224,7 @@ def verify_pack(pack_path: pathlib.Path, sidecar: Dict[str, Any]) -> None:
 
 # ---- the index cache ---------------------------------------------------------
 
-def _index_tier(root: pathlib.Path) -> str:
+def index_tier(root: pathlib.Path) -> str:
     from ouroboros.platform_layer import kernel_file_locks_enforced
 
     return store.TIER_ENFORCED if kernel_file_locks_enforced(root / "state" / store.LOCK_NAME) else store.TIER_NAME
@@ -303,7 +303,7 @@ def open_index(root: Any, *, write: bool = False) -> Iterator[sqlite3.Connection
     """One transaction on the index cache under the name lock; a missing, damaged or
     other-version cache is rebuilt from the sidecars first. ``store.StoreBusy`` on contention."""
     root = pathlib.Path(root)
-    path, tier = packs_dir(root) / INDEX_NAME, _index_tier(root)
+    path, tier = packs_dir(root) / INDEX_NAME, index_tier(root)
     with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=INDEX_WAIT_SEC):
         if not _index_valid(path, tier):
             _rebuild_index(root, path, tier)
