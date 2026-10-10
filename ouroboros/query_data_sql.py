@@ -111,13 +111,20 @@ def _fetch(conn, request):
 
 
 def _execute(request):
+    def fetch_query(conn):
+        try:
+            return _fetch(conn, request)
+        except (sqlite3.Error, sqlite3.Warning) as exc:
+            # User SQL must not cross admission as a store-health failure.
+            raise ValueError(str(exc)) from exc
+
     root, db = Path(request["root"]), request["db"]
     path, seconds = database_path(root, db), request["timeout_sec"]
     snapshot = request["snapshot"]
     with _source(root, db, seconds) as tier:
         with _connection(path, tier, seconds) as conn:
             if not snapshot:
-                return _fetch(conn, request)
+                return fetch_query(conn)
             target = Path(request["scratch"]) / "snapshot.sqlite"
             # Trusted SQL only: user SQL never runs on this connection.
             conn.execute("VACUUM INTO ?", (str(target),)).close()
@@ -128,7 +135,7 @@ def _execute(request):
                 raise ValueError("snapshot quick_check failed")
         finally:
             cursor.close()
-        return _fetch(conn, request)
+        return fetch_query(conn)
 
 
 def run_sql(ctx, root, *, db, query, max_rows, max_bytes, snapshot, timeout_sec):

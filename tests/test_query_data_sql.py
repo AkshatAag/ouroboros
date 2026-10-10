@@ -47,6 +47,21 @@ def test_sql_denials_and_working_select(ctx, query):
         assert txn.load("caller")["result"] == "body only"
 
 
+@pytest.mark.parametrize("db", ["current", "money"])
+@pytest.mark.parametrize("snapshot", [False, True])
+@pytest.mark.parametrize("query,message", [
+    ("DELETE FROM meta", "not authorized"),
+    ("SELECT )", 'near ")": syntax error'),
+    ("SELECT 1; SELECT 2", "You can only execute one statement at a time."),
+])
+def test_sql_errors_are_query_failures_not_store_damage(ctx, db, snapshot, query, message):
+    if db == "money":
+        usage_store.migrate_from_journal(ctx.drive_root)
+    failed = run(ctx, query, db=db, snapshot=snapshot)
+    assert failed == {"status": "error", "code": "query_failed", "exception_class": "ValueError", "message": message}
+    assert run(ctx, "SELECT 42", db=db, snapshot=snapshot)["data"]["rows"] == [[42]]
+
+
 def test_attach_cannot_create_a_file(ctx):
     target = ctx.drive_root / "unexpected.sqlite"
     assert run(ctx, "ATTACH DATABASE '" + str(target) + "' AS other")["status"] == "error"
@@ -72,11 +87,12 @@ def test_heap_is_limited_only_in_child(ctx):
     assert run(ctx, "SELECT 3")["status"] == "ok"
 
 
-def test_interrupt_byte_cap_and_row_cap(ctx):
+@pytest.mark.parametrize("snapshot", [False, True])
+def test_interrupt_byte_cap_and_row_cap(ctx, snapshot):
     started = time.monotonic()
     failed = run(ctx, "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n) SELECT sum(x) FROM n",
-                 timeout_sec=0.05)
-    assert failed["status"] == "error" and "interrupt" in failed["message"], failed
+                 timeout_sec=0.05, snapshot=snapshot)
+    assert failed == {"status": "error", "code": "query_failed", "exception_class": "ValueError", "message": "interrupted"}
     assert time.monotonic() - started < 6
     limited = run(ctx, "SELECT printf('%010000d',1)", max_bytes=256)
     assert limited["data"] == {"columns": ["printf('%010000d',1)"], "rows": [], "truncated": True}
