@@ -740,7 +740,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 356 -> 359 (storage on SQLite, S5): the evidence-pack directory, its per-task packs
 # and sidecars and the index cache ``observability/packs``, ``observability/packs/*``,
 # ``observability/packs/index.sqlite`` (``ouroboros/evidence_packs.py``; one section-2 row).
-EXPECTED_SCAN_PATHS = 359
+# 359 -> 360 (S5 FIX): the settlement census now names the existing state/obligations
+# directory itself, in addition to its already documented members; no new durable plane.
+EXPECTED_SCAN_PATHS = 360
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
