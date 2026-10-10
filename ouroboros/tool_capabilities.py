@@ -366,8 +366,9 @@ def routing_action_for_tool(name: object) -> str:
 # HERE, next to the routing family it extends. The registry's own
 # ``mutates_worktree`` marker is the second source for the same fact —
 # tests/test_consciousness_authority.py pins that every entry carrying it is
-# named below, so the table cannot drift away from the catalog. Publication
-# (``FOREGROUND_MUTATIVE_TOOLS``) joins the set at the authority module.
+# named below, so the table cannot drift away from the catalog. The foreground
+# set (``FOREGROUND_MUTATIVE_TOOLS``: publication and the file editors) joins it
+# at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "maintain_harness",
     # starting or steering work (steer_task stays: the nanny of a running campaign)

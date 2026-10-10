@@ -7,7 +7,8 @@ owner Pause through the real fence while an editor runs; and three ways a hung e
 worker ends, each against a spawned worker process in disposable roots: Stop now
 through cancel custody, the task deadline through the real timeout rail and reaper,
 and Panic through ``server_control.execute_panic_stop`` with its host-port, daemon
-and persistence side channels stubbed. These are fixtures, not a native install.
+and persistence side channels stubbed and its companion owner a test-only one.
+These are fixtures, not a native install.
 """
 import json
 import multiprocessing
@@ -256,7 +257,7 @@ def test_panic_does_not_wait_for_a_hung_editor_and_completes_nothing(hung_editor
     import concurrent.futures
     import logging
 
-    from ouroboros import claudexor_daemon, local_model, server_control, startup_historical_audit
+    from ouroboros import claudexor_daemon, extension_companion, local_model, server_control, startup_historical_audit
     from ouroboros import platform_layer as platform
     from ouroboros.task_results import load_task_result
 
@@ -264,6 +265,13 @@ def test_panic_does_not_wait_for_a_hung_editor_and_completes_nothing(hung_editor
     # Panic latches process-wide owners; `owners` restores the command/executor/service
     # latches and this run stops a throwaway audit, so later tests keep their admission.
     monkeypatch.setattr(startup_historical_audit, "audit", startup_historical_audit.HistoricalAudit())
+    # Panic signals whatever companion supervisor is installed globally. An owner left
+    # installed earlier (stood in here) is swapped for a test-only one and comes back untouched.
+    earlier = extension_companion.CompanionSupervisor(h.root / "earlier-companions")
+    monkeypatch.setattr(extension_companion, "_GLOBAL_SUPERVISOR", earlier)
+    isolated = extension_companion.CompanionSupervisor(h.root / "panic-companions")
+    scoped = pytest.MonkeyPatch()  # undone inside the test so the restore itself is asserted
+    scoped.setattr(extension_companion, "_GLOBAL_SUPERVISOR", isolated)
     ports = []
     monkeypatch.setattr(platform, "kill_process_on_port", ports.append)  # never the live host's ports
     monkeypatch.setattr(claudexor_daemon, "get_owned_daemon",
@@ -283,6 +291,11 @@ def test_panic_does_not_wait_for_a_hung_editor_and_completes_nothing(hung_editor
         assert time.monotonic() - started < 10  # bounded by Panic's own request phases, not the writer
     finally:
         pool.shutdown(wait=True)
+        # Panic never joins its settlement threads before the (stubbed) hard exit; one
+        # still running could reach a process-wide owner after it is restored.
+        for thread in [t for t in threading.enumerate() if t.name.startswith("panic-")]:
+            thread.join(10)
+        scoped.undo()
     h.child.join(10)
     assert not h.child.is_alive() and not (h.root / "returned").exists()
     assert h.target.read_text() == "before\n"
@@ -290,3 +303,5 @@ def test_panic_does_not_wait_for_a_hung_editor_and_completes_nothing(hung_editor
     # Panic writes no terminal state: the claim stays unresolved custody for the next boot.
     assert row["status"] == "running" and h.claim_id in row["launch_handoffs"], row
     assert ports  # the port sweep ran against the stub, never a real listener
+    assert isolated._panic_requested  # the companion phase ran, against the test-only owner
+    assert extension_companion._GLOBAL_SUPERVISOR is earlier and not earlier._panic_requested

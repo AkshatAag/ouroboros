@@ -598,6 +598,60 @@ def test_empty_post_edit_preview_does_not_invent_a_source_line():
     assert numbered_edit_preview("", [0]) == "(empty file after edit; no surviving source lines)"
 
 
+def test_post_edit_preview_discloses_long_rows_and_the_whole_cap():
+    from ouroboros.tools.edit_ops import numbered_edit_preview
+
+    # Short previews are byte-for-byte what they were before the disclosed bounds.
+    assert numbered_edit_preview("a\nb\n", [4]) == (
+        "     1\ta\n     2\tb\nEdit site is at end of file; nearest surviving source lines shown.")
+    assert numbered_edit_preview("a\nb\nc\n", [0, 2], max_sites=1) == (
+        "     1\ta\n     2\tb\n     3\tc\n… 1 more edit site(s)")
+    row = 5_003  # chars per source line, newline excluded
+    text = "".join("x" * 5_000 + f"{i:03d}\n" for i in range(600))
+    preview = numbered_edit_preview(text, [site * 50 * (row + 1) for site in range(10)])
+    tail = "… 2 more edit site(s)"
+    assert len(preview) <= 4_000 and len(preview.splitlines()) < 100
+    assert preview.startswith("     1\t" + "x" * 100) and preview.endswith("\n" + tail)
+    assert f"OMISSION NOTE: truncated at 240 chars; original length {row}" in preview
+    assert f"OMISSION NOTE: truncated at {4_000 - len(tail) - 1} chars;" in preview
+
+
+def test_apply_patch_schema_and_add_file_warn_on_syntax_after_applying(file_tools):
+    from ouroboros.tools.edit_ops import get_tools
+
+    registry, _, _, _, workspace, *_ = file_tools
+    description = next(entry for entry in get_tools() if entry.name == "apply_patch").schema["description"]
+    assert "(Add File included) is reported as SYNTAX_WARNING after it is applied, never refused" in description
+    result = registry.execute("apply_patch", {"patch": "*** Add File: broken.py\n+def broken(:\n"})
+    assert result.startswith("✅") and "SYNTAX_WARNING" in result and "the edit WAS applied" in result, result
+    assert (workspace / "broken.py").read_text() == "def broken(:\n"
+
+
+def _artifact_writes(name):
+    return {"write_file": {"root": "artifact_store", "path": name, "content": "forged\n", "force": True},
+            "edit_text": {"root": "artifact_store", "path": name, "old_str": "real", "new_str": "forged"},
+            "edit_batch": {"root": "artifact_store", "edits": [{"path": name, "old_str": "real", "new_str": "forged"}]},
+            "apply_patch": {"root": "artifact_store", "patch": f"*** Update File: {name}\n-real\n+forged\n"}}
+
+
+@pytest.mark.parametrize("mode", ["advanced", "pro", "cyber_pro"])
+def test_artifact_reservation_is_one_rule_for_every_writer(file_tools, monkeypatch, mode):
+    registry, ctx, *_ = file_tools
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    store = resource_root_path(ctx, "artifact_store")
+    store.mkdir(parents=True, exist_ok=True)
+    for name in (".artifact_manifest.json", "verification_receipts.jsonl", "report.txt"):
+        landed = {}
+        for tool, arguments in _artifact_writes(name).items():
+            (store / name).write_bytes(b"real\n")
+            result = registry.execute(tool, arguments)
+            landed[tool] = (store / name).read_bytes() != b"real\n"
+            assert landed[tool] or "artifact_store path blocked" in result, (tool, result)
+        # Ordinary artifacts stay editable; the reserved authority files follow write_file's
+        # own shared rule in every mode, including Cyber's existing advisory agency.
+        assert set(landed.values()) == {name == "report.txt" or mode == "cyber_pro"}, (name, landed)
+
+
 @pytest.mark.serial  # a real local HTTP model stand-in
 def test_editor_results_reach_the_actual_keyless_http_model_send(file_tools, tmp_path, monkeypatch):
     import json

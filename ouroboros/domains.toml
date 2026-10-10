@@ -70,6 +70,8 @@ D20 = "Presence"
 "ouroboros/delegate_custody_current.py" = "D07"
 "launcher.py" = "D18"
 "ouroboros/budget_pause.py" = "D01"
+"ouroboros/external_runs.py" = "D01"
+"ouroboros/working_checkpoint.py" = "D01"
 "ouroboros/owner_pause.py" = "D01"
 "ouroboros/plan_review_facts.py" = "D06"
 "ouroboros/tool_custody.py" = "D01"
@@ -109,6 +111,7 @@ D20 = "Presence"
 "ouroboros/browser_policy.py" = "D05"
 "ouroboros/cancel_intents.py" = "D09"
 "ouroboros/model_wait.py" = "D09"
+"ouroboros/local_custody_repair.py" = "D09"
 "ouroboros/capability_evidence.py" = "D03"
 "ouroboros/response_limits.py" = "D03"
 "ouroboros/claudexor_daemon.py" = "D07"
@@ -244,6 +247,7 @@ D20 = "Presence"
 "ouroboros/gateway/models.py" = "D11"
 "ouroboros/gateway/onboarding.py" = "D11"
 "ouroboros/gateway/onboarding_host.py" = "D11"
+"ouroboros/gateway/owner_effort.py" = "D11"
 "ouroboros/gateway/owner_settings.py" = "D11"
 "ouroboros/gateway/presence_settings.py" = "D11"
 "ouroboros/gateway/desktop_autostart.py" = "D11"
@@ -406,6 +410,7 @@ D20 = "Presence"
 "ouroboros/review_body_fact.py" = "D06"
 "ouroboros/review_custody.py" = "D06"
 "ouroboros/review_operation.py" = "D06"
+"ouroboros/review_pause.py" = "D06"
 "ouroboros/review_source_closure.py" = "D06"
 "ouroboros/send_clock.py" = "D02"
 "ouroboros/review_cycles.py" = "D06"
@@ -551,6 +556,7 @@ D20 = "Presence"
 "ouroboros/tools/followup.py" = "D08"
 "ouroboros/tools/git.py" = "D10"
 "ouroboros/tools/git_evolution.py" = "D10"
+"ouroboros/tools/git_managed_postcommit.py" = "D10"
 "ouroboros/tools/git_plumbing.py" = "D10"
 "ouroboros/tools/git_repo_edit.py" = "D10"
 "ouroboros/tools/git_review_cycle.py" = "D10"
@@ -956,6 +962,7 @@ lazy_only = [
   "D03->D09",
   "D03->D10",
   "D03->D11",
+  "D03->D13",
   "D03->D14",
   "D03->D16",
   "D03->D17",
@@ -986,6 +993,7 @@ lazy_only = [
   "D08->D02",
   "D08->D10",
   "D08->D11",
+  "D08->D13",
   "D09->D02",
   "D09->D04",
   "D09->D05",

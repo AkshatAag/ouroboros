@@ -143,6 +143,10 @@ def _edit_mutation_block(ctx: ToolContext, binding: ResolvedResourceBinding,
         "active_workspace", "system_repo", "project_room"
     }:
         return ""
+    # The shared reservation applies its own mode rule, exactly as write_file reads it.
+    if root == "artifact_store":
+        if reason := artifact_store_path_block_reason(target, base_path=binding.base_path):
+            return f"artifact_store path blocked: {reason}"
     if mode_has_unrestricted_agency(get_runtime_mode()):
         return ""
     data_root = binding.state_drive_root
@@ -169,9 +173,6 @@ def _edit_mutation_block(ctx: ToolContext, binding: ResolvedResourceBinding,
     if root == "runtime_data":
         if block := _project_store_access_block(_normalize_data_read_path(ctx, path)):
             return block
-    if root == "artifact_store":
-        if reason := artifact_store_path_block_reason(target, base_path=binding.base_path):
-            return f"artifact_store path blocked: {reason}"
     if (binding.source in {"external", "clawhub", "ouroboroshub"}
             and not binding.base_path.exists()
             and (binding.source != "external" or is_skill_create_typo(
@@ -401,13 +402,19 @@ class _ReaderLines:
         return max(1, self.line(index + lines) - self.line(index)) if self._ends is not None else lines
 
 
+_EDIT_PREVIEW_LINE_CHARS = 240   # per numbered post-edit row
+_EDIT_PREVIEW_MAX_CHARS = 4_000  # whole post-edit preview, site notes included
+
+
 def numbered_edit_preview(text: str, offsets: List[int], *, max_sites: int = 8) -> str:
     """Bounded numbered post-edit context at actual edited source positions.
 
     Rows carry read_file's own number-and-tab prefix, so every surface shows
-    one line-number form and one line definition.
+    one line-number form and one line definition. A long row and the whole
+    preview are cut through the shared disclosed bound; the site notes survive it.
     """
     from ouroboros.tools.core_file_tools import _display_prefix
+    from ouroboros.utils import truncate_within_limit
 
     if not text:
         return "(empty file after edit; no surviving source lines)"
@@ -416,12 +423,16 @@ def numbered_edit_preview(text: str, offsets: List[int], *, max_sites: int = 8) 
     for offset in offsets[:max_sites]:
         line = edit_source_line(text, offset)
         chosen.update(range(max(1, line - 2), min(len(lines), line + 2) + 1))
-    rows = [_display_prefix(number) + lines[number - 1][:240] for number in sorted(chosen)]
+    rows = "\n".join(_display_prefix(number) + truncate_within_limit(lines[number - 1], _EDIT_PREVIEW_LINE_CHARS)
+                     for number in sorted(chosen))
+    notes = []
     if any(offset >= len(text) for offset in offsets[:max_sites]):
-        rows.append("Edit site is at end of file; nearest surviving source lines shown.")
+        notes.append("Edit site is at end of file; nearest surviving source lines shown.")
     if len(offsets) > max_sites:
-        rows.append(f"… {len(offsets) - max_sites} more edit site(s)")
-    return "\n".join(rows)[:4000]
+        notes.append(f"… {len(offsets) - max_sites} more edit site(s)")
+    tail = "\n".join(notes)
+    room = _EDIT_PREVIEW_MAX_CHARS - len(tail) - bool(tail)
+    return "\n".join(part for part in (truncate_within_limit(rows, room), tail) if part)
 
 
 def newline_normalization_note(target: pathlib.Path) -> str:
@@ -1422,7 +1433,9 @@ def get_tools() -> List[ToolEntry]:
                 "differ, indentation may not) and must match exactly one place; the optional "
                 "@@ anchor disambiguates repeated contexts. Repeat '*** Update File:' to chain "
                 "edits on an already patched file. Delete File stores the file's exact bytes "
-                "as a task artifact first. "
+                "as a task artifact first. On a repo root, a written file whose final Python/JSON "
+                "does not parse (Add File included) is reported as SYNTAX_WARNING after it is "
+                "applied, never refused; write_file keeps its own full-write check. "
                 "Prefer this over many edit_text calls for related multi-file changes. "
                 "NOT for rewrites touching most of a file — there the patch grows as "
                 "large as the file itself; use write_file instead."
