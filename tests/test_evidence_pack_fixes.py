@@ -113,11 +113,46 @@ def test_presence_reentry_projection_reads_loose_and_packed_source(root, monkeyp
     before = reentry_source_projection(root, "presence", ref["sha256"])
     assert before["complete_sha256"] == ref["sha256"]
     assert packer.run_pass(root)["faults"] == 0
+
     assert not _handle_path(root, "presence", ref).exists()
     assert reentry_source_projection(root, "presence", ref["sha256"]) == before
     assert reentry_source_projection(root, "presence", "0" * 64)["reason"] == "source_unavailable"
     monkeypatch.setattr(artifacts, "read_actor_source_bytes", lambda *a, **k: (_ for _ in ()).throw(OSError("read failed")))
     assert reentry_source_projection(root, "presence", ref["sha256"])["reason"] == "source_unreadable"
+
+
+@pytest.mark.parametrize("blocker", ["delivery", "obligation"])
+def test_outbox_and_owner_changes_wake_skipped_tasks(root, blocker):
+    from ouroboros import obligations
+    from supervisor import terminal_delivery
+
+    refs, _ = _task(root, "wake", blobs=1)
+    if blocker == "delivery":
+        assert terminal_delivery.register_pending_delivery(root, {"delivery_id": "owed", "task_id": "wake", "chat_id": 1})
+    else:
+        obligations.add(root, "pending_drives", "wake")
+    assert packer.run_pass(root)["packed"] == 0
+    assert packer.changed_tasks(root) == [] and _loose(refs[0])
+    if blocker == "delivery":
+        assert terminal_delivery.register_delivery(root, "owed")
+    else:
+        obligations.remove(root, "pending_drives", "wake")
+    assert packer.changed_tasks(root) == ["wake"]
+    assert packer.run_pass(root)["packed"] == 1 and not _loose(refs[0])
+
+
+def test_shared_blob_cleanup_retries_after_last_live_reference_settles(root):
+    raw = b'{"shared":true}'
+    refs, _ = _task(root, "settled", blobs=1, payloads=[raw])
+    _task(root, "live", status="running", blobs=1, payloads=[raw])
+    for _ in range(3):
+        assert packer.run_pass(root)["kept"] >= 1
+        assert _loose(refs[0])
+    _result(root, "live")
+    assert packer.run_pass(root)["faults"] == 0
+    assert not _loose(refs[0])
+    packer.run_pass(root)
+    assert packer.changed_tasks(root) == []
 
 
 def test_identical_checkpoint_and_blob_bytes_keep_both_index_kinds(root):

@@ -34,20 +34,26 @@ _REPORT_BYTES = 4096
 # ---- candidates --------------------------------------------------------------
 
 def task_stamps(root: pathlib.Path, task_id: str) -> str:
-    """mtime_ns of the task's calls directory, checkpoints directory and result file (0 when absent):
-    what a sweep records so an unchanged task is not re-evaluated."""
+    """Evidence and settlement-source revisions, including owner-held duties and outbox sends."""
     from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.task_results import task_result_path
+    from ouroboros.usage_store import STORE_REL
+    from ouroboros.usage_ledger import LEDGER_REL
 
     stamps = []
-    for path in (root / "observability" / "calls" / task_id,
+    paths = [root / "observability" / "calls" / task_id,
                  task_artifact_dir_path(root, task_id, create=False).joinpath(*packs.CHECKPOINTS_REL.parts),
-                 task_result_path(root, task_id, create=False)):
+                 task_result_path(root, task_id, create=False), root / "state/terminal_deliveries.json",
+                 root / "state/migrations.json", root / "state/obligations/rebuild.owed",
+                 root / STORE_REL, root / (str(STORE_REL) + "-wal"), root / LEDGER_REL]
+    paths.extend(sorted((root / "state/obligations").glob("*.json")))
+    for path in paths:
         try:
-            stamps.append(os.stat(path).st_mtime_ns)
+            stat = path.stat()
+            stamps.append((str(path.relative_to(root)), stat.st_ino, stat.st_size, stat.st_mtime_ns))
         except OSError:
-            stamps.append(0)
-    return ",".join(str(value) for value in stamps)
+            stamps.append((str(path.relative_to(root)), 0))
+    return json.dumps(stamps, separators=(",", ":"))
 
 
 def _loose_task_ids(root: pathlib.Path) -> set:
@@ -138,7 +144,7 @@ def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
     facts = {task: packs.task_settlement_facts(root, task) for task in revisions}
     settled = {task for task, fact in facts.items() if packs.facts_settled(fact)}
     for task, fact in facts.items():
-        if task not in settled and fact["money_open"] is False:
+        if task not in settled and fact["money_open"] is False and "unknowns" not in fact["obligations"]:
             record_swept(root, task, revisions[task])
     candidates = ordered_candidates(root, sorted(settled))
     report["candidates"] = len(candidates)
@@ -160,7 +166,7 @@ def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
         report["compressed"] += int(outcome.get("packed") or 0)
         for key in ("unlinked", "kept", "busy"):
             report[key] += int(outcome.get(key) or 0)
-        if not outcome.get("busy") and not outcome.get("deferred"):
+        if not any(outcome.get(key) for key in ("busy", "kept", "deferred")):
             record_swept(root, task, revisions[task])
     try:
         report["archived"] = packs.archive_usage_segments(root)["archived"]

@@ -686,8 +686,9 @@ def task_settlement_facts(root: Any, task_id: str) -> Dict[str, Any]:
         panel = next((p for p in panels if p.get("panel_id") == receipt.get("panel_id")), {})
         late_open |= (receipt.get("custody") != "terminal_outbox"
                       or receipt.get("settled_at") != (panel.get("late_settlement") or {}).get("settled_at"))
-    late_open |= (terminal_answer_receipts(root, task_id).get("registry") == "unreadable"
-                  or any(str(event.get("task_id") or "") == str(task_id) for event in pending_deliveries(root)))
+    if terminal_answer_receipts(root, task_id).get("registry") == "unreadable":
+        owed.add("unknowns")
+    late_open |= any(str(event.get("task_id") or "") == str(task_id) for event in pending_deliveries(root))
     return {
         "status": str(row.get("status") or ""),
         "terminal": bool(row) and str(row.get("status") or "") in SETTLED_STATUSES,
