@@ -151,7 +151,24 @@ def test_money_snapshot_and_direct_reads(ctx):
     for snapshot in (True, False):
         result = run(ctx, "SELECT count(*) FROM sqlite_master", db="money", snapshot=snapshot)
         assert result["status"] == "ok" and result["data"]["rows"][0][0] > 0, result
-    assert not list(ctx.drive_root.glob("**/snapshot.sqlite"))
+
+
+@pytest.mark.parametrize("query,status", [("SELECT 1", "ok"), ("SELECT )", "error")])
+def test_snapshot_removes_real_temporary_directory(ctx, monkeypatch, query, status):
+    usage_store.migrate_from_journal(ctx.drive_root)
+    original_temp, directories = sql.tempfile.TemporaryDirectory, []
+
+    def temporary(**kwargs):
+        directory = original_temp(**kwargs)
+        path = Path(directory.name)
+        assert path.is_dir()
+        directories.append(path)
+        return directory
+
+    monkeypatch.setattr(sql.tempfile, "TemporaryDirectory", temporary)
+    result = run(ctx, query, db="money", snapshot=True)
+    assert result["status"] == status, result
+    assert directories and all(not directory.exists() for directory in directories)
 
 
 def test_snapshot_is_a_distinct_checked_database(ctx, tmp_path, monkeypatch):
