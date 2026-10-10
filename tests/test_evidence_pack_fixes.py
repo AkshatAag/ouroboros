@@ -197,3 +197,23 @@ def test_blob_byte_cap_bounds_loose_reads_and_refuses_oversize_pack_before_decod
         with pytest.raises(ValueError, match="byte limit"):
             obs.read_blob_ref(root, no_size, max_bytes=100, raw_bytes=True)
     assert obs.read_blob_ref(root, no_size, max_bytes=len(raw), raw_bytes=True) == raw
+
+
+@pytest.mark.parametrize("reader", ["handle", "actor"])
+def test_corrupt_loose_handle_falls_back_to_verified_pack(root, reader):
+    raw = b"the retained checkpoint"
+    _, handle = _task(root, "handle", blobs=1, handle=raw)
+    packer.run_pass(root)
+    loose = _handle_path(root, "handle", handle)
+    loose.write_bytes(b"damaged loose")
+
+    def read():
+        return (packs.handle_bytes(root, "handle", handle["path"]) if reader == "handle"
+                else read_actor_source_bytes(root, "handle", handle))
+
+    assert read() == raw
+    (packs.packs_dir(root) / "handle.xz").write_bytes(b"damaged pack")
+    with pytest.raises(packs.EvidenceCorrupt, match="evidence_corrupt"):
+        read()
+    loose.write_bytes(raw)
+    assert read() == raw

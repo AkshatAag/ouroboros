@@ -732,20 +732,19 @@ def read_actor_source_bytes(
     if target.is_symlink():
         raise ValueError("actor source ref may not be a symlink")
     try:
-        target = target.resolve(strict=True)
+        target = target.resolve(strict=False)
         target.relative_to(base)
-        raw = target.read_bytes()
-    except FileNotFoundError:
-        from ouroboros.evidence_packs import handle_bytes
-        try:
-            raw = handle_bytes(drive_root, task_id, rel.as_posix())
-        except FileNotFoundError:
-            if not retained:
-                raise
-            from ouroboros.source_retention import read_retained_task_source
-            return read_retained_task_source(drive_root, task_id, ref)
     except ValueError as exc:
         raise ValueError("actor source ref escapes its task artifact root") from exc
+    from ouroboros.evidence_packs import handle_bytes
+    try:
+        raw = (handle_bytes(drive_root, task_id, rel.as_posix())
+               if rel.parts[:2] == ("source_handles", "context_checkpoints") else target.read_bytes())
+    except FileNotFoundError:
+        if not retained:
+            raise
+        from ouroboros.source_retention import read_retained_task_source
+        return read_retained_task_source(drive_root, task_id, ref)
     try:
         expected_size = int(ref["size"])
     except (KeyError, TypeError, ValueError) as exc:

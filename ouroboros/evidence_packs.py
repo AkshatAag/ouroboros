@@ -445,8 +445,8 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
             failure = failure or exc
         except ValueError as exc:
             failure = exc
-        except (OSError, EOFError, zlib.error):
-            failure = EvidenceCorrupt(f"evidence_corrupt: unreadable loose blob {loose.name}")
+        except (OSError, EOFError, zlib.error) as exc:
+            failure = exc  # retention repair distinguishes transient IO from damaged gzip
         try:
             placements = _placements(candidate, sha256=sha256, kind=kind)
         except (OSError, EvidenceCorrupt) as exc:
@@ -469,29 +469,35 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
     raise failure or FileNotFoundError(str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))
 
 
-def handle_bytes(root: Any, task_id: str, rel_path: str) -> bytes:
-    """A context-checkpoint handle's bytes: the loose file, else its pack member (verified)."""
+def _handle_path(root: Any, task_id: str, rel_path: str) -> pathlib.Path:
     from ouroboros.artifacts import task_artifact_dir_path
 
+    return task_artifact_dir_path(root, task_id, create=False).joinpath(*pathlib.PurePosixPath(rel_path).parts)
+
+
+def handle_bytes(root: Any, task_id: str, rel_path: str) -> bytes:
+    """Verified loose handle bytes, falling back to the pack if the loose digest is wrong."""
     rel = pathlib.PurePosixPath(str(rel_path))
-    loose = task_artifact_dir_path(root, task_id, create=False).joinpath(*rel.parts)
+    loose, failure = _handle_path(root, task_id, rel.as_posix()), None
     try:
         if not loose.is_symlink():
-            return loose.read_bytes()
+            raw = loose.read_bytes()
+            digest = rel.stem.rsplit("-", 1)[-1]
+            if hashlib.sha256(raw).hexdigest() == digest:
+                return raw
+            failure = EvidenceCorrupt(f"evidence_corrupt: loose handle {rel.name} failed sha256 verification")
     except FileNotFoundError:
         pass
     located = _locate(pathlib.Path(root), task_id=str(task_id), rel_path=rel.as_posix())
     if located is None:
-        raise FileNotFoundError(str(loose))
+        raise failure or FileNotFoundError(str(loose))
     return member_bytes(*located)
 
 
 def handle_info(root: Any, task_id: str, rel_path: str) -> Optional[Dict[str, Any]]:
     """``{"size", "sha256", "loose"}`` of a handle that exists loose or packed, else ``None``."""
-    from ouroboros.artifacts import task_artifact_dir_path
-
     rel = pathlib.PurePosixPath(str(rel_path))
-    loose = task_artifact_dir_path(root, task_id, create=False).joinpath(*rel.parts)
+    loose = _handle_path(root, task_id, rel.as_posix())
     try:
         if loose.is_file() and not loose.is_symlink():
             return {"size": loose.stat().st_size, "sha256": rel.name.rsplit("-", 1)[-1].split(".", 1)[0], "loose": True}
@@ -537,10 +543,8 @@ def _restore_handle(target: pathlib.Path, raw: bytes, sha256: str) -> bool:
 
 def materialize_handle(root: Any, task_id: str, rel_path: str) -> Optional[pathlib.Path]:
     """The loose path of a checkpoint handle, written back from its pack when absent."""
-    from ouroboros.artifacts import task_artifact_dir_path
-
     rel = pathlib.PurePosixPath(str(rel_path))
-    target = task_artifact_dir_path(root, task_id, create=False).joinpath(*rel.parts)
+    target = _handle_path(root, task_id, rel.as_posix())
     if target.exists() or rel.parts[:2] != CHECKPOINTS_REL.parts:
         return target if target.exists() else None
     located = _locate(pathlib.Path(root), task_id=str(task_id), rel_path=rel.as_posix())
