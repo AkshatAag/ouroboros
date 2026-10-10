@@ -33,6 +33,7 @@ class SleepModel(b4._ScriptedModel):
         super().__init__(monkeypatch)
         self.mode = mode
         self.resumed, self.finish = threading.Event(), threading.Event()
+        self.resume_notice = ""
 
     def handle(self, handler):
         payload = json.loads(handler.rfile.read(int(handler.headers.get('Content-Length', 0))) or b'{}')
@@ -47,6 +48,8 @@ class SleepModel(b4._ScriptedModel):
                     'name': 'await_messages', 'arguments': json.dumps({'mode': self.mode,
                         'senders': [b4.BRAVO]})}}]}, 'tool_calls'
         elif main and marker == 'ALPHA' and ordinal == 2:
+            self.resume_notice = "\n".join(b4._user_text(m) for m in payload.get("messages") or []
+                                          if isinstance(m, dict) and "You slept" in b4._user_text(m))
             self.resumed.set()
             self.finish.wait(90)
         b4._reply(handler, payload, message, reason)
@@ -157,6 +160,9 @@ def test_sleep_lends_capacity_preserves_identity_and_owner_hold(direct_server_wi
                 actions = b4._menu_action(page, trigger, 'resume')
                 assert actions == ['resume', 'stop_now']
                 assert model.resumed.wait(60), 'explicit owner Resume did not continue the same sleeper'
+                record['resume_notice'] = model.resume_notice
+                assert '"mail_acknowledged": false' in model.resume_notice
+                assert '"tasks": {}' in model.resume_notice
                 running = b4._wait(lambda: member(snapshot(root), b4.ALPHA, 'running'), 15, 'resumed task snapshot')
                 record['resumed_snapshot'] = running
                 record['resumed_queue_api'] = b4._get(page, url, '/api/tasks?queue_only=1')

@@ -100,6 +100,7 @@ GRACEFUL_RAILS = frozenset({RAIL_GRACEFUL_CEILING, RAIL_WRAPUP_LAST_FIT, RAIL_SO
 # it rides the SAME exact checkpoint, park and grant, under reason ``owner``,
 # and never requests a stop of work already sent.
 from ouroboros.owner_pause import RAIL_OWNER_PAUSE, REASON_OWNER  # noqa: E402
+
 # The model's own COLD sleep (``model_sleep``) rides the same park too; only its
 # selected sources, through the supervisor's sleep-wake policy, wake it.
 RAIL_MODEL_SLEEP = "model_sleep"
@@ -329,9 +330,16 @@ def pending_tool_call_ids(messages: List[Dict[str, Any]]) -> List[str]:
 # --- external custody (owner Q8): ``external_runs`` owns the one observer ------------
 
 from ouroboros.external_runs import (  # noqa: E402,F401 -- the pause's historical import surface
-    EXTERNAL_RUNNING, EXTERNAL_STOP_CONFIRMED, EXTERNAL_STOP_REQUESTED, EXTERNAL_STOP_UNKNOWN,
-    STOP_POLICIES, STOP_POLICY_ALL, STOP_POLICY_OBSERVE, STOP_POLICY_TASK_OWNED,
-    observe_task_runs, task_owned_runs_open,
+    EXTERNAL_RUNNING,
+    EXTERNAL_STOP_CONFIRMED,
+    EXTERNAL_STOP_REQUESTED,
+    EXTERNAL_STOP_UNKNOWN,
+    STOP_POLICIES,
+    STOP_POLICY_ALL,
+    STOP_POLICY_OBSERVE,
+    STOP_POLICY_TASK_OWNED,
+    observe_task_runs,
+    task_owned_runs_open,
 )
 
 
@@ -421,8 +429,10 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
     ``expected_grant_id`` means "no grant", ``None`` skips that comparison.
     """
     from ouroboros.task_results import (
-        _TRULY_TERMINAL_STATUSES, require_writable_task_result_schema,
-        stamp_task_result_schema, task_result_path,
+        _TRULY_TERMINAL_STATUSES,
+        require_writable_task_result_schema,
+        stamp_task_result_schema,
+        task_result_path,
     )
 
     expected_states = (
@@ -1415,7 +1425,7 @@ def resume_paused_loop(tools: Any, state: Dict[str, Any], messages: list, trace:
 
         slept = max(0.0, float(grant["consumed_at"]) - float(row.get("paused_at") or grant["consumed_at"]))
         messages.append(wake_notice({**(row.get("sleep") or {}), "mode": "cold"},
-                                    str((row.get("sleep_ready") or {}).get("reason") or ""), slept))
+                                    str((row.get("sleep_ready") or {}).get("reason") or ""), slept, ctx))
         return (ctx.active_model, ctx.active_effort, ctx.active_use_local,
                 mode, int(state["round_idx"]), plan)
     kind = "owner Pause" if str(row.get("reason") or "") == REASON_OWNER else "budget pause"

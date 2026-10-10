@@ -826,10 +826,9 @@ def _wait_window(
     the finalization reserve, subtracted ONCE) that ``_deadline_clamped_timeout``
     gives the executor's kill timer, so the tool returns and builds its result
     instead of being timed out mid-sleep; a spent emit window is a zero-second
-    window (one peek, then return). Without a deadline the kill timer is at least
-    the tool's entry timeout, which each caller keeps at ``clamp + margin`` or
-    more. Inside the finalization reserve the executor's 1 s floor stays the
-    bounded exit.
+    window (one peek, then return). The entry timeout covers shipped clamps;
+    a shorter configured task ceiling independently bounds the executor.
+    Inside the finalization reserve its 1 s floor stays the bounded exit.
 
     The task waits pass minimum 0 and ``NESTED_SETTLEMENT_MARGIN_SEC``, so they end
     that far inside the executor's emission; ``await_messages`` passes minimum 1 and
