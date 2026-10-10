@@ -335,19 +335,33 @@ def test_restore_checkpoint_handles_decodes_only_the_prefix(root, monkeypatch):
     _run(root)
     _run(child)
     assert packs.pending_restore_bytes(root) == handle["size"] + child_handle["size"]
+    import builtins
+
     consumed = []
-    real_fill = packs._PackReader._fill
+    real_open = builtins.open
 
-    def fill(self):
-        consumed.append(1)
-        return real_fill(self)
+    class Meter:
+        def __init__(self, handle):
+            self.handle = handle
 
-    monkeypatch.setattr(packs._PackReader, "_fill", fill)
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def read(self, size=-1):
+            raw = self.handle.read(size)
+            consumed.append(len(raw))
+            return raw
+
+    def opened(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        return Meter(handle) if str(path).endswith(".xz") else handle
+
+    monkeypatch.setattr(builtins, "open", opened)
     report = packs.restore_checkpoint_handles(root)
     assert report["status"] == "restored" and report["handles"] == 2 and report["packs"] == 2
     assert _handle_path(root, "task-a", handle).read_bytes().startswith(b"# focus")
     assert _handle_path(child, "task-a", child_handle).read_bytes() == b"# child focus\n"
-    assert len(consumed) <= 2  # one input chunk per pack, never the whole 3 MiB blob
+    assert 0 < sum(consumed) < 64 << 10  # bounded compressed prefix, not the 3 MiB blob
     assert not _loose(refs[0])  # blobs stay packed
     assert packs.pending_restore_bytes(root) == 0
     assert packs.restore_checkpoint_handles(root)["handles"] == 0  # skip-if-present

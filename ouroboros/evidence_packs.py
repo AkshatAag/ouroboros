@@ -1,21 +1,4 @@
-"""Whole-task xz packs of SETTLED tasks' evidence: the format, its index cache, the resolver.
-
-One xz stream (stdlib ``lzma``, LZMA2 preset 1, dictionary sized to the task) per settled task
-per generation at ``observability/packs/<task>[.<gen>].xz``: the task's
-``source_handles/context_checkpoints/*`` files FIRST (the prefix an in-app switch restores
-without touching blobs), then every blob its call manifests reference, in manifest
-first-appearance order, every member complete inside its own pack (a shared sha is
-duplicated, never cross-referenced). The write-once sidecar ``<task>[.<gen>].members.json`` is
-the authority; ``index.sqlite`` beside it is a cache rebuilt from the sidecars whenever it is
-missing, fails ``quick_check`` or carries another format version (never inside
-``state/current.sqlite``). Readers resolve loose -> index -> pack through ONE streaming
-decoder whose per-process cursor serves ascending offsets without rewinding; a located member
-that fails size or sha256 is an explicit ``EvidenceCorrupt`` (a ``ValueError``), never empty
-bytes. The packer process (``evidence_packer``) drives the per-task steps here: write to temp
-names, fsync, publish the sidecar LAST, re-read the pack from disk and verify EVERY member,
-upsert the index, only then unlink loose files. A loose placement is replaced by a
-sha-verified pack member; evidence bytes are kept forever.
-"""
+"""Whole-task xz evidence, verified readers and restore; protocol: docs/PERSISTENCE.md, evidence pack row."""
 from __future__ import annotations
 
 import contextlib
@@ -32,7 +15,7 @@ import zlib
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros import store
-from ouroboros.utils import append_jsonl, atomic_write_json, replace_atomic, utc_now_iso, write_bytes_atomic
+from ouroboros.utils import _atomic_overwrite, append_jsonl, atomic_write_json, replace_atomic, utc_now_iso, write_bytes_atomic
 
 PACKS_REL = pathlib.Path("observability/packs")
 INDEX_NAME = "index.sqlite"
@@ -74,7 +57,6 @@ class SidecarCorrupt(OSError):
     """Unreadable pack authority; restore and its preflight must refuse."""
 
 
-# ---- names and sidecars ------------------------------------------------------
 
 def packs_dir(root: Any) -> pathlib.Path:
     return pathlib.Path(root) / PACKS_REL
@@ -134,68 +116,38 @@ def list_sidecars(root: Any, *, errors: Optional[list] = None) -> List[Tuple[pat
     return out
 
 
-# ---- the one streaming decoder ----------------------------------------------
 
 class _PackReader:
-    """A per-process cursor over one pack: ascending offsets continue the stream, a lower
-    offset or a changed file rewinds. Thread-safe through its own lock."""
+    """Locked cursor; LZMAFile seeks forward cheaply and rewinds for earlier offsets."""
 
     def __init__(self, path: pathlib.Path) -> None:
         self.path = pathlib.Path(path)
         self._lock = threading.Lock()
-        self._identity = None
-        self._handle = None
-        self._decoder = None
-        self._pos = 0
-        self._buffer = b""
-
-    def _rewind(self) -> None:
-        if self._handle is not None:
-            self._handle.close()
-        self._handle = open(self.path, "rb")
-        info = os.fstat(self._handle.fileno())
-        self._identity = (info.st_ino, info.st_dev, info.st_size, info.st_mtime_ns)
-        self._decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
-        self._pos, self._buffer = 0, b""
-
-    def _fill(self) -> bool:
-        while not self._buffer:
-            if self._decoder.eof:
-                return False
-            if not self._decoder.needs_input:  # output still pending from the last input
-                self._buffer = self._decoder.decompress(b"", max_length=_READ_CHUNK)
-                continue
-            chunk = self._handle.read(_READ_CHUNK)
-            if not chunk:
-                return False
-            self._buffer = self._decoder.decompress(chunk, max_length=_READ_CHUNK)
-        return True
+        self._identity = self._stream = None
 
     def read_at(self, offset: int, size: int, sink: Callable[[bytes], None]) -> None:
-        """Deliver exactly ``size`` raw bytes from ``offset`` to ``sink`` in chunks."""
         with self._lock:
             try:
-                info = os.stat(self.path)
-                current = (info.st_ino, info.st_dev, info.st_size, info.st_mtime_ns)
-                if self._decoder is None or offset < self._pos or current != self._identity:
-                    self._rewind()
-                remaining = size
-                while self._pos < offset or remaining:
-                    if not self._buffer and not self._fill():
+                info = self.path.stat()
+                identity = (info.st_ino, info.st_dev, info.st_size, info.st_mtime_ns)
+                if self._stream is None or identity != self._identity:
+                    if self._stream is not None:
+                        self._stream.close()
+                    self._stream = lzma.LZMAFile(self.path, "rb")
+                    self._identity = identity
+                self._stream.seek(offset)
+                while size:
+                    chunk = self._stream.read(min(size, _READ_CHUNK))
+                    if not chunk:
                         raise EvidenceCorrupt(f"evidence_corrupt: pack stream ends early: {self.path.name}")
-                    if self._pos < offset:
-                        take = min(offset - self._pos, len(self._buffer))
-                    else:
-                        take = min(remaining, len(self._buffer))
-                        sink(self._buffer[:take])
-                        remaining -= take
-                    self._buffer = self._buffer[take:]
-                    self._pos += take
-            except (lzma.LZMAError, EOFError) as exc:
-                self._decoder = None
-                raise EvidenceCorrupt(f"evidence_corrupt: pack stream unreadable: {self.path.name}") from exc
-            except Exception:
-                self._decoder = None
+                    size -= len(chunk)
+                    sink(chunk)
+            except Exception as exc:
+                if self._stream is not None:
+                    self._stream.close()
+                    self._stream = None
+                if isinstance(exc, (lzma.LZMAError, EOFError)):
+                    raise EvidenceCorrupt(f"evidence_corrupt: pack stream unreadable: {self.path.name}") from exc
                 raise
 
 
@@ -241,7 +193,6 @@ def verify_pack(pack_path: pathlib.Path, sidecar: Dict[str, Any]) -> None:
             raise EvidenceCorrupt(f"evidence_corrupt: member {member['sha256'][:12]} of {pack_path.name} failed verification")
 
 
-# ---- the index cache ---------------------------------------------------------
 
 def index_tier(root: pathlib.Path) -> str:
     from ouroboros.platform_layer import kernel_file_locks_enforced
@@ -295,8 +246,7 @@ def _index_rows(conn: sqlite3.Connection, pack_path: pathlib.Path, sidecar: Dict
 def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str) -> None:
     """Rebuild the cache from the sidecars (one listing) into a temp file published by rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
-    try:
+    def build(tmp):
         conn = store.connect(tmp, tier, create=True)
         try:
             conn.execute(f"PRAGMA application_id = {_APPLICATION_ID[tier]}")
@@ -310,14 +260,8 @@ def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str) -> None:
                 conn.execute("INSERT INTO meta VALUES ('sidecar_errors', ?)", (json.dumps([str(e) for e in errors]),))
         finally:
             conn.close()
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-        os.replace(tmp, path)
-        store.fsync_directory(path.parent)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            tmp.unlink()
-
+    _atomic_overwrite(path, build)
+    store.fsync_directory(path.parent)
 
 @contextlib.contextmanager
 def open_index(root: Any, *, write: bool = False) -> Iterator[sqlite3.Connection]:
@@ -388,7 +332,6 @@ def _locate(root: pathlib.Path, **identity: str) -> Optional[Tuple[pathlib.Path,
     return next(iter(_placements(root, **identity)), None)
 
 
-# ---- the resolver: loose -> index -> pack ------------------------------------
 
 def blob_ref_fields(ref: Any) -> Tuple[str, str, int]:
     """``(sha256, kind, size)`` of a gzip CAS blob ref (size -1 when the ref carries none), or ``ValueError``."""
@@ -524,12 +467,24 @@ def packed_handle_names(root: Any, task_id: str) -> List[str]:
                       if member["kind"] == CHECKPOINT and member.get("path"))
 
 
+def _checkpoint_path(path: pathlib.Path) -> Optional[tuple]:
+    """Parse the artifact root, checkpoint directory or one checkpoint file once."""
+    from ouroboros.task_results import validate_task_id
+
+    parts = pathlib.Path(path).parts
+    k = next((i for i in range(len(parts) - 3, -1, -1) if parts[i:i + 2] == ("task_results", "artifacts")), None)
+    rest = parts[k + 3:] if k is not None else None
+    if rest is None or len(rest) > 3 or rest[:2] != CHECKPOINTS_REL.parts[:len(rest)]:
+        return None
+    try:
+        return pathlib.Path(*parts[:k]), validate_task_id(parts[k + 2]), rest
+    except ValueError:
+        return None
+
+
 def packed_handle_names_at(directory: pathlib.Path) -> List[str]:
-    """``packed_handle_names`` for a filesystem path shaped like a task's checkpoint directory."""
-    parts = pathlib.Path(directory).parts
-    if len(parts) < 5 or parts[-5:-3] != ("task_results", "artifacts") or parts[-2:] != CHECKPOINTS_REL.parts:
-        return []
-    return packed_handle_names(pathlib.Path(*parts[:-5]), parts[-3])
+    parsed = _checkpoint_path(directory)
+    return packed_handle_names(*parsed[:2]) if parsed and len(parsed[2]) == 2 else []
 
 
 def _restore_handle(target: pathlib.Path, raw: bytes, sha256: str) -> bool:
@@ -556,33 +511,18 @@ def materialize_handle(root: Any, task_id: str, rel_path: str) -> Optional[pathl
 
 
 def materialize_path(path: pathlib.Path) -> Optional[pathlib.Path]:
-    """``materialize_handle`` for a filesystem path shaped like a checkpoint handle."""
-    parts = pathlib.Path(path).parts
-    if len(parts) < 6 or parts[-6:-4] != ("task_results", "artifacts") or parts[-3:-1] != CHECKPOINTS_REL.parts:
-        return None
-    return materialize_handle(pathlib.Path(*parts[:-6]), parts[-4], pathlib.PurePosixPath(*parts[-3:]).as_posix())
+    parsed = _checkpoint_path(path)
+    return materialize_handle(*parsed[:2], pathlib.PurePosixPath(*parsed[2]).as_posix()) if parsed and len(parsed[2]) == 3 else None
 
 
 def materialize_tree(path: pathlib.Path) -> None:
-    """Write back the packed checkpoint handles a file walk below ``path`` would miss: the path is a
-    handle, a task's checkpoint directory, or that task's artifact root above it."""
-    parts = pathlib.Path(path).parts
-    k = next((i for i in range(len(parts) - 3, -1, -1) if parts[i:i + 2] == ("task_results", "artifacts")), None)
-    rest = parts[k + 3:] if k is not None else None
-    if rest is None or len(rest) > 3 or rest[:2] != CHECKPOINTS_REL.parts[:len(rest)]:
-        return
-    from ouroboros.task_results import validate_task_id
+    """Restore handles below the task artifact root, checkpoint directory or exact path."""
+    parsed = _checkpoint_path(path)
+    if parsed:
+        root, task_id, rest = parsed
+        for name in ([rest[2]] if len(rest) == 3 else packed_handle_names(root, task_id)):
+            materialize_handle(root, task_id, (CHECKPOINTS_REL / name).as_posix())
 
-    root, task_id = pathlib.Path(*parts[:k]), parts[k + 2]
-    try:
-        task_id = validate_task_id(task_id)
-    except ValueError:
-        return  # a directory name that is no task id packs nothing
-    for name in ([rest[2]] if len(rest) == 3 else packed_handle_names(root, task_id)):
-        materialize_handle(root, task_id, (CHECKPOINTS_REL / name).as_posix())
-
-
-# ---- A+ restore and the preflight ------------------------------------------
 
 def _pack_roots(root: pathlib.Path) -> List[pathlib.Path]:
     from ouroboros.store_import import descendant_drives
@@ -636,7 +576,6 @@ def pending_restore_bytes(root: Any) -> int:
     return total
 
 
-# ---- the settle predicate (ONE facts function; S3 swaps its body) ------------
 
 def task_settlement_facts(root: Any, task_id: str) -> Dict[str, Any]:
     """The facts the settle predicate reads, through the CURRENT file readers: terminal status,
@@ -720,7 +659,6 @@ def task_settled(root: Any, task_id: str) -> bool:
     return facts_settled(task_settlement_facts(root, task_id))
 
 
-# ---- members of a task -------------------------------------------------------
 
 def _walk_blob_refs(value: Any, out: List[Tuple[str, str, int]], seen: set) -> None:
     if isinstance(value, dict):
@@ -941,7 +879,6 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
     return report
 
 
-# ---- the money archive -------------------------------------------------------
 
 def archive_usage_segments(root: Any) -> Dict[str, int]:
     """``archive/usage_ledger/segment_ep*.jsonl`` -> ``.jsonl.xz`` (preset 1) with a sidecar
@@ -951,9 +888,9 @@ def archive_usage_segments(root: Any) -> Dict[str, int]:
     for source in sorted(directory.glob("segment_ep*.jsonl")) if directory.is_dir() else []:
         write_unpacker(root)
         target, meta = source.with_name(source.name + ".xz"), source.with_name(source.name + ".xz.json")
-        tmp = target.with_name(f".{target.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
         digest, size = hashlib.sha256(), 0
-        try:
+        def compress(tmp):
+            nonlocal size
             with open(source, "rb") as reader, lzma.open(tmp, "wb", format=lzma.FORMAT_XZ, preset=PRESET) as writer:
                 while chunk := reader.read(_READ_CHUNK):
                     digest.update(chunk)
@@ -961,28 +898,23 @@ def archive_usage_segments(root: Any) -> Dict[str, int]:
                     writer.write(chunk)
             with open(tmp, "rb") as handle:
                 os.fsync(handle.fileno())
-            replace_atomic(tmp, target)
-            atomic_write_json(meta, {"name": source.name, "size": size, "sha256": digest.hexdigest()}, fsync=True)
-            check = hashlib.sha256()
-            with lzma.open(target, "rb") as handle:
-                while chunk := handle.read(_READ_CHUNK):
-                    check.update(chunk)
-            if check.hexdigest() != digest.hexdigest():
-                raise EvidenceCorrupt(f"evidence_corrupt: archived segment {target.name} failed verification")
-            with _unlink_phase(root) as allowed:
-                if not allowed:
-                    continue
-                source.unlink()
-            report["archived"] += 1
-            report["bytes"] += size
-            report["compressed"] += target.stat().st_size
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                tmp.unlink()
+        _atomic_overwrite(target, compress)
+        atomic_write_json(meta, {"name": source.name, "size": size, "sha256": digest.hexdigest()}, fsync=True)
+        check = hashlib.sha256()
+        with lzma.open(target, "rb") as handle:
+            while chunk := handle.read(_READ_CHUNK):
+                check.update(chunk)
+        if check.hexdigest() != digest.hexdigest():
+            raise EvidenceCorrupt(f"evidence_corrupt: archived segment {target.name} failed verification")
+        with _unlink_phase(root) as allowed:
+            if not allowed:
+                continue
+            source.unlink()
+        report["archived"] += 1
+        report["bytes"] += size
+        report["compressed"] += target.stat().st_size
     return report
 
-
-# ---- the data-root unpacker --------------------------------------------------
 
 UNPACKER_NAME, README_NAME = "unpack_evidence.py", "README.md"
 _UNPACKER = r'''#!/usr/bin/env python3

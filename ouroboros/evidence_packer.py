@@ -1,16 +1,4 @@
-"""The evidence packer: a supervised interpreter the maintenance tick spawns when candidates exist.
-
-Never at boot. The supervisor's reconcile sweep asks ``packer.tick(root, repo_dir)``: the first
-tick after start only arms it; a later tick spawns ``python -m ouroboros.evidence_packer`` the
-way the historical audit is spawned (``spawn_supervised``, ``scope="session"``, its own process
-group, durable custody, parent lifeline) when some task with loose evidence changed since the
-last sweep recorded it, or an uncompressed money archive segment exists. The caller returns at
-once; Stop latches and kills the child; one child at a time. The child packs one settled task
-at a time (``evidence_packs.pack_task``: write, publish, re-read + verify, index, unlink), then
-compresses the money archive, refreshes the data-root unpacker and prints one bounded JSON
-report; the parent records ``storage_pack`` rows in ``logs/supervisor.jsonl`` and one health
-line "packed N/M tasks, X GB -> Y GB".
-"""
+"""Supervised maintenance packer; scheduling and storage protocol: docs/PERSISTENCE.md, evidence pack row."""
 from __future__ import annotations
 
 import argparse
@@ -31,7 +19,6 @@ log = logging.getLogger(__name__)
 _REPORT_BYTES = 4096
 
 
-# ---- candidates --------------------------------------------------------------
 
 def task_stamps(root: pathlib.Path, task_id: str) -> str:
     """Evidence and settlement-source revisions, including owner-held duties and outbox sends."""
@@ -133,7 +120,6 @@ def live_manifest_shas(root: pathlib.Path) -> set:
     return keep
 
 
-# ---- one pass (the child) ----------------------------------------------------
 
 def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
     """Pack every settled candidate one task at a time, then the money archive and the unpacker."""
@@ -176,7 +162,6 @@ def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
     return report
 
 
-# ---- the supervisor side -----------------------------------------------------
 
 class EvidencePacker:
     def __init__(self) -> None:
