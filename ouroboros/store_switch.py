@@ -39,7 +39,6 @@ INTENT_REL = pathlib.Path("state/switch_intent.json")
 RECEIPT_REL = pathlib.Path("state/switch_receipt.json")
 PROGRESS_REL = pathlib.Path("state/switch_progress.json")
 DOORS = ("ui_rollback", "vcs_rollback", "boot_smoke_rollback", "update_replace")
-SPACE_MARGIN = 1.1  # free space needed over the bytes the export writes
 Owner = Callable[[Dict[str, Any]], Tuple[bool, str]]
 
 
@@ -171,13 +170,19 @@ def _roots(root: pathlib.Path) -> Tuple[list, str]:
     return present, ""
 
 
-def _export_bytes(roots: Sequence[pathlib.Path]) -> int:
-    total = 0
+def _largest_result_bytes(roots: Sequence[pathlib.Path]) -> int:
+    """The largest single result file the facts export writes: the atomic rewrite of an existing
+    result needs one temp file at a time, so the export's peak is one file, not the corpus."""
+    largest = 0
     for drive in roots:
         with store.open_store(drive, write=False) as txn:
-            total += int(txn.conn.execute("SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM task_bodies").fetchone()[0])
-            total += int(txn.conn.execute("SELECT COALESCE(SUM(LENGTH(CAST(facts AS BLOB))), 0) FROM obligations").fetchone()[0])
-    return total
+            largest = max(largest, int(txn.conn.execute(
+                "SELECT COALESCE(MAX(LENGTH(CAST(body AS BLOB))), 0) FROM task_bodies").fetchone()[0]))
+    return largest
+
+
+def _handle_restore_bytes(root: pathlib.Path) -> int:
+    return 0  # the packing stage's `evidence_packs.pending_restore_bytes(root)`: the handles' raw bytes the A+ restore writes
 
 
 def _money_refusal(root: pathlib.Path, receipt: Dict[str, Any]) -> str:
@@ -204,18 +209,20 @@ def _sha256_file(path: pathlib.Path) -> Optional[str]:
 
 
 def _preflight(root: pathlib.Path, needs: Dict[str, bool], receipt: Dict[str, Any], roots: Sequence[pathlib.Path]) -> str:
-    required = 0
-    if needs["facts"]:
-        required += _export_bytes(roots)
+    """The exporters' own refusals, then the free space the export needs: the handles' raw bytes
+    the restore writes, the money journal (bounded by the store file) and the largest single
+    result file (one atomic temp file at a time). A real ENOSPC still arrives as ``OSError``."""
+    required = {"handles": _handle_restore_bytes(root) if needs["handles"] else 0,
+                "largest_result": _largest_result_bytes(roots) if needs["facts"] else 0, "money": 0}
     if needs["money"]:
         refusal = _money_refusal(root, receipt)
         if refusal:
             return refusal
         money = root / usage_store.STORE_REL
-        required += money.stat().st_size if money.exists() else 0
+        required["money"] = money.stat().st_size if money.exists() else 0
     free = shutil.disk_usage(root).free
-    if free < required * SPACE_MARGIN:
-        return f"free space {free} below {int(required * SPACE_MARGIN)} bytes the export needs"
+    if free < sum(required.values()):
+        return f"free space {free} below the {sum(required.values())} bytes the export needs ({required})"
     return ""
 
 

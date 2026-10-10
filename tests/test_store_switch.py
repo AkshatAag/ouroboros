@@ -245,8 +245,20 @@ def test_preflight_refusals_move_nothing_and_repeat_honestly(switch_root, target
 
     root, (repo, old, _new) = switch_root, target_repo
     before = state(root)
+    # the space the export needs: 0 handle bytes (before the packing stage) + the money store file
+    # (the journal's bound) + the LARGEST single result file (one atomic temp file at a time), no corpus multiple
+    roots, largest = [root, *drives_of(root)], 0
+    for drive in roots:
+        with store.open_store(drive, write=False) as txn:
+            largest = max([largest, *(len(store.document_text(txn.load(t)).encode("utf-8")) for t in txn.task_ids())])
+    required = largest + (root / usage_store.STORE_REL).stat().st_size
+    usage = namedtuple("usage", "total used free")
+    needs, blank = {"facts": True, "money": True, "handles": True}, {"steps": {}}
     with monkeypatch.context() as patched:
-        patched.setattr(shutil, "disk_usage", lambda path: namedtuple("usage", "total used free")(10, 0, 10))
+        patched.setattr(shutil, "disk_usage", lambda path: usage(required, 0, required))
+        assert store_switch._preflight(root, needs, blank, roots) == ""  # exactly the bytes needed are enough
+        patched.setattr(shutil, "disk_usage", lambda path: usage(required, 0, required - 1))
+        assert str(required) in store_switch._preflight(root, needs, blank, roots)
         intent(root, old)
         report = store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))
     assert report["status"] == "refused" and "free space" in report["reason"]
