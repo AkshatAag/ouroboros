@@ -192,8 +192,9 @@ stands every write hold is refused typed (`UsageExportInProgress`; reads still
 serve), so a late writer cannot land a row the journal does not carry. Only then does it set the
 kept journal aside, write the new one, align the marker and rename the store.
 An interrupted export is resumed from the mark (the journal bytes are
-recomputed and must match the recorded digest; a retired store is recognised by
-the digest in its own mark, never by size) or abandoned by the in-app switch
+recomputed and must match the recorded digest; a partial own journal is told
+from a foreign one by the mark's set-aside record, never by size; a retired
+store is recognised by the digest in its own mark) or abandoned by the in-app switch
 (`usage_store.abandon_export`): the store comes back first, then the journal,
 then the marker, and the mark is cleared last, so a crash inside the
 abandonment resumes it instead of leaving two authorities. Residual: a process

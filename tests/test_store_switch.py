@@ -460,6 +460,66 @@ def test_a_crash_right_after_the_money_store_rename_is_completed_on_resume(switc
     assert money["pre_export_as"] and (root / "state" / money["pre_export_as"]).exists()
 
 
+def partial_journal_write(root):
+    """A ``write_journal`` that dies in the middle: the mark is committed, the kept journal is
+    aside, a partial own journal is on disk, the store is NOT renamed."""
+    from ouroboros import usage_journal
+
+    def write(target, rows):
+        (root / LEDGER_REL).write_bytes(usage_journal.journal_bytes(rows)[:40])
+        raise OSError("disk died in the middle of the journal")
+
+    return write
+
+
+def test_a_crash_before_the_money_store_rename_is_completed_on_resume(switch_root, target_repo, monkeypatch):
+    """A partial own journal (neither the import's digest nor the mark's) is recognised by the
+    mark's set-aside record, rewritten whole, and the retry completes both authorities."""
+    from ouroboros import usage_journal
+
+    root, (repo, old, _new) = switch_root, target_repo
+    journal_before = (root / LEDGER_REL).read_bytes()
+    intent(root, old)
+    with monkeypatch.context() as patched:
+        patched.setattr(usage_journal, "write_journal", partial_journal_write(root))
+        assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "failed"
+    pre_export = list((root / "state").glob("usage_attempts.jsonl.pre-export-*"))
+    assert state(root)["money_store"] is True and len(pre_export) == 1 and pre_export[0].read_bytes() == journal_before
+    assert len((root / LEDGER_REL).read_bytes()) == 40  # the partial own journal
+    with usage_store.read(root) as txn:
+        mark = txn.meta("export")
+    assert mark["status"] == "writing" and mark["pre_export_as"] == pre_export[0].name
+    owner = Owner(repo)
+    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=owner)
+    assert report["status"] == "switched" and len(owner.calls) == 1
+    money = receipt(root)["steps"]["money"]
+    assert money["status"] == "completed" and state(root)["money_store"] is False and len(state(root)["retired_money"]) == 1
+    assert money["journal"]["sha256"] == hashlib.sha256((root / LEDGER_REL).read_bytes()).hexdigest() == mark["journal"]["sha256"]
+    assert pre_export[0].read_bytes() == journal_before  # the import-kept journal was never overwritten by the partial
+    journal_ids = sorted({str(row.get("attempt_id") or "") for row in usage_journal.read_journal_records(root)[0]
+                          if row.get("kind") not in {"usage_baseline", "usage_baseline_group"}} - {""})
+    assert journal_ids == retired_attempt_ids(root) and len(journal_ids) == 2
+
+
+def test_a_crash_before_the_money_store_rename_is_abandoned_cleanly(switch_root, target_repo, monkeypatch):
+    from ouroboros import usage_journal
+
+    root, (repo, old, _new) = switch_root, target_repo
+    before, journal_before = state(root), (root / LEDGER_REL).read_bytes()
+    intent(root, old)
+    with monkeypatch.context() as patched:
+        patched.setattr(usage_journal, "write_journal", partial_journal_write(root))
+        assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "failed"
+    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo), blockers=["packer:7"])
+    assert report["status"] == "refused" and report["restored"]["money"] == {"journal": "restored", "mark": "cleared"}
+    assert state(root) == {**before, "intent": False}
+    assert (root / LEDGER_REL).read_bytes() == journal_before and not list((root / "state").glob("usage_attempts.jsonl.pre-export-*"))
+    with usage_store.hold(root) as txn:
+        assert txn.writable and txn.meta("export") is None and len(txn.attempts()) == 2
+    intent(root, old)
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "switched"
+
+
 def test_a_crash_inside_the_abandonment_after_the_journal_step_resumes_it(switch_root, target_repo, monkeypatch):
     root, (repo, old, _new) = switch_root, target_repo
     journal_before = (root / LEDGER_REL).read_bytes()

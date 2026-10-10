@@ -938,8 +938,9 @@ def _retired_for(root: pathlib.Path, journal_sha256: Optional[str]) -> Optional[
 def export_refusal(root: pathlib.Path | str, *, resume: bool = False) -> str:
     """Why ``export_journal`` would refuse now; ``""`` when it can run (or, ``resume``, complete
     an interrupted run whose rename already landed). A kept journal must be absent, the one the
-    import kept unchanged (the import's recorded digest) or this export's own (the mark's
-    digest); sizes prove nothing."""
+    import kept unchanged (the import's recorded digest) or this export's own: the mark's digest,
+    or a partial write of this export once the mark shows the kept one already set aside
+    (``_own_partial``); sizes prove nothing."""
     root = pathlib.Path(root)
     path, kept = root / STORE_REL, root / LEDGER_REL
     kept_sha = _sha256_file(kept)
@@ -955,11 +956,18 @@ def export_refusal(root: pathlib.Path | str, *, resume: bool = False) -> str:
     if tier is None:
         return f"usage store unreadable: {path}"
     stored = _stored_meta(path, tier, USAGE_LOCK_TIMEOUT_SEC)
-    own = {((stored.get("import") or {}).get("source") or {}).get("sha256"),
-           ((stored.get("export") or {}).get("journal") or {}).get("sha256")}
-    if kept_sha in own:
+    mark = stored.get("export") or {}
+    if kept_sha in {((stored.get("import") or {}).get("source") or {}).get("sha256"), (mark.get("journal") or {}).get("sha256")}:
+        return ""
+    if mark and _own_partial(root, mark):
         return ""
     return f"the money journal changed after the import; move it aside to export: {kept}"
+
+
+def _own_partial(root: pathlib.Path, mark: Dict[str, Any]) -> bool:
+    """Whether a kept journal that matches neither digest is this export's own interrupted write:
+    the mark recorded no journal to set aside, or the one it named is already aside."""
+    return not mark.get("pre_export_as") or (root / LEDGER_REL).with_name(mark["pre_export_as"]).exists()
 
 
 def export_journal(root: pathlib.Path | str, *, resume: bool = False) -> Dict[str, Any]:
@@ -1011,9 +1019,10 @@ def export_journal(root: pathlib.Path | str, *, resume: bool = False) -> Dict[st
         elif hashlib.sha256(payload).hexdigest() != mark["journal"]["sha256"]:
             raise UsageLedgerCorrupt(f"the frozen usage store no longer reproduces its export mark: {path}")
     kept_sha = _sha256_file(kept)
-    if kept_sha is not None and kept_sha != mark["journal"]["sha256"]:  # the import kept it, unchanged: set aside
-        os.replace(kept, kept.with_name(mark.get("pre_export_as") or f"{kept.name}.pre-export-{_utc()}"))
-        kept_sha = None
+    if kept_sha is not None and kept_sha != mark["journal"]["sha256"]:
+        if not _own_partial(root, mark):  # the import kept it, unchanged: set aside, never lost
+            os.replace(kept, kept.with_name(mark["pre_export_as"]))
+        kept_sha = None  # else this export's own interrupted write: rewritten whole below
     if kept_sha is None:
         written = journal.write_journal(root, rows)
         if written["sha256"] != mark["journal"]["sha256"]:
@@ -1073,9 +1082,9 @@ def abandon_export(root: pathlib.Path | str, *, retired_as: Optional[str] = None
         return moved
     kept_sha = _sha256_file(kept)
     pre_export = kept.with_name(mark["pre_export_as"]) if mark.get("pre_export_as") else None
-    if kept_sha in (None, mark["journal"]["sha256"]):  # absent or this export's own: the kept one comes back
+    if kept_sha is None or kept_sha == mark["journal"]["sha256"] or _own_partial(root, mark):  # absent or this export's own
         if pre_export is not None and pre_export.exists():
-            os.replace(pre_export, kept)
+            os.replace(pre_export, kept)  # the kept one comes back over the own, one rename, no window without a journal
             moved["journal"] = "restored"
         elif kept_sha is not None and pre_export is None:
             kept.unlink()  # the import kept none: nothing to put back
