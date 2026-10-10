@@ -130,7 +130,7 @@ def _roots(root: pathlib.Path) -> Tuple[list, str]:
     completed stamp) or not inspectable: a retired drive has nothing left to export, a lost
     one is never «switched» past."""
     present = []
-    for drive in (root, *store_import.child_roots(root)):
+    for drive in (root, *store_import.descendant_drives(root)):
         try:
             state = store.probe(drive)[0]
         except store.StoreError as exc:

@@ -19,7 +19,7 @@ from ouroboros.task_results import task_result_path
 from ouroboros.usage_ledger import LEDGER_REL
 from ouroboros.utils import atomic_write_json
 from tests._usage_store_testing import seed
-from tests.test_store_import import fixture_root, load, meta, result, rows, snapshot
+from tests.test_store_import import drives_of, fixture_root, load, meta, result, rows, snapshot
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -142,9 +142,10 @@ def test_the_seam_exports_consumes_the_intent_retires_the_store_and_only_then_sw
     assert phases == ["preflight", "exporting", "money", "handles", "switching", "switched"]
     assert json.loads((root / store_switch.PROGRESS_REL).read_text(encoding="utf-8"))["phase"] == "switched"
     assert store_switch.resume_pending_switch(root, repo_dir=repo) == {"status": "nothing_pending"}
-    # the child drive's store was retired with the canonical one
-    drive = root / "state" / "headless_tasks" / "root1" / "data"
-    assert store.probe(drive)[0] == "absent" and list((drive / "state").glob("current.sqlite.exported-*"))
+    # the child drive's store and its own child's were retired with the canonical one
+    for drive in drives_of(root):
+        assert store.probe(drive)[0] == "absent" and list((drive / "state").glob("current.sqlite.exported-*"))
+    assert sorted(receipt(root)["retired"]) == sorted(str(d) for d in (root, *drives_of(root)))
 
 
 def test_a_target_with_the_store_switches_without_an_export(switch_root, target_repo):
@@ -319,7 +320,7 @@ def test_the_stamp_is_cleared_before_the_store_is_renamed_aside(switch_root, tar
     assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner())["status"] == "switch_not_performed"
     report = ensure_current_store(root)
     assert report["status"] == "completed" and report["results"] == 3
-    assert report["child_roots"] == {str(root / "state" / "headless_tasks" / "root1" / "data"): "completed"}
+    assert report["drives"] == {str(drive): "completed" for drive in drives_of(root)}
 
 
 def test_a_lost_drive_refuses_the_switch_instead_of_exporting_past_it(switch_root, target_repo):

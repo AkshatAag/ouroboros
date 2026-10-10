@@ -31,8 +31,9 @@ def write_result(root: pathlib.Path, row: dict) -> pathlib.Path:
 
 
 def fixture_root(tmp_path: pathlib.Path) -> pathlib.Path:
-    """Three results (one running with a child drive holding a retry row), two set files,
-    one unstamped file (quarantined at import) and one id-mismatched file (refused)."""
+    """Three results (one running with a child drive holding a retry row, whose own child
+    drive holds a grandchild row), two set files, one unstamped file (quarantined at
+    import) and one id-mismatched file (refused)."""
     root = tmp_path / "data"
     write_result(root, result("root1", "running", parent_task_id=None, root_task_id="root1"))
     write_result(root, result("child1", parent_task_id="root1", root_task_id="root1", delegation_role="child",
@@ -51,7 +52,14 @@ def fixture_root(tmp_path: pathlib.Path) -> pathlib.Path:
     drive = root / "state" / "headless_tasks" / "root1" / "data"
     write_result(drive, result("root1", "completed", retry_task_id="root1-r2"))
     write_result(drive, result("root1-r2", "running"))
+    write_result(drive / "task_drives" / "root1-r2", result("root1-r2-sub", "running", parent_task_id="root1-r2"))
     return root
+
+
+def drives_of(root: pathlib.Path) -> list:
+    """The fixture's child drive and its grandchild drive, parents first."""
+    child = root / "state" / "headless_tasks" / "root1" / "data"
+    return [child, child / "task_drives" / "root1-r2"]
 
 
 def snapshot(root: pathlib.Path) -> dict:
@@ -107,11 +115,13 @@ def test_the_import_publishes_stamps_quarantines_and_covers_child_roots(tmp_path
     assert task_result_path(root, "mismatch", create=False).exists()
     events = rows(root / "logs" / "events.jsonl", "task_results_quarantined")
     assert len(events) == 1 and events[0]["count"] == 1
-    # child roots: their own store by the same code, retry rows included
-    drive = root / "state" / "headless_tasks" / "root1" / "data"
-    assert report["child_roots"] == {str(drive): "completed"}
+    # child drives down the tree: their own store by the same code, retry rows included
+    drive, grandchild = drives_of(root)
+    assert report["drives"] == {str(drive): "completed", str(grandchild): "completed"}
     with store.open_store(drive, write=False) as txn:
         assert txn.task_ids() == ["root1", "root1-r2"]
+    with store.open_store(grandchild, write=False) as txn:
+        assert txn.task_ids() == ["root1-r2-sub"]
     assert [row["phase"] for row in rows(root / "logs" / "supervisor.jsonl", "current_store_import")] == ["completed"]
     # the frozen files are untouched by the import
     after = snapshot(root)

@@ -5,8 +5,8 @@ the sibling build with ``synchronous=FULL``, ``meta`` (provenance, counts, the f
 instant, the per-file content baseline: size, mtime_ns and sha256 of every frozen
 ``task_results/*.json``) written before publication, publish by ``os.replace`` plus a
 directory fsync, the generation stamp after; a published but unstamped store is
-accepted by its own ``meta``; every child root from ``task_custody.own_child_drives``
-gets its own store by the same code; inadmissible rows are quarantined at import
+accepted by its own ``meta``; every own child drive down the tree (``descendant_drives``,
+over ``task_custody.own_child_drives``) gets its own store by the same code; inadmissible rows are quarantined at import
 through the existing emitter; the cancel-latch migration runs as the first pass.
 Reconciliation (a published store found at boot) is per row against the baseline: a
 changed file replaces its row, a deleted file moves its row to quarantine, a new file is
@@ -63,9 +63,8 @@ def supervisor_row(root: pathlib.Path, kind: str, payload: Dict[str, Any]) -> No
         logging.getLogger(__name__).warning("%s row not recorded", kind, exc_info=True)
 
 
-def child_roots(root: Any) -> List[pathlib.Path]:
-    """Every own child drive of every task the root knows (result files and drive directories)."""
-    root = pathlib.Path(root)
+def _own_children(root: pathlib.Path) -> List[pathlib.Path]:
+    """The own child drives of every task ONE root knows (result files and drive directories)."""
     ids = {path.stem for path in task_results_dir(root, create=False).glob("*.json")}
     for base in (root / HEADLESS_TASKS_DIR, root / TASK_DRIVES_DIR):
         if base.is_dir():
@@ -75,6 +74,19 @@ def child_roots(root: Any) -> List[pathlib.Path]:
         with contextlib.suppress(ValueError):
             drives.extend(own_child_drives(root, task_id))
     return drives
+
+
+def descendant_drives(root: Any) -> List[pathlib.Path]:
+    """Every own child drive down the tree (a child's drive names its own children the same
+    way), parents before children: the one walk the import, the switch, the export, the
+    retirement and the recovery all use."""
+    found: List[pathlib.Path] = []
+    pending = [pathlib.Path(root)]
+    while pending:
+        children = _own_children(pending.pop(0))
+        found.extend(children)
+        pending.extend(children)
+    return found
 
 
 def ensure_current_store(root: Any, *, with_children: bool = True) -> Dict[str, Any]:
@@ -92,11 +104,11 @@ def ensure_current_store(root: Any, *, with_children: bool = True) -> Dict[str, 
         report, quarantined = _ensure(root, path)
     emit_quarantine_event(root, quarantined)
     if with_children:
-        report["child_roots"] = {str(drive): ensure_current_store(drive, with_children=False)["status"]
-                                 for drive in child_roots(root)}
+        report["drives"] = {str(drive): ensure_current_store(drive, with_children=False)["status"]
+                            for drive in descendant_drives(root)}
     report["duration_seconds"] = round(time.monotonic() - started, 3)
     supervisor_row(root, "current_store_import", {"phase": report["status"],
-                                                  **{key: value for key, value in report.items() if key != "child_roots"}})
+                                                  **{key: value for key, value in report.items() if key != "drives"}})
     return report
 
 
