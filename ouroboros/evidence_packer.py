@@ -7,16 +7,14 @@ import json
 import logging
 import os
 import pathlib
-import subprocess
-import sys
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros import evidence_packs as packs
+from ouroboros.startup_historical_audit import _REPORT_BYTES, read_job_report, spawn_maintenance_job
 
 log = logging.getLogger(__name__)
-_REPORT_BYTES = 4096
 
 
 
@@ -203,38 +201,17 @@ class EvidencePacker:
             process.kill()  # its own process group: the signal reaches only our child
 
     def _run(self, data_root: pathlib.Path, repo_dir: pathlib.Path) -> None:
-        from ouroboros.config import SETTINGS_PATH
-        from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
-        from ouroboros.process_custody import current_custody_session_id, spawn_supervised
-
         started = time.monotonic()
         try:
             if self._stopped.is_set():
                 return
-            env = {key: os.environ[key] for key in (
-                "PATH", "HOME", "USERPROFILE", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL",
-            ) if key in os.environ}
-            env.update({key: value for key, value in os.environ.items() if key.startswith(CONTAINMENT_ENV_PREFIX)})
-            env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(repo_dir), OUROBOROS_DATA_DIR=str(data_root),
-                       OUROBOROS_REPO_DIR=str(repo_dir), OUROBOROS_SETTINGS_PATH=str(SETTINGS_PATH))
-            process = spawn_supervised(
-                [sys.executable, "-m", "ouroboros.evidence_packer", "--data-root", str(data_root),
-                 "--custody-session", current_custody_session_id()],
-                drive_root=data_root, purpose="evidence_packer", scope="session", cwd=str(repo_dir), env=env,
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            )
+            process = spawn_maintenance_job(data_root, repo_dir, "evidence_packer")
             with self._lock:
                 self._process = process
             if self._stopped.is_set():
                 self._signal(process)
             packs.record_storage_pack(data_root, phase="started", pid=process.pid)
-            try:
-                raw = process.stdout.read(_REPORT_BYTES + 1)
-                if len(raw) > _REPORT_BYTES:
-                    self._signal(process)
-                exit_code = process.wait()
-            finally:
-                process.stdout.close()
+            raw, exit_code = read_job_report(process, self._signal)
             fields = _report_fields(raw)
             phase = ("stopped" if self._stopped.is_set() else "unknown" if not fields
                      else "failed" if exit_code else fields.pop("status", "unknown"))
