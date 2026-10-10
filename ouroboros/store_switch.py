@@ -11,7 +11,8 @@ plus a reason for the owner) -> phase ``exporting`` in every store -> facts
 target lacks ``usage_store.py``), idempotent through the switch receipt -> handles (an
 interface the packing stage fills; «no packs» now) -> fsync -> ``export.status=completed``
 + receipt -> the intent is CONSUMED -> the stores are retired -> the SAME switching owner
-the door used to call runs (``switching_owner``) -> the caller exits 42 or re-execs. A
+the door used to call runs (``switching_owner``, bound to the intent's target and reason;
+HEAD is verified against the target after it returns) -> the caller exits 42 or re-execs. A
 death after the consume and before the switch leaves the new code with a completed export:
 the next boot finds no intent and a retired store, re-imports from the complete export and
 tells the owner the switch did not happen. An unconfirmed stop of a writer refuses the
@@ -106,21 +107,49 @@ def next_engine_pin(repo_dir: Any, target_sha: str):
 
 
 def switching_owner(door: str) -> Owner:
-    """Exactly the call the door makes today, so every rescue, verification and handoff stays."""
+    """Exactly the call the door makes today (every rescue, verification and handoff stays),
+    bound to the intent: the rollback doors carry the intent's reason; the update doors first
+    check that the managed update record they act on names the intent's target and refuse
+    without moving anything otherwise. The seam verifies HEAD after any owner returns."""
     if door in {"ui_rollback", "vcs_rollback"}:
         from supervisor.update_recovery import rollback_to_version
 
-        return lambda intent: rollback_to_version(intent["target_sha"], reason=intent["door"])
+        return lambda intent: rollback_to_version(intent["target_sha"], reason=intent["reason"])
     if door == "boot_smoke_rollback":
-        from supervisor.update_merge import rollback_managed_update
+        from supervisor.update_merge import read_update_tx_strict, rollback_managed_update
 
-        return lambda intent: rollback_managed_update(intent["reason"], reopen_writer_admission=False)
+        def rollback(intent: Dict[str, Any]) -> Tuple[bool, str]:
+            recorded = str(read_update_tx_strict()[1].get("pre_update_sha") or "")
+            return _unbound(recorded, intent, "the managed update transaction rolls back to") or rollback_managed_update(
+                intent["reason"], reopen_writer_admission=False)
+
+        return rollback
     if door == "update_replace":
-        from supervisor.git_ops import BRANCH_DEV
+        from supervisor import git_ops
         from supervisor.git_ops_reset import checkout_and_reset
 
-        return lambda intent: checkout_and_reset(BRANCH_DEV, reason="ui_update_apply", unsynced_policy="rescue_and_reset")
+        def replace(intent: Dict[str, Any]) -> Tuple[bool, str]:
+            recorded = str((git_ops._read_update_intent() or {}).get("target_sha") or "")
+            return _unbound(recorded, intent, "the managed update intent targets") or checkout_and_reset(
+                git_ops.BRANCH_DEV, reason="ui_update_apply", unsynced_policy="rescue_and_reset")
+
+        return replace
     raise ValueError(f"unknown switch door: {door}")
+
+
+def _unbound(recorded: str, intent: Dict[str, Any], what: str) -> Optional[Tuple[bool, str]]:
+    """The refusal when the owner's own record would move HEAD elsewhere than the intent."""
+    if recorded.strip() == intent["target_sha"]:
+        return None
+    return False, (f"{what} {recorded.strip()[:12] or 'nothing'}, not the switch intent's {intent['target_sha'][:12]}; "
+                   "checkout left unchanged")
+
+
+def rev_parse(repo_dir: Any, ref: str) -> str:
+    """The commit ``ref`` names in ``repo_dir``, ``""`` when it names none."""
+    result = subprocess.run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=str(repo_dir), capture_output=True,
+                            text=True, env={**os.environ, "LC_ALL": "C", "LANG": "C"})
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 # ---- preflight, money, abandonment -----------------------------------------------------
@@ -307,7 +336,11 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
     _write_receipt(root, receipt)
     _progress(root, "switching", door=intent["door"], target_sha=intent["target_sha"])
     ok, message = (owner or switching_owner(intent["door"]))(intent)
-    receipt["switched"] = {"ok": bool(ok), "message": str(message), "at": utc_now_iso()}
+    head = rev_parse(repo_dir, "HEAD")
+    if ok and head != (rev_parse(repo_dir, intent["target_sha"]) or intent["target_sha"]):  # the owner's word is not HEAD
+        ok, message = False, f"the switching owner returned but HEAD is {head[:12] or 'unreadable'}, not the target " \
+                             f"{intent['target_sha'][:12]}: {message}"
+    receipt["switched"] = {"ok": bool(ok), "message": str(message), "head": head, "at": utc_now_iso()}
     _write_receipt(root, receipt)
     _progress(root, "switched" if ok else "switch_failed", message=str(message))
     return {"status": "switched" if ok else "switch_failed", "message": str(message), "needs": needs, "exit": 42}

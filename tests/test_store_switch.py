@@ -68,11 +68,15 @@ def intent(root: pathlib.Path, target_sha: str, door: str = "ui_rollback") -> di
 
 
 class Owner:
-    def __init__(self, ok=True):
-        self.calls, self.ok = [], ok
+    """A switching owner that does what the real ones do to the checkout: HEAD lands on the target."""
+
+    def __init__(self, repo, ok=True):
+        self.repo, self.calls, self.ok = repo, [], ok
 
     def __call__(self, intent):
         self.calls.append(intent)
+        if self.ok:
+            git(self.repo, "checkout", "-q", "--detach", intent["target_sha"])
         return self.ok, f"switched to {intent['target_sha'][:8]}"
 
 
@@ -111,11 +115,67 @@ def test_needs_and_the_engine_pin_come_from_the_target_tree(target_repo):
     assert store_switch.next_engine_pin(repo, git(repo, "rev-parse", "HEAD")) is None
 
 
-def test_every_door_resolves_to_its_own_switching_owner():
+def test_every_door_calls_its_own_owner_bound_to_the_intent(target_repo, monkeypatch):
+    """Each door's adapter calls the owner the door calls today, with the intent's target and
+    reason; the update doors refuse, without calling it, when the managed update record
+    they would act on names another commit."""
+    import supervisor.git_ops as git_ops
+    import supervisor.git_ops_reset as git_ops_reset
+    import supervisor.update_merge as update_merge
+    import supervisor.update_recovery as update_recovery
+
+    repo, old, new = target_repo
+    calls: list = []
+    records = {"update_intent": {"target_sha": old}, "tx": {"pre_update_sha": old}}
+
+    def fake(name):
+        def call(*args, **kwargs):
+            calls.append((name, args, kwargs))
+            git(repo, "checkout", "-q", "--detach", old)
+            return True, name
+        return call
+
+    monkeypatch.setattr(update_recovery, "rollback_to_version", fake("rollback_to_version"))
+    monkeypatch.setattr(update_merge, "rollback_managed_update", fake("rollback_managed_update"))
+    monkeypatch.setattr(git_ops_reset, "checkout_and_reset", fake("checkout_and_reset"))
+    monkeypatch.setattr(update_merge, "read_update_tx_strict", lambda: ("valid", records["tx"]))
+    monkeypatch.setattr(git_ops, "_read_update_intent", lambda: records["update_intent"])
+    expected = {
+        "ui_rollback": ("rollback_to_version", (old,), {"reason": "because"}),
+        "vcs_rollback": ("rollback_to_version", (old,), {"reason": "because"}),
+        "boot_smoke_rollback": ("rollback_managed_update", ("because",), {"reopen_writer_admission": False}),
+        "update_replace": ("checkout_and_reset", (git_ops.BRANCH_DEV,),
+                           {"reason": "ui_update_apply", "unsynced_policy": "rescue_and_reset"}),
+    }
     for door in store_switch.DOORS:
-        assert callable(store_switch.switching_owner(door))
+        git(repo, "checkout", "-q", "--detach", new)
+        calls.clear()
+        recorded = {"target_sha": old, "target_ref": "v7.6.0", "reason": "because", "door": door}
+        assert store_switch.switching_owner(door)(recorded) == (True, expected[door][0])
+        assert calls == [expected[door]] and git(repo, "rev-parse", "HEAD") == old
+    # the update doors are bound to the record they act on: another target refuses, nothing is called
+    records["update_intent"], records["tx"] = {"target_sha": new}, {"pre_update_sha": new}
+    for door in ("update_replace", "boot_smoke_rollback"):
+        git(repo, "checkout", "-q", "--detach", new)
+        calls.clear()
+        ok, message = store_switch.switching_owner(door)({"target_sha": old, "reason": "because", "door": door})
+        assert ok is False and new[:12] in message and old[:12] in message and calls == []
+        assert git(repo, "rev-parse", "HEAD") == new
     with pytest.raises(ValueError):
         store_switch.switching_owner("window")
+
+
+def test_the_seam_reports_an_owner_that_returns_without_moving_head(switch_root, target_repo):
+    root, (repo, old, new) = switch_root, target_repo
+    intent(root, old)
+    report = store_switch.run_switch_seam(root, repo_dir=repo, owner=lambda recorded: (True, "said so"))
+    assert report["status"] == "switch_failed" and new[:12] in report["message"] and old[:12] in report["message"]
+    assert receipt(root)["switched"] == {**receipt(root)["switched"], "ok": False, "head": new}
+    assert git(repo, "rev-parse", "HEAD") == new
+    # the failure is reported where it happened (receipt, progress); the current code boots on the complete export
+    assert json.loads((root / store_switch.PROGRESS_REL).read_text(encoding="utf-8"))["phase"] == "switch_failed"
+    assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo)) == {"status": "nothing_pending"}
+    assert ensure_current_store(root)["status"] == "completed" and store.probe(root)[0] == "present"
 
 
 # ---- the seam -----------------------------------------------------------------------------
@@ -128,6 +188,7 @@ def test_the_seam_exports_consumes_the_intent_retires_the_store_and_only_then_sw
 
     def owner(recorded):
         seen.update(state(root), receipt=receipt(root))
+        git(repo, "checkout", "-q", "--detach", recorded["target_sha"])
         return True, "rolled back"
 
     report = store_switch.run_switch_seam(root, repo_dir=repo, owner=owner)
@@ -153,7 +214,7 @@ def test_the_seam_exports_consumes_the_intent_retires_the_store_and_only_then_sw
 def test_a_target_with_the_store_switches_without_an_export(switch_root, target_repo):
     root, (repo, _old, new) = switch_root, target_repo
     intent(root, new)
-    owner = Owner()
+    owner = Owner(repo)
     report = store_switch.run_switch_seam(root, repo_dir=repo, owner=owner)
     assert report["status"] == "switched" and len(owner.calls) == 1
     assert state(root) == {"intent": False, "facts_store": "present", "money_store": True, "journal": True,
@@ -166,7 +227,7 @@ def test_an_unconfirmed_stop_refuses_before_anything_moves(switch_root, target_r
     root, (repo, old, _new) = switch_root, target_repo
     intent(root, old)
     before = state(root)
-    owner = Owner()
+    owner = Owner(repo)
     report = store_switch.run_switch_seam(root, repo_dir=repo, owner=owner, blockers=["worker:4242"])
     assert report["status"] == "refused" and report["reason"] == "quiescence_unconfirmed" and not owner.calls
     assert state(root) == {**before, "intent": False}
@@ -187,14 +248,14 @@ def test_preflight_refusals_move_nothing_and_repeat_honestly(switch_root, target
     with monkeypatch.context() as patched:
         patched.setattr(shutil, "disk_usage", lambda path: namedtuple("usage", "total used free")(10, 0, 10))
         intent(root, old)
-        report = store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())
+        report = store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))
     assert report["status"] == "refused" and "free space" in report["reason"]
     # the money exporter's own refusal: a journal that changed after the import
     with (root / LEDGER_REL).open("ab") as handle:
         handle.write(b'{"appended": "by an older body"}\n')
     for _ in range(2):  # a repeated refusal leaves both authorities exactly as they were
         intent(root, old)
-        report = store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())
+        report = store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))
         assert report["status"] == "refused" and "changed after the import" in report["reason"]
         assert state(root) == {**before, "intent": False} and meta(root, "phase") == store.PUBLISHED
 
@@ -208,12 +269,12 @@ def test_a_crash_before_the_journal_is_written_resumes_cleanly(switch_root, targ
     intent(root, old)
     real = usage_journal.write_journal
     monkeypatch.setattr(usage_journal, "write_journal", lambda *a, **k: (_ for _ in ()).throw(OSError("disk went away")))
-    report = store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())
+    report = store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))
     assert report["status"] == "failed" and report["attempt"] == 1
     assert state(root)["money_store"] is True and (root / store_switch.INTENT_REL).exists()
     assert meta(root, "phase") == store.EXPORTING and receipt(root)["steps"]["money"]["status"] == "started"
     monkeypatch.setattr(usage_journal, "write_journal", real)
-    owner = Owner()
+    owner = Owner(repo)
     report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=owner)
     assert report["status"] == "switched" and len(owner.calls) == 1
     assert state(root)["money_store"] is False and state(root)["journal"] is True
@@ -230,10 +291,10 @@ def test_a_crash_after_the_journal_before_the_store_rename_recognises_its_own_jo
         return real_replace(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(os, "replace", refuse_store_rename)
-    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "failed"
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "failed"
     assert state(root)["money_store"] is True and state(root)["journal"] is True  # our own journal, store still here
     monkeypatch.setattr(os, "replace", real_replace)
-    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner())
+    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo))
     assert report["status"] == "switched"
     assert state(root)["money_store"] is False and len(state(root)["retired_money"]) == 1
     assert receipt(root)["steps"]["money"]["journal"]["size"] == (root / LEDGER_REL).stat().st_size
@@ -242,7 +303,7 @@ def test_a_crash_after_the_journal_before_the_store_rename_recognises_its_own_jo
 def test_a_crash_after_the_store_rename_before_the_receipt_completes_from_the_facts(switch_root, target_repo):
     root, (repo, old, _new) = switch_root, target_repo
     intent(root, old)
-    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "switched"
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "switched"
     # the receipt the crash never wrote: money started, export open, intent still recorded
     kept = receipt(root)
     kept["steps"]["money"] = {"status": "started"}
@@ -250,7 +311,7 @@ def test_a_crash_after_the_store_rename_before_the_receipt_completes_from_the_fa
     kept.pop("switched")
     atomic_write_json(root / store_switch.RECEIPT_REL, kept)
     atomic_write_json(root / store_switch.INTENT_REL, kept["intent"])
-    owner = Owner()
+    owner = Owner(repo)
     report = store_switch.run_switch_seam(root, repo_dir=repo, owner=owner)
     assert report["status"] == "switched" and len(owner.calls) == 1
     money = receipt(root)["steps"]["money"]
@@ -266,12 +327,12 @@ def test_abandonment_after_a_partial_export_restores_both_authorities(switch_roo
     def handles_fail(_root):
         raise OSError("the handle restore died")
 
-    report = store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(), restore_handles=handles_fail)
+    report = store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo), restore_handles=handles_fail)
     assert report["status"] == "failed"
     assert state(root)["money_store"] is False and meta(root, "phase") == store.EXPORTING  # money exported, facts open
     assert (root / LEDGER_REL).read_bytes() != journal_before  # the export's own journal is in place
     assert json.loads((root / "state" / "state.json").read_text(encoding="utf-8"))["usage_ledger_high_water_seq"] != [0, 40]
-    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(), blockers=["packer:7"])
+    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo), blockers=["packer:7"])
     assert report["status"] == "refused"
     assert report["restored"]["money"] == {"store": "restored", "journal": "restored", "state_marker": "restored",
                                            "mark": "cleared"}
@@ -287,7 +348,7 @@ def test_abandonment_after_a_partial_export_restores_both_authorities(switch_roo
     assert store.update_task(root, "done1", lambda current: {**current, "after": "abandonment"})["after"] == "abandonment"
     assert receipt(root)["abandonment"]["status"] == "completed"
     intent(root, old)  # a new switch works after the abandonment
-    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "switched"
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "switched"
 
 
 def test_abandonment_after_a_partial_facts_export_keeps_the_db_only_rows(switch_root, target_repo, monkeypatch):
@@ -312,10 +373,10 @@ def test_abandonment_after_a_partial_facts_export_keeps_the_db_only_rows(switch_
         return real(path, text, **kwargs)
 
     monkeypatch.setattr(store_import, "write_text_atomic", dies_on_the_second_file)
-    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "failed"
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "failed"
     monkeypatch.setattr(store_import, "write_text_atomic", real)
     assert [p.name for p in calls] == ["done1.json", "root1.json"] and meta(root, "phase") == store.EXPORTING
-    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(), blockers=["worker:1"])
+    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo), blockers=["worker:1"])
     assert report["status"] == "refused" and report["restored"]["facts"] == [str(d) for d in (root, *drives_of(root))]
     boot = ensure_current_store(root)
     with store.open_store(root, write=False) as txn:
@@ -325,7 +386,7 @@ def test_abandonment_after_a_partial_facts_export_keeps_the_db_only_rows(switch_
     assert "db_era" not in task_result_path(root, "root1").read_text(encoding="utf-8")  # the stale file stays stale
     # adopted: done1 (written) and child1 (already identical); root1's stale file matches nothing
     assert meta(root, "export") == {**meta(root, "export"), "status": "abandoned", "adopted": 2, "planned": 3}
-    assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner()) == {"status": "nothing_pending"}
+    assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo)) == {"status": "nothing_pending"}
 
 
 def retired_attempt_ids(root: pathlib.Path) -> list:
@@ -355,7 +416,7 @@ def test_a_money_write_during_the_export_window_is_refused_typed(switch_root, ta
         return real(target, rows)
 
     monkeypatch.setattr(usage_journal, "write_journal", late_writer_then_write)
-    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "switched"
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "switched"
     assert refused == [2]  # the late writer's DELETE never committed
     journal_ids = sorted({str(row.get("attempt_id") or "") for row in usage_journal.read_journal_records(root)[0]
                           if row.get("kind") not in {"usage_baseline", "usage_baseline_group"}} - {""})
@@ -374,11 +435,11 @@ def test_a_crash_right_after_the_money_store_rename_is_completed_on_resume(switc
 
     monkeypatch.setattr(os, "replace", die_after_the_rename)
     with pytest.raises(KeyboardInterrupt):
-        store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())
+        store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))
     monkeypatch.setattr(os, "replace", real_replace)
     assert state(root)["money_store"] is False and state(root)["journal"] is True
     assert receipt(root)["steps"]["money"]["status"] == "started"  # the receipt never saw the completion
-    owner = Owner()
+    owner = Owner(repo)
     report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=owner)
     assert report["status"] == "switched" and len(owner.calls) == 1
     money = receipt(root)["steps"]["money"]
@@ -395,7 +456,7 @@ def test_a_crash_inside_the_abandonment_after_the_journal_step_resumes_it(switch
     def handles_fail(_root):
         raise OSError("the handle restore died")
 
-    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(), restore_handles=handles_fail)["status"] == "failed"
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo), restore_handles=handles_fail)["status"] == "failed"
     real_replace = os.replace
 
     def die_after_the_journal_comes_back(src, dst, *args, **kwargs):
@@ -405,7 +466,7 @@ def test_a_crash_inside_the_abandonment_after_the_journal_step_resumes_it(switch
 
     monkeypatch.setattr(os, "replace", die_after_the_journal_comes_back)
     with pytest.raises(KeyboardInterrupt):
-        store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(), blockers=["packer:7"])
+        store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo), blockers=["packer:7"])
     monkeypatch.setattr(os, "replace", real_replace)
     # the store is back and the journal is back, but the mark still freezes the store and the intent is in place
     assert state(root)["money_store"] is True and (root / LEDGER_REL).read_bytes() == journal_before
@@ -413,7 +474,7 @@ def test_a_crash_inside_the_abandonment_after_the_journal_step_resumes_it(switch
     with pytest.raises(usage_store.UsageExportInProgress):
         with usage_store.hold(root):
             pass
-    owner = Owner()
+    owner = Owner(repo)
     report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=owner)  # the next boot finishes it
     assert report["status"] == "refused" and report["reason"] == "abandonment_resumed" and not owner.calls
     assert report["restored"]["money"] == {"mark": "cleared"} and receipt(root)["abandonment"]["status"] == "completed"
@@ -421,7 +482,7 @@ def test_a_crash_inside_the_abandonment_after_the_journal_step_resumes_it(switch
     with usage_store.hold(root) as txn:
         assert txn.meta("export") is None and len(txn.attempts()) == 2
     intent(root, old)  # a new switch works after the abandonment
-    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "switched"
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "switched"
 
 
 def test_a_second_failure_of_the_same_intent_is_a_refusal_never_a_loop(switch_root, target_repo):
@@ -432,9 +493,9 @@ def test_a_second_failure_of_the_same_intent_is_a_refusal_never_a_loop(switch_ro
         raise OSError("still failing")
 
     for attempt in (1, 2):
-        report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(), restore_handles=handles_fail)
+        report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo), restore_handles=handles_fail)
         assert report == {"status": "failed", "error": "OSError: still failing", "attempt": attempt}
-    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(), restore_handles=handles_fail)
+    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo), restore_handles=handles_fail)
     assert report["status"] == "refused" and report["reason"] == "second_failure"
     assert not (root / store_switch.INTENT_REL).exists() and meta(root, "phase") == store.PUBLISHED
     assert state(root)["money_store"] is True and store.probe(root)[0] == "present"
@@ -456,12 +517,12 @@ def test_the_stamp_is_cleared_before_the_store_is_renamed_aside(switch_root, tar
 
     monkeypatch.setattr(os, "replace", die_after_the_rename)
     with pytest.raises(KeyboardInterrupt):
-        store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())
+        store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))
     monkeypatch.setattr(os, "replace", real_replace)
     assert store.probe(root)[0] == "absent" and not store.generation_stamped(root)
     with pytest.raises(store.StoreRetired):  # typed for a straggler until the next import
         store.update_task(root, "done1", lambda current: current)
-    assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner())["status"] == "switch_not_performed"
+    assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo))["status"] == "switch_not_performed"
     report = ensure_current_store(root)
     assert report["status"] == "completed" and report["results"] == 3
     assert report["drives"] == {str(drive): "completed" for drive in drives_of(root)}
@@ -472,7 +533,7 @@ def test_a_lost_drive_refuses_the_switch_instead_of_exporting_past_it(switch_roo
     drive = root / "state" / "headless_tasks" / "root1" / "data"
     store.store_path(root).unlink()  # the canonical store lost beside its completed stamp
     intent(root, old)
-    owner = Owner()
+    owner = Owner(repo)
     report = store_switch.run_switch_seam(root, repo_dir=repo, owner=owner)
     assert report["status"] == "refused" and "lost" in report["reason"] and not owner.calls
     assert store.probe(drive)[0] == "present" and meta(drive, "phase") == store.PUBLISHED  # never exported nor retired
@@ -493,24 +554,24 @@ def test_a_death_after_the_consume_and_before_the_switch_keeps_the_new_code_and_
         store_switch.run_switch_seam(root, repo_dir=repo, owner=dies)
     assert not (root / store_switch.INTENT_REL).exists() and store.probe(root)[0] == "absent"
     # the next boot: no intent, a retired store, a complete export -> re-import, nothing lost, the owner told
-    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner())
+    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo))
     assert report["status"] == "switch_not_performed"
     assert ensure_current_store(root)["status"] == "completed"
     assert sorted(load(root, tid)["task_id"] for tid in ("root1", "child1", "done1")) == ["child1", "done1", "root1"]
     usage_store.migrate_from_journal(root)  # money re-imports its own export
     with usage_store.read(root) as txn:
         assert len(txn.attempts()) == 2
-    assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner()) == {"status": "nothing_pending"}
+    assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo)) == {"status": "nothing_pending"}
     # pressing the door again runs the whole chain
     usage_store.forget(root)
     intent(root, old)
-    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "switched"
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "switched"
 
 
 def test_the_old_body_runs_and_the_new_body_rebuilds_from_the_complete_export(switch_root, target_repo):
     root, (repo, old, _new) = switch_root, target_repo
     intent(root, old)
-    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "switched"
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "switched"
     # the old body: a new task, a deleted one, a changed one, money appended to the journal
     atomic_write_json(task_result_path(root, "by-old"), result("by-old"))
     task_result_path(root, "done1").unlink()
@@ -521,7 +582,7 @@ def test_the_old_body_runs_and_the_new_body_rebuilds_from_the_complete_export(sw
     assert report["status"] == "completed" and report["results"] == 3
     assert load(root, "by-old")["status"] == "completed" and load(root, "done1") is None
     assert load(root, "child1")["old_body"] is True
-    assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner()) == {"status": "nothing_pending"}
+    assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(repo)) == {"status": "nothing_pending"}
 
 
 def test_a_death_inside_the_facts_export_resumes_from_the_intent(switch_root, target_repo, monkeypatch):
@@ -539,9 +600,9 @@ def test_a_death_inside_the_facts_export_resumes_from_the_intent(switch_root, ta
         return real(drive)
 
     monkeypatch.setattr(store_import, "export_facts", dies_once)
-    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "failed"
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "failed"
     assert (root / store_switch.INTENT_REL).exists() and meta(root, "phase") == store.EXPORTING
     assert ensure_current_store(root, with_children=False)["status"] == "switch_pending"  # the importer leaves it
-    owner = Owner()
+    owner = Owner(repo)
     assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=owner)["status"] == "switched"
     assert len(owner.calls) == 1 and receipt(root)["attempts"] == 2
