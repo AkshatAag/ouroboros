@@ -208,14 +208,11 @@ class EvidencePacker:
             self._thread.start()
         return True
 
-    def stop(self, join_sec: float = 5.0) -> None:
+    def stop(self) -> None:
         self._stopped.set()
-        with self._lock:
-            process, thread = self._process, self._thread
+        process = self._process
         if process is not None:
             self._signal(process)
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(join_sec)
 
     @staticmethod
     def _signal(process) -> None:
@@ -229,6 +226,8 @@ class EvidencePacker:
 
         started = time.monotonic()
         try:
+            if self._stopped.is_set():
+                return
             env = {key: os.environ[key] for key in (
                 "PATH", "HOME", "USERPROFILE", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL",
             ) if key in os.environ}

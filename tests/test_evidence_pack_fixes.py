@@ -353,3 +353,37 @@ def test_compression_is_outside_result_and_publication_locks(root, monkeypatch):
 
     monkeypatch.setattr(packs, "write_pack", compress)
     assert packer.run_pass(root)["faults"] == 0
+
+
+def test_stop_latches_and_signals_without_waiting_for_candidate_walk(root, monkeypatch):
+    import threading
+    from tests.test_evidence_packs import REPO, _FakeChild
+    from ouroboros import process_custody
+
+    entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
+    unit, child = packer.EvidencePacker(), _FakeChild(b"")
+    unit._process = child
+    unit.tick(root, REPO)
+
+    def walk(_):
+        entered.set()
+        assert release.wait(5)
+        return ["candidate"]
+
+    monkeypatch.setattr(packer, "changed_tasks", walk)
+    monkeypatch.setattr(process_custody, "spawn_supervised", lambda *a, **k: pytest.fail("spawned after Stop"))
+    tick = threading.Thread(target=unit.tick, args=(root, REPO))
+    stop = threading.Thread(target=lambda: (unit.stop(), stopped.set()))
+    tick.start()
+    try:
+        assert entered.wait(2)
+        stop.start()
+        assert stopped.wait(0.3), "Stop waited for the mutex held by the disk walk"
+        assert child.killed.is_set() and unit._stopped.is_set()
+    finally:
+        release.set()
+        tick.join(3)
+        stop.join(3)
+        if unit._thread is not None:
+            unit._thread.join(3)
+    assert not tick.is_alive() and not stop.is_alive()
