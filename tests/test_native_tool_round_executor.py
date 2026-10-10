@@ -387,8 +387,10 @@ def test_multi_call_round_withholds_reads_once_the_room_is_spent(subject_repo, m
     whole returned message (marker included) fits the room, and a call with no
     room left is WITHHELD — not executed — with a typed marker."""
     monkeypatch.setenv("OUROBOROS_REVIEW_NATIVE_MAX_TRANSCRIPT_CHARS", "50000")
+    # Sized with ~2k chars of margin after the measured first send (brief plus
+    # inspection tool schemas), so a schema description edit cannot flip the scenario.
     for name in ("a", "b", "c"):
-        (subject_repo / f"{name}.txt").write_text(name * 30_000, encoding="utf-8")
+        (subject_repo / f"{name}.txt").write_text(name * 28_000, encoding="utf-8")
     llm = _ScriptedLLM([
         {"tool_calls": [
             _tool_call("read_file", {"path": "a.txt"}, "c1"),

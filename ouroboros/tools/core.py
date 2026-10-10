@@ -1296,10 +1296,15 @@ def get_tools() -> List[ToolEntry]:
                 "start_line": {"type": "integer", "default": 1,
                                "description": "1-indexed line to start reading from (default 1 = beginning)."},
                 "start_char": {"type": "integer", "default": 0,
-                               "description": "Source-character cursor: skip this many characters of the selected "
-                                              "source window before adding display line numbers. Use it to advance WITHIN a single "
-                                              "line longer than the delivery limit (the result would "
-                                              "otherwise be cut at the tool-result budget)."},
+                               "description": "Source-character cursor: skip this many characters (Unicode code points) "
+                                              "of the selected source window before adding display line numbers. Use it "
+                                              "to advance WITHIN a single line longer than what one turn can hold; a "
+                                              "partial result view names the exact start_char of its omitted range."},
+                "max_chars": {"type": "integer", "minimum": 1,
+                              "description": "Exact source-character budget for THIS view of the selected window, counted "
+                                             "after start_char; display line numbers are not counted. Choose the piece instead "
+                                             "of having the result cut from outside; the header names the next start_char. "
+                                             "Omit for the whole window."},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
             }, "required": ["path"]},

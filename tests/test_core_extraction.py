@@ -131,11 +131,17 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # for same-tree mail: the forward_to_worker description names its peer addressees
     # as any other task in the caller's tree (parent, sibling, any task sharing the
     # root) and says Presence observation gaps are disclosed inside the tree too.
-    # Rolled for the owner-approved edit/read package: numbered read views,
-    # explicit omitted-root semantics and ordered same-file edit_text replacements;
-    # editor calls run in call order and `force` confirms only an intentional shrink.
+    # Rolled again for source-addressed delivery (owner Q4): read_file gains the
+    # additive `max_chars` view budget (an exact piece of one window after start_char,
+    # the header naming the next cursor) and start_char's description names the
+    # code-point basis and the partial-view address; no parameter changed type,
+    # default or required status. Rolled for the owner-approved edit/read package:
+    # numbered read views (both cursors count source characters, never display
+    # numbers), explicit omitted-root semantics and ordered same-file edit_text
+    # replacements; editor calls run in call order and `force` confirms only an
+    # intentional shrink.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "89c37d63e2dc714c52c340bf332b92613c6bd04cfa2d899788bc212fc1505b54"
+        "e1093d0a47f57a73ac033524ae3c55c365c1d6646504db0e73a8f5d2ada461eb"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

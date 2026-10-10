@@ -67,7 +67,7 @@ A host fact about a task is a row of that task's card, never a standalone bubble
 
 `project_handoff.py` owes a Main transfer receipt through the terminal outbox after durable binding. `handoff_id` binds the captured ingress message and Project: technical retries share a receipt, independent requests do not. `RECEIPT_STATES` separates binding from receipt durability; `durable`/`already_delivered` prove the Main row owed/delivered, `origin_unproven` writes none, and other states name a gap. Main is never a default destination. `POST /api/projects/from-task` returns `handoff_receipt` and `handoff_id`; a non-durable result warns on the card without inventing history.
 
-`project_handoff.js` renders creation and transfer in one compact style while preserving their distinct durable event identities. Structured `task_name` follows the work through producers, bus and history; folding cannot lend another task its outcome. `task_phase_chip.censusTaskPhase` and `paintTaskPhase` share outcome and motion with task cards and Project summaries (DESIGN "Project work entries"). Only explicit technical retry follows the same work; owner Continue is a new root, and reconnect must re-prove activity.
+`project_handoff.js` owns creation/transfer layout, live and replayed, with `formatMsgTime` and chat copy controls. Folding supplies the matching receipt time; anchors and task outcomes stay separate. Structured `task_name` follows producers, bus and history. `task_phase_chip.censusTaskPhase`/`paintTaskPhase` share outcome and motion with tasks and Project summaries (DESIGN "Project work entries"). Only explicit technical retry follows work; owner Continue starts a new root, and reconnect must re-prove activity.
 
 #### Composer, attachments and delivered media
 
@@ -193,7 +193,7 @@ Desktop onboarding and the blocking web overlay are the same served `/onboarding
 
 #### Agent accounts
 
-Accounts projects the owned daemon without exposing tokens/credentials. Vendor-live and local verification differ; missing quota is not logout. Percentages/exhaustion need fresh windows and future resets. Independent catalog/accounts/quota `reads` preserve successful siblings (§1); saved stop cause and heap use/limit/headroom cause no automatic action.
+Accounts projects the owned daemon without exposing tokens/credentials. Vendor-live and local verification differ; missing quota is not logout. Percentages/exhaustion need fresh windows and future resets. Independent catalog/accounts/quota `reads` preserve successful siblings (§1); concurrent requests share one read; an unanswered facet serves its last read as stale, with its own `facets` time and error; saved stop cause and heap use/limit/headroom cause no automatic action.
 
 Family cards show routable accounts, `accountPools` “Next up” and Add. `get:account-pools` enables named rows, including `<harness>-default`, with Enabled/Remove; legacy or unreadable catalogs retain pseudo-rows. `not_run` is unknown; unknown availability offers Refresh. Removal preserves refusal and vendor-retained/unchanged credential warnings, never false logout.
 
