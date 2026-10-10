@@ -132,7 +132,10 @@ def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap):
             value = txn.load(identity)
         raw = _canonical(value)
         return raw, value, True, False, len(raw)
-    path = _path(ctx, root, _FILES[kind].format(id=identity, child=child, state_file=state_file))
+    relative = _FILES[kind].format(id=identity, child=child, state_file=state_file)
+    if kind == "run" and root.parts[-2:] == ("task_drives", child):
+        relative = f"delegated_runs/{identity}.json"
+    path = _path(ctx, root, relative)
     if op == "jsonl":
         raw, value, partial, consumed = _jsonl(path, where, tail, cap)
         return raw, value, False, partial, consumed

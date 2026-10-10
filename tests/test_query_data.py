@@ -203,6 +203,22 @@ def test_owned_child_grandchild_and_nonowned_drive(ctx):
     assert call(child_ctx, op="json", kind="task_result", ids=["caller"], select="result")["data"] == "first"
 
 
+def test_shared_drive_run_uses_the_delegate_writer_location(ctx):
+    from ouroboros.delegate_output import _stage_full_output
+    from ouroboros.task_custody import HEADLESS_TASKS_DIR
+
+    store.update_task(ctx.drive_root, "child", lambda _: {"parent_task_id": "caller", "status": "completed"})
+    child_ctx = ToolContext(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root, task_id="child")
+    raw = '{ "primary_output": {"text": "shared child output"} }\n'
+    staged = _stage_full_output(child_ctx, "run-one", raw)
+    path = ctx.drive_root / "task_drives" / "child" / "delegated_runs" / "run-one.json"
+    assert staged["abs_path"] == str(path) and path.read_bytes() == raw.encode("utf-8")
+    assert not (ctx.drive_root / HEADLESS_TASKS_DIR / "child").exists()
+    result = call(ctx, op="json", kind="run", child_task_id="child", ids=["run-one"], save_as="shared-run.json")
+    assert result["status"] == "ok", result
+    assert saved(ctx, result) == raw.encode("utf-8")
+
+
 @pytest.mark.parametrize("identity", ["../caller", "/tmp/caller", "a/b", "a\\b", "..", "C:caller"])
 def test_names_refuse_paths(ctx, identity):
     assert call(ctx, op="json", kind="task_result", ids=[identity])["status"] == "error"
