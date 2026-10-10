@@ -1,3 +1,4 @@
+from tests._shared import write_queue_document
 import json
 import pathlib
 import threading
@@ -212,12 +213,9 @@ def test_natural_completion_wins_a_late_cancel(tmp_path, monkeypatch):
         is_workspace_mode=lambda: False,
     )
 
-    from ouroboros.utils import atomic_write_json, utc_now_iso
+    from ouroboros.utils import utc_now_iso
 
-    atomic_write_json(
-        tmp_path / "state" / "queue_snapshot.json",
-        {"ts": utc_now_iso(), "running": [], "pending": []},
-    )
+    write_queue_document(tmp_path / "state" / "queue_snapshot.json", {"ts": utc_now_iso(), "running": [], "pending": []})
     assert "Nothing to cancel" in _cancel_task(ctx, "fast-child")
     assert active_intent(tmp_path, "fast-child") is None
     monkeypatch.setattr(queue_module, "DRIVE_ROOT", tmp_path)
@@ -1345,7 +1343,6 @@ def test_wait_surfaces_preentry_beacon_before_terminal_fast_path(tmp_path, monke
 
 
 def test_wait_for_tasks_flags_unknown_ids_and_attaches_children_roster(tmp_path):
-    import json as _json
 
     from ouroboros.task_results import STATUS_COMPLETED, write_task_result
     from ouroboros.tools.control import _wait_for_tasks
@@ -1355,9 +1352,7 @@ def test_wait_for_tasks_flags_unknown_ids_and_attaches_children_roster(tmp_path)
     # unreadable surface), so the unknown verdict needs all surfaces present.
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "queue_snapshot.json").write_text(
-        _json.dumps({"pending": [], "running": []}), encoding="utf-8"
-    )
+    write_queue_document(state_dir / "queue_snapshot.json", {"pending": [], "running": []})
     write_task_result(
         tmp_path,
         "realchild1",
@@ -1437,7 +1432,6 @@ def test_children_roster_projection_discloses_the_capped_tail(tmp_path):
 def test_wait_for_tasks_phantom_only_set_short_circuits_the_window(tmp_path, monkeypatch):
     """A wait set in which NOTHING was ever minted ends after the registration
     grace instead of blocking the whole requested window — and says so."""
-    import json as _json
 
     from ouroboros.tools import control
     # The wait internals live in the extracted owner leaf (v7 D07 split):
@@ -1447,9 +1441,7 @@ def test_wait_for_tasks_phantom_only_set_short_circuits_the_window(tmp_path, mon
 
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "queue_snapshot.json").write_text(
-        _json.dumps({"pending": [], "running": []}), encoding="utf-8"
-    )
+    write_queue_document(state_dir / "queue_snapshot.json", {"pending": [], "running": []})
     monkeypatch.setattr(control_task_results, "_UNMINTED_WAIT_GRACE_SEC", 0.1)
 
     ctx = SimpleNamespace(drive_root=tmp_path, task_id="waitparent3", task_metadata={})
@@ -1470,7 +1462,6 @@ def test_wait_for_tasks_phantom_only_set_short_circuits_the_window(tmp_path, mon
 def test_wait_for_tasks_id_minted_during_grace_keeps_waiting(tmp_path, monkeypatch):
     """The grace is for the registration race: an id that becomes real during it
     is a genuine child, so the wait resumes with the remaining window."""
-    import json as _json
 
     from ouroboros.task_results import STATUS_COMPLETED, write_task_result
     from ouroboros.tools import control
@@ -1481,9 +1472,7 @@ def test_wait_for_tasks_id_minted_during_grace_keeps_waiting(tmp_path, monkeypat
 
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "queue_snapshot.json").write_text(
-        _json.dumps({"pending": [], "running": []}), encoding="utf-8"
-    )
+    write_queue_document(state_dir / "queue_snapshot.json", {"pending": [], "running": []})
     monkeypatch.setattr(control_task_results, "_UNMINTED_WAIT_GRACE_SEC", 0.1)
 
     real_calls = {"n": 0}
@@ -1513,14 +1502,13 @@ def test_wait_for_tasks_queue_scheduled_id_is_not_unknown(tmp_path):
     """An id with a queue-snapshot row but no task result yet is a REAL child
     (just-scheduled), never a phantom — and without unknowns the roster is not
     attached (the compact batch stays compact, v6.71.2)."""
-    import json as _json
 
     from ouroboros.tools.control import _wait_for_tasks
 
     snapshot = {"pending": [{"id": "queuedonly1", "task": {}}], "running": []}
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "queue_snapshot.json").write_text(_json.dumps(snapshot), encoding="utf-8")
+    write_queue_document(state_dir / "queue_snapshot.json", snapshot)
 
     ctx = SimpleNamespace(drive_root=tmp_path, task_id="waitparent2", task_metadata={})
     payload = json.loads(_wait_for_tasks(ctx, ["queuedonly1"], timeout_sec=0))
@@ -1633,10 +1621,7 @@ def test_effective_status_repairs_stale_running_infra_failure_when_queue_empty(t
         },
     )
     (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "queue_snapshot.json").write_text(
-        '{"ts": "2027-01-15T08:00:00+00:00", "pending": [], "running": []}',
-        encoding="utf-8",
-    )
+    write_queue_document(tmp_path / "state" / "queue_snapshot.json", {'ts': '2027-01-15T08:00:00+00:00', 'pending': [], 'running': []})
 
     effective = load_effective_task_result(tmp_path, "providerfail")
 
@@ -1689,10 +1674,7 @@ def test_effective_status_repairs_orphan_running_after_worker_restart(tmp_path, 
         },
     )
     (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "queue_snapshot.json").write_text(
-        '{"ts": "2027-01-15T08:00:00+00:00", "pending": [], "running": []}',
-        encoding="utf-8",
-    )
+    write_queue_document(tmp_path / "state" / "queue_snapshot.json", {'ts': '2027-01-15T08:00:00+00:00', 'pending': [], 'running': []})
     events = tmp_path / "logs" / "events.jsonl"
     append_jsonl(events, {"ts": "2026-05-28T00:00:01+00:00", "type": "llm_round", "task_id": "cc4db6fa"})
     append_jsonl(events, {"ts": "2026-05-28T00:00:02+00:00", "type": "worker_boot"})
@@ -1728,10 +1710,7 @@ def test_reconcile_durably_finalizes_orphaned_running_task(tmp_path, monkeypatch
         result="Task is running.", ts="2026-05-28T00:00:00+00:00",
     )
     (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "queue_snapshot.json").write_text(
-        '{"ts": "2027-01-15T08:00:00+00:00", "pending": [], "running": []}',
-        encoding="utf-8",
-    )
+    write_queue_document(tmp_path / "state" / "queue_snapshot.json", {'ts': '2027-01-15T08:00:00+00:00', 'pending': [], 'running': []})
     events = tmp_path / "logs" / "events.jsonl"
     append_jsonl(events, {"ts": "2026-05-28T00:00:01+00:00", "type": "llm_round", "task_id": "orphan1"})
     append_jsonl(events, {"ts": "2026-05-28T00:00:02+00:00", "type": "worker_boot"})
@@ -1759,7 +1738,7 @@ def test_best_effort_outcome_is_not_a_terminal_failure(tmp_path):
         },
     )
     (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
+    write_queue_document(tmp_path / "state" / "queue_snapshot.json", {'pending': [], 'running': []})
 
     effective = load_effective_task_result(tmp_path, "besteffort1")
 
@@ -1811,7 +1790,7 @@ def test_find_child_tasks_does_not_regress_terminal_or_running_from_stale_queue_
         "running": [],
     }
     (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "queue_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    write_queue_document(tmp_path / "state" / "queue_snapshot.json", snapshot)
 
     effective_done = load_effective_task_result(tmp_path, "childdone")
     effective_running = load_effective_task_result(tmp_path, "childrun")
@@ -1863,7 +1842,7 @@ def test_effective_status_preserves_parent_retry_status_over_stale_child_running
         ],
         "running": [],
     }
-    (tmp_path / "state" / "queue_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    write_queue_document(tmp_path / "state" / "queue_snapshot.json", snapshot)
 
     effective = load_effective_task_result(tmp_path, "childretry")
 
@@ -3199,9 +3178,7 @@ def _orphan_shaped_running_task(tmp_path, task_id, *, snapshot_ts):
         result="Task is running.", ts="2026-05-28T00:00:00+00:00",
     )
     (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "queue_snapshot.json").write_text(
-        json.dumps({"ts": snapshot_ts, "pending": [], "running": []}), encoding="utf-8",
-    )
+    write_queue_document(tmp_path / "state" / "queue_snapshot.json", {"ts": snapshot_ts, "pending": [], "running": []})
     events = tmp_path / "logs" / "events.jsonl"
     append_jsonl(events, {"ts": "2026-05-28T00:00:01+00:00", "type": "llm_round", "task_id": task_id})
     append_jsonl(events, {"ts": "2026-05-28T00:00:02+00:00", "type": "worker_boot"})
@@ -3253,10 +3230,7 @@ def test_orphan_reconcile_does_not_use_a_stale_snapshot_as_death_proof(tmp_path,
     assert reconcile_orphaned_running_tasks(tmp_path) == 0
     assert load_task_result(tmp_path, "pooled-live")["status"] == STATUS_RUNNING
 
-    (tmp_path / "state" / "queue_snapshot.json").write_text(
-        json.dumps({"ts": "2027-01-15T08:00:00+00:00", "pending": [], "running": []}),
-        encoding="utf-8",
-    )
+    write_queue_document(tmp_path / "state" / "queue_snapshot.json", {"ts": "2027-01-15T08:00:00+00:00", "pending": [], "running": []})
     assert reconcile_orphaned_running_tasks(tmp_path) == 1
     assert load_task_result(tmp_path, "pooled-live")["reason_code"] == (
         "orphaned_running_after_worker_restart"

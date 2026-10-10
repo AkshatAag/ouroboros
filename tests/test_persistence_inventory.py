@@ -727,7 +727,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 356 -> 359 (storage on SQLite, S0): the dormant authority switch's intent, receipt and
 # progress files ``state/switch_intent.json``, ``state/switch_receipt.json``,
 # ``state/switch_progress.json`` (``ouroboros/store_switch.py``; three section-2 rows).
-EXPECTED_SCAN_PATHS = 359
+# 359 -> 360 (storage on SQLite, S1): the queue liveness stamp ``state/queue.alive`` published after the
+# structural queue files (``supervisor/queue_snapshot.py``; the queue-snapshot row).
+EXPECTED_SCAN_PATHS = 360
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

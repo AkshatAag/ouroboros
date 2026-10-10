@@ -49,7 +49,8 @@ from ouroboros.task_results import (
     load_task_result,
     validate_task_id,
 )
-from ouroboros.utils import iter_jsonl_objects, read_json_dict
+from ouroboros.queue_observation import load_queue_document, queue_stamp
+from ouroboros.utils import iter_jsonl_objects
 
 log = logging.getLogger(__name__)
 
@@ -223,17 +224,11 @@ def _project_child_result_disposition(
 
 
 def _load_queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
-    path = pathlib.Path(drive_root) / "state" / "queue_snapshot.json"
-    if not path.exists():
-        return {"_snapshot_missing": True}
-    data = read_json_dict(path)
-    if not isinstance(data, dict):
-        return {"_snapshot_invalid": True}
-    return data
+    return load_queue_document(drive_root)
 
 
 # GR7-1a freshness bound for the live-ownership twin. The supervisor persists
-# the snapshot on every main-loop pass (nominally 0.5s apart), so a snapshot
+# queue.alive on every main-loop pass (nominally 0.5s apart), so a stamp
 # this old means the writer is gone or badly wedged — the twin can no longer
 # trust it to prove a DEAD worker. Sized well above 2× the nominal tick to
 # absorb ordinary loop hitches (task_done processing, git ops) without turning
@@ -248,11 +243,12 @@ def queue_snapshot_observation(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     freshness bound as live ownership. Counts belong to the captured snapshot;
     even a fresh observation is not a reservation or a continuously live view.
     """
-    observation = {"source": "state/queue_snapshot.json", "ts": snapshot.get("ts"),
+    stamp = queue_stamp(snapshot)
+    observation = {"source": "state/queue_snapshot.json", "ts": stamp.get("ts"),
                    "age_sec": None, "freshness": "unknown", "fresh": False}
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
         return observation
-    raw = str(snapshot.get("ts") or "").strip().replace("Z", "+00:00")
+    raw = str(stamp.get("ts") or "").strip().replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(raw)
         stamped = (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
@@ -335,7 +331,7 @@ def task_execution_observation(
             return {**observation, "kind": "direct", "state": "active", "source": "local_direct", "reason": "local_execution"}
     except Exception:
         pass  # absence of a positive witness is never a negative observation
-    fragment = read_json_dict(root / "state" / "direct_roots.json") or {}
+    fragment = load_queue_document(root, "direct_roots.json")
     # Both existing supervisor fragments use the same 10s ownership freshness
     # (peer_roster._projection_observation); retain the distinct source name.
     direct_seen = {**queue_snapshot_observation(fragment), "source": "state/direct_roots.json"}

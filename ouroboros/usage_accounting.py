@@ -14,7 +14,6 @@ import contextlib
 import contextvars
 import copy
 import hashlib
-import json
 import logging
 import os
 import pathlib
@@ -675,16 +674,16 @@ def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path) -> None:
         raise DispatchFenced(
             f"model dispatch fenced: task {scope.task_id} is entering an exact budget pause",
             limit_scope="pausing", root_task_id=scope.root_task_id)
-    # The queue's atomic durable root-dispatch fence, read from its snapshot:
-    # a fenced root refuses every send until an explicit resume.
+    from ouroboros.queue_observation import load_queue_document
+    from ouroboros.task_status import queue_snapshot_observation
+
     root_task_id = str(scope.root_task_id or "").strip()
-    snapshot_path = root / "state" / "queue_snapshot.json"
-    if root_task_id and snapshot_path.exists():
-        try:
-            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise UsageAccountingError(f"root budget fence authority unavailable: {snapshot_path}") from exc
-        rows = snapshot.get("budget_root_fences", []) if isinstance(snapshot, dict) else None
+    snapshot_path = root / "state" / "queue_dispatch.json"
+    if root_task_id and any((root / "state" / name).exists() for name in ("queue_dispatch.json", "queue_snapshot.json", "queue.alive")):
+        snapshot = load_queue_document(root, "queue_dispatch.json")
+        if not queue_snapshot_observation(snapshot)["fresh"]:
+            raise UsageAccountingError(f"root budget fence authority unavailable: {snapshot_path}")
+        rows = snapshot.get("budget_root_fences")
         if not isinstance(rows, list):
             raise UsageAccountingError(f"invalid root budget fence authority: {snapshot_path}")
         for row in rows:
@@ -693,18 +692,8 @@ def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path) -> None:
             if (str(row.get("root_task_id") or "") != root_task_id or row.get("cause") == "owner_pause"
                     or str(row.get("status") or "") not in {"active", "paused"}):
                 continue  # an owner Pause gates launches itself (owner_pause.py): never a money stop
-            # ONE member explicitly selected against THIS fence generation is
-            # admitted (owner Q9, #1196): the queue recorded that selection on
-            # the row itself (a selected hold or an exact Resume handoff, read by
-            # the queue's own predicate), and the latch still refuses every
-            # unselected member. A just-assigned row may still be published pending.
-            selected = False
-            for bucket in ("running", "pending"):
-                for entry in (snapshot.get(bucket) or []) if isinstance(snapshot, dict) else []:
-                    member = entry.get("task") if isinstance(entry, dict) else None
-                    if not isinstance(member, dict) or str(member.get("id") or "") != scope.task_id:
-                        continue
-                    selected = budget_fence_selected(member, row)
+            member = (snapshot.get("members") or {}).get(scope.task_id)
+            selected = budget_fence_selected(member, row)
             if not selected:
                 raise BudgetExceeded(
                     f"root model dispatch paused pending explicit resume for {scope.root_task_id}",

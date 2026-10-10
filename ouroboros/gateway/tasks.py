@@ -1544,10 +1544,11 @@ def _render_attachment_lines(attachments: Any) -> str:
 
 
 def _queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
-    path = pathlib.Path(drive_root) / "state" / "queue_snapshot.json"
+    from ouroboros.queue_observation import load_queue_document
     try:
         from ouroboros.project_admission import project_hold_fact
-        snapshot = read_json_dict(path) or {}
+        snapshot = load_queue_document(drive_root)
+        snapshot.pop("_queue_alive", None)
         for row in [*snapshot.get("pending", []), *snapshot.get("running", [])]:
             task = row.get("task")
             if isinstance(task, dict):

@@ -1092,7 +1092,7 @@ def budget_fence_selected(task: Any, fence: Any) -> bool:
     """Whether THIS row carries an explicit selection recorded against THIS fence.
 
     A root's admission latch keeps a whole tree out of the queue and off the
-    money gate (``usage_accounting`` reads this predicate from the snapshot). The
+    money gate (``usage_accounting`` reads this predicate from queue_dispatch.json). The
     owner (or, under the root's live grant, the model) may select ONE member
     without lifting the latch for its siblings: the selection names the fence
     generation it was granted against, so a later fence — a root that paused

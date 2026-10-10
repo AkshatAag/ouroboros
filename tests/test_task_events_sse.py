@@ -9,6 +9,9 @@ cross-reconnect cursor contract (ouroboros/cli.py::_watch_task) is preserved.
 
 from __future__ import annotations
 
+from ouroboros.utils import utc_now_iso
+from tests._shared import write_queue_document
+
 import asyncio
 import json
 import os
@@ -64,7 +67,7 @@ def _seed_running_task(tmp_path, task_id="t1", progress_rows=2):
     (logs / "progress.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     write_task_result(data, task_id, "running", result="working", ts=OLD_TS)
     (data / "state").mkdir(parents=True, exist_ok=True)
-    (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
+    write_queue_document(data / "state/queue_snapshot.json", {"ts": utc_now_iso(), "pending": [], "running": []})
     return data
 
 
@@ -94,7 +97,7 @@ def _seed_events_running_task(tmp_path, task_id="t1", event_rows=2):
     (logs / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     write_task_result(data, task_id, "running", result="working", ts=OLD_TS)
     (data / "state").mkdir(parents=True, exist_ok=True)
-    (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
+    write_queue_document(data / "state/queue_snapshot.json", {"ts": utc_now_iso(), "pending": [], "running": []})
     return data
 
 
@@ -115,8 +118,8 @@ def _finalize(data, task_id):
     write_task_result(data, task_id, "completed", result="done", ts="2026-01-01T00:10:00Z")
     # The follow loop recomputes the terminal projection only when log offsets
     # advanced or the queue snapshot moved — production terminalization always
-    # does one of the two; tests bump the snapshot explicitly.
-    (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []} ', encoding="utf-8")
+    # does one of the two; tests publish liveness explicitly.
+    write_queue_document(data / "state/queue_snapshot.json", {"ts": utc_now_iso(), "pending": [], "running": []})
 
 
 def test_sse_incremental_follow_appends_with_monotonic_seq(tmp_path):

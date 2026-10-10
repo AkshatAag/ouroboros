@@ -302,7 +302,7 @@ class _TaskEventFollower:
 
     def queue_snapshot_changed(self) -> bool:
         try:
-            mtime = (self.drive_root / "state" / "queue_snapshot.json").stat().st_mtime_ns
+            mtime = (self.drive_root / "state" / "queue.alive").stat().st_mtime_ns
         except OSError:
             mtime = None
         changed = mtime != self._queue_snapshot_mtime
