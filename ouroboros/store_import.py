@@ -116,8 +116,8 @@ def _ensure(root: pathlib.Path, path: pathlib.Path) -> Tuple[Dict[str, Any], lis
             return report
         if export.get("status") != "completed":
             return {"status": "switch_pending", "phase": phase}, []  # the seam resumes it; nothing moves here
+        stamp(root, **{GENERATION_KEY: None})  # before the rename: absent + stamped is always a loss
         os.replace(path, path.with_name(f"{path.name}.exported-{utc_stamp()}"))  # a full rebuild after a proven complete export
-        stamp(root, **{GENERATION_KEY: None})
     elif store.generation_stamped(root):
         raise StoreLost(f"current store missing beside its completed stamp: {path}")
     from ouroboros.platform_layer import kernel_file_locks_enforced

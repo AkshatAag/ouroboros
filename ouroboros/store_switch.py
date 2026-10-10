@@ -125,9 +125,21 @@ def switching_owner(door: str) -> Owner:
 
 # ---- preflight, money, abandonment -----------------------------------------------------
 
-def _roots(root: pathlib.Path) -> list:
-    """Every root whose store is still present (a retired one has nothing left to export)."""
-    return [drive for drive in (root, *store_import.child_roots(root)) if store.probe(drive)[0] == "present"]
+def _roots(root: pathlib.Path) -> Tuple[list, str]:
+    """The drives whose store is present, and the refusal when one is LOST (absent beside its
+    completed stamp) or not inspectable: a retired drive has nothing left to export, a lost
+    one is never «switched» past."""
+    present = []
+    for drive in (root, *store_import.child_roots(root)):
+        try:
+            state = store.probe(drive)[0]
+        except store.StoreError as exc:
+            return present, f"{type(exc).__name__}: {exc}"
+        if state == "present":
+            present.append(drive)
+        elif store.generation_stamped(drive):
+            return present, f"current store lost at {drive}: missing beside its completed stamp"
+    return present, ""
 
 
 def _export_bytes(roots: Sequence[pathlib.Path]) -> int:
@@ -221,7 +233,7 @@ def _abandon(root: pathlib.Path, receipt: Dict[str, Any]) -> Dict[str, Any]:
             store.fsync_directory(path.parent)
             usage_store.forget(root)
             restored["money"] = "republished"
-    for drive in _roots(root):
+    for drive in _roots(root)[0]:
         with store.open_store(drive, write=True) as txn:
             if txn.phase() != PUBLISHED:
                 txn.set_meta("phase", PUBLISHED)
@@ -264,9 +276,9 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
     if blockers:
         return _refuse(root, intent, receipt, "quiescence_unconfirmed", blockers=list(blockers))
     needs = switch_needs(repo_dir, intent["target_sha"])
-    roots = _roots(root) if needs["facts"] else []
+    roots, refusal = _roots(root) if needs["facts"] else ([], "")
     _progress(root, "preflight", needs=needs, attempt=receipt["attempts"])
-    refusal = _preflight(root, needs, receipt, roots)
+    refusal = refusal or _preflight(root, needs, receipt, roots)
     if refusal:
         return _refuse(root, intent, receipt, refusal)
     try:
@@ -300,8 +312,8 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
     _write_receipt(root, receipt)
     os.unlink(root / INTENT_REL)  # consumed BEFORE the switch: the old body never sees an intent
     store.fsync_directory(root / "state")
-    for drive in roots:
-        _retire(drive)
+    receipt["retired"] = {str(drive): _retire(drive) for drive in roots}
+    _write_receipt(root, receipt)
     _progress(root, "switching", door=intent["door"], target_sha=intent["target_sha"])
     ok, message = (owner or switching_owner(intent["door"]))(intent)
     receipt["switched"] = {"ok": bool(ok), "message": str(message), "at": utc_now_iso()}
@@ -310,16 +322,20 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
     return {"status": "switched" if ok else "switch_failed", "message": str(message), "needs": needs, "exit": 42}
 
 
-def _retire(drive: pathlib.Path) -> None:
-    """The store LAST: phase retired inside, then renamed aside, then the stamp cleared."""
+def _retire(drive: pathlib.Path) -> str:
+    """The store LAST: phase retired inside, the stamp cleared, THEN renamed aside (a death
+    between the two leaves a present, unstamped, retired store the next import rebuilds from;
+    absent beside the stamp therefore always means LOST). Returns the retired name."""
     from ouroboros.startup_migrations import stamp
 
     with store.open_store(drive, write=True) as txn:
         txn.set_meta("phase", RETIRED)
     path = store.store_path(drive)
-    os.replace(path, path.with_name(f"{path.name}.exported-{_stamp()}"))
-    store.fsync_directory(path.parent)
+    retired = path.with_name(f"{path.name}.exported-{_stamp()}")
     stamp(drive, **{GENERATION_KEY: None})
+    os.replace(path, retired)
+    store.fsync_directory(path.parent)
+    return retired.name
 
 
 def resume_pending_switch(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, blockers: Sequence[str] = (),

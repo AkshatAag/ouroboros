@@ -3,7 +3,6 @@ back, the tri-state open, the lock tiers, the phase inside the write seam, the d
 round trip and the SQLite 3.24 floor the CI floor job proves on a 3.37 system engine."""
 from __future__ import annotations
 
-import contextlib
 import errno
 import json
 import os
@@ -210,27 +209,34 @@ def test_update_task_refuses_once_the_export_began_and_writes_nothing(tmp_path):
         assert txn.load("t1")["note"] == "before"
 
 
-def test_a_straggler_whose_connection_predates_the_rename_sees_the_retired_inode(tmp_path, monkeypatch):
-    """The seam commits ``phase=exporting`` into the store before renaming it aside; a
-    writer that opened the file earlier reads that phase inside its own transaction."""
+def test_a_straggler_after_the_retirement_is_told_retired_not_migrating(tmp_path):
+    """The seam commits ``phase=retired`` into the store, clears the stamp and renames it aside.
+    A writer that opened the file earlier reads that phase inside its own transaction; a writer
+    that opens by path now (``update_task``, a reader) is told ``StoreRetired`` by the sibling,
+    never «not published yet»."""
+    from ouroboros.startup_migrations import stamp
+
     path = publish(tmp_path, document("t1"))
     straggler = store.connect(path, store.TIER_ENFORCED)  # opened before the seam ran
     with store.open_store(tmp_path, write=True) as txn:
-        txn.set_meta("phase", store.EXPORTING)
+        txn.set_meta("phase", store.RETIRED)
+    stamp(tmp_path, **{store.GENERATION_KEY: None})
     retired = path.with_name(path.name + ".exported-test")
     os.replace(path, retired)
-
-    @contextlib.contextmanager
-    def stale_open(root, *, write, wait_sec=0.0):
-        with store.transaction(straggler, write=write):
-            yield store.Txn(straggler)
-
-    monkeypatch.setattr(store, "open_store", stale_open)
+    with store.transaction(straggler, write=True):
+        assert store.Txn(straggler).phase() == store.RETIRED  # the retired inode, read inside the transaction
+    straggler.close()
     with pytest.raises(StoreRetired):
         store.update_task(tmp_path, "t1", lambda current: {**current, "note": "late"})
-    straggler.close()
+    with pytest.raises(StoreRetired):
+        with store.open_store(tmp_path, write=False):
+            pass
     with sqlite3.connect(retired) as conn:
         assert "late" not in conn.execute("SELECT body FROM task_bodies WHERE task_id='t1'").fetchone()[0]
+    retired.unlink()  # no sibling, no stamp: the plain pre-publication answer
+    with pytest.raises(StoreMigrating):
+        with store.open_store(tmp_path, write=False):
+            pass
 
 
 # ---- documents, typed columns, obligation rows ------------------------------------

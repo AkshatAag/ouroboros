@@ -295,6 +295,46 @@ def test_a_second_failure_of_the_same_intent_is_a_refusal_never_a_loop(switch_ro
     assert state(root)["money_store"] is True and store.probe(root)[0] == "present"
 
 
+# ---- retirement -----------------------------------------------------------------------------
+
+def test_the_stamp_is_cleared_before_the_store_is_renamed_aside(switch_root, target_repo, monkeypatch):
+    """A death right after the rename must leave «absent, unstamped» (the next import rebuilds
+    from the complete export), never «absent beside its completed stamp» (LOST)."""
+    root, (repo, old, _new) = switch_root, target_repo
+    intent(root, old)
+    real_replace = os.replace
+
+    def die_after_the_rename(src, dst, *args, **kwargs):
+        real_replace(src, dst, *args, **kwargs)
+        if pathlib.Path(dst).parent == root / "state" and "current.sqlite.exported-" in str(dst):
+            raise KeyboardInterrupt("died right after renaming the canonical store aside")
+
+    monkeypatch.setattr(os, "replace", die_after_the_rename)
+    with pytest.raises(KeyboardInterrupt):
+        store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert store.probe(root)[0] == "absent" and not store.generation_stamped(root)
+    with pytest.raises(store.StoreRetired):  # typed for a straggler until the next import
+        store.update_task(root, "done1", lambda current: current)
+    assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner())["status"] == "switch_not_performed"
+    report = ensure_current_store(root)
+    assert report["status"] == "completed" and report["results"] == 3
+    assert report["child_roots"] == {str(root / "state" / "headless_tasks" / "root1" / "data"): "completed"}
+
+
+def test_a_lost_drive_refuses_the_switch_instead_of_exporting_past_it(switch_root, target_repo):
+    root, (repo, old, _new) = switch_root, target_repo
+    drive = root / "state" / "headless_tasks" / "root1" / "data"
+    store.store_path(root).unlink()  # the canonical store lost beside its completed stamp
+    intent(root, old)
+    owner = Owner()
+    report = store_switch.run_switch_seam(root, repo_dir=repo, owner=owner)
+    assert report["status"] == "refused" and "lost" in report["reason"] and not owner.calls
+    assert store.probe(drive)[0] == "present" and meta(drive, "phase") == store.PUBLISHED  # never exported nor retired
+    assert state(root)["money_store"] is True and state(root)["journal"] is True
+    assert not list((drive / "state").glob("current.sqlite.exported-*"))
+
+
 # ---- the chain new -> old -> new ---------------------------------------------------------------
 
 def test_a_death_after_the_consume_and_before_the_switch_keeps_the_new_code_and_reimports(switch_root, target_repo):

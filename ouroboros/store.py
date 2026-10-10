@@ -219,6 +219,16 @@ def probe(root: Any) -> Tuple[str, Optional[str]]:
     return "present", tier
 
 
+def retired_sibling(root: Any) -> Optional[pathlib.Path]:
+    """The newest ``current.sqlite.exported-<UTC>`` beside the store path, or ``None``."""
+    path = store_path(root)
+    try:
+        names = sorted(name for name in os.listdir(path.parent) if name.startswith(path.name + ".exported-"))
+    except OSError:
+        return None
+    return path.with_name(names[-1]) if names else None
+
+
 def _typed(exc: sqlite3.Error) -> StoreError:
     if isinstance(exc, sqlite3.OperationalError) and busy(exc):
         return StoreBusy(f"current store busy: {exc}")
@@ -247,12 +257,16 @@ def name_lock(root: Any, filename: str, *, timeout_sec: float, stale_sec: float 
 @contextlib.contextmanager
 def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC) -> Iterator["Txn"]:
     """One transaction on the published store: ``StoreMigrating`` before publication, ``StoreLost`` for a
-    missing store beside its completed stamp, ``StoreBusy`` on contention; ``mode=rw``, never creating."""
+    missing store beside its completed stamp, ``StoreRetired`` for one an export set aside (the files are
+    the authority until the next import), ``StoreBusy`` on contention; ``mode=rw``, never creating."""
     root = pathlib.Path(root)
     state, tier = probe(root)
     if state == "absent":
         if generation_stamped(root):
             raise StoreLost(f"current store missing beside its completed stamp: {store_path(root)}")
+        retired = retired_sibling(root)
+        if retired is not None:
+            raise StoreRetired(f"current store retired by an export as {retired.name}: the files are the authority")
         raise StoreMigrating(f"current store not published yet: {store_path(root)}")
     with contextlib.ExitStack() as stack:
         if tier == TIER_NAME:
