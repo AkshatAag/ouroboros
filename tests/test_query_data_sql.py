@@ -156,3 +156,26 @@ def test_parent_deadline_reaps_child_and_removes_scratch(ctx, monkeypatch):
     assert children[0].poll() is not None
     assert children[0].stdin.closed and children[0].stdout.closed
     assert directories and all(not directory.exists() for directory in directories)
+
+
+@pytest.mark.parametrize("db,lock_name", [("money", "usage_attempts.lock"), ("packs", "packs.lock")])
+def test_name_tier_money_and_index_reads_share_writer_locks(tmp_path, monkeypatch, db, lock_name):
+    from ouroboros import platform_layer
+    monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda _: False)
+    store_import.ensure_current_store(tmp_path, with_children=False)
+    if db == "money":
+        usage_store.migrate_from_journal(tmp_path)
+    else:
+        path = sql.packs_index_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("CREATE TABLE members(name TEXT)")
+        finally:
+            conn.close()
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="caller")
+    assert run(ctx, "SELECT 1", db=db)["data"]["rows"] == [[1]]
+    with store.name_lock(tmp_path, lock_name, timeout_sec=1):
+        result = run(ctx, "SELECT 1", db=db, timeout_sec=0.05)
+        assert result["status"] == "error" and "lock" in result["message"], result
+    assert run(ctx, "SELECT 2", db=db, snapshot=True)["data"]["rows"] == [[2]]

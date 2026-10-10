@@ -280,7 +280,7 @@ def get_tools():
             "kind": {"type": "string", "enum": ["task_result", *_FILES]},
             "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32,
                     "description": "Task, run, review-record or skill names; one returns its value, several return an ID map."},
-            "child_task_id": {"type": "string", "description": "Owned descendant's execution drive; default caller drive. Facts/ledger/skills use canonical state."},
+            "child_task_id": {"type": "string", "description": "Owned descendant's execution drive; default caller drive. Task documents/ledger/skills use canonical state."},
             "state_file": {"type": "string", "enum": list(_STATES), "default": "review_job"},
             "sha256": {"type": "string", "description": "Blob SHA-256; the host locates loose or packed bytes."},
             "blob_kind": {"type": "string", "enum": ["json", "txt", "bin"], "default": "json"},
