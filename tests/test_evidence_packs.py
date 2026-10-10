@@ -303,7 +303,8 @@ def test_kill_at_each_packer_step_leaves_readable_state_and_rerun_completes(root
     report = _run(root)
     assert (report["packed"], report["faults"]) == (1, 0)
     names = sorted(p.name for p in (root / "observability" / "packs").iterdir() if p.name.startswith("task-a"))
-    assert names == ["task-a.members.json", "task-a.xz"]  # one generation, no duplicates
+    assert names == (["task-a.2.members.json", "task-a.2.xz", "task-a.xz"] if step == "pack_published"
+                     else ["task-a.members.json", "task-a.xz"])  # an orphan's generation is never overwritten
     assert not any(_loose(ref) for ref in refs)
     assert obs.read_blob_ref(root, refs[0])["message"]["content"].startswith("answer")
 

@@ -68,6 +68,10 @@ class EvidenceCorrupt(ValueError):
     """``evidence_corrupt``: a located pack member failed verification; never empty bytes."""
 
 
+class SidecarCorrupt(OSError):
+    """Unreadable pack authority; restore and its preflight must refuse."""
+
+
 # ---- names and sidecars ------------------------------------------------------
 
 def packs_dir(root: Any) -> pathlib.Path:
@@ -91,16 +95,25 @@ def dict_size_for(raw_total: int) -> int:
 
 
 def read_sidecar(path: pathlib.Path) -> Dict[str, Any]:
-    """The parsed sidecar, or ``ValueError`` for a torn or foreign one."""
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if (not isinstance(data, dict) or data.get("format_version") != FORMAT_VERSION or data.get("codec") != CODEC
-            or not isinstance(data.get("members"), list) or not data.get("task_id")):
-        raise ValueError(f"evidence pack sidecar is not format {FORMAT_VERSION}: {path.name}")
-    return data
+    """Read the publication authority; a torn or invalid sidecar is never absence."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(data, dict) or data.get("format_version") != FORMAT_VERSION or data.get("codec") != CODEC
+                or not isinstance(data.get("members"), list) or not data.get("task_id")
+                or int(data["generation"]) < 1 or sidecar_name(data["task_id"], data["generation"]) != path.name):
+            raise ValueError("invalid pack header")
+        for member in data["members"]:
+            if (member["kind"] not in BLOB_KINDS | {CHECKPOINT} or int(member["size"]) < 0 or int(member["offset"]) < 0
+                    or len(member["sha256"]) != 64 or member["sha256"].strip("0123456789abcdef")
+                    or (member["kind"] == CHECKPOINT and not member.get("path"))):
+                raise ValueError("invalid pack member")
+        return data
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise SidecarCorrupt(f"evidence_corrupt: unreadable sidecar {path.name}") from exc
 
 
-def list_sidecars(root: Any) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
-    """One listing of ``packs/``: every readable sidecar (torn or foreign ones are skipped)."""
+def list_sidecars(root: Any, *, errors: Optional[list] = None) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
+    """One listing of pack authority; only cache builders may collect faults beside healthy rows."""
     out = []
     directory = packs_dir(root)
     try:
@@ -110,8 +123,12 @@ def list_sidecars(root: Any) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
     for name in names:
         if name.startswith(".") or not name.endswith(".members.json"):
             continue
-        with contextlib.suppress(OSError, ValueError):
+        try:
             out.append((directory / name, read_sidecar(directory / name)))
+        except SidecarCorrupt as exc:
+            if errors is None:
+                raise
+            errors.append(exc)
     return out
 
 
@@ -285,8 +302,10 @@ def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str) -> None:
             with store.transaction(conn, write=True):
                 conn.execute("INSERT INTO meta VALUES ('format_version', ?)", (str(FORMAT_VERSION),))
                 conn.execute("INSERT INTO meta VALUES ('built_at', ?)", (utc_now_iso(),))
-                for sidecar_path, sidecar in list_sidecars(root):
+                errors: list = []
+                for sidecar_path, sidecar in list_sidecars(root, errors=errors):
                     _index_rows(conn, sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])), sidecar)
+                conn.execute("INSERT INTO meta VALUES ('sidecar_errors', ?)", (json.dumps([str(e) for e in errors]),))
         finally:
             conn.close()
         with contextlib.suppress(FileNotFoundError):
@@ -345,16 +364,22 @@ def _locate(root: pathlib.Path, *, sha256: str = "", task_id: str = "", rel_path
                     "SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind FROM members m "
                     "JOIN packs p ON p.task_id=m.task_id AND p.generation=m.generation "
                     "WHERE m.sha256=? AND m.kind<>? ORDER BY p.task_id, p.generation LIMIT 1", (sha256, CHECKPOINT)).fetchone()
-        if row is None:
-            return None
+            if row is None:
+                error_row = conn.execute("SELECT value FROM meta WHERE key='sidecar_errors'").fetchone()
+                if error_row and json.loads(error_row[0]):
+                    raise SidecarCorrupt(json.loads(error_row[0])[0])
+                return None
         return packs_dir(root) / row["pack"], {"sha256": row["sha256"], "offset": row["offset"], "size": row["size"], "kind": row["kind"]}
     except (store.StoreError, sqlite3.Error, OSError):
         pass  # the cache is unavailable: the sidecars are the authority
-    for sidecar_path, sidecar in list_sidecars(root):
+    errors = []
+    for sidecar_path, sidecar in list_sidecars(root, errors=errors):
         for member in sidecar["members"]:
             if (rel_path and sidecar["task_id"] == task_id and member["kind"] == CHECKPOINT and member.get("path") == rel_path) or (
                     not rel_path and member["sha256"] == sha256 and member["kind"] != CHECKPOINT):
                 return sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])), member
+    if errors:
+        raise errors[0]
     return None
 
 
@@ -721,6 +746,8 @@ def write_pack(root: Any, task_id: str, generation: int, members: List[Dict[str,
     root, directory = pathlib.Path(root), packs_dir(root)
     directory.mkdir(parents=True, exist_ok=True)
     pack_path, sidecar_path = directory / pack_name(task_id, generation), directory / sidecar_name(task_id, generation)
+    if pack_path.exists() or sidecar_path.exists():
+        raise FileExistsError(f"evidence pack generation already occupied: {pack_path.name}")
     raw_total = sum(int(m["size"]) for m in members)
     dict_size = dict_size_for(raw_total)
     suffix = f".tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
@@ -800,6 +827,9 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
     report: Dict[str, Any] = {"task_id": str(task_id), "generation": None, "members": 0, "raw": 0, "packed": 0}
     if fresh:
         generation = 1 + max((int(s["generation"]) for s in generations), default=0)
+        while any((packs_dir(root) / name).exists() for name in
+                  (pack_name(task_id, generation), sidecar_name(task_id, generation))):
+            generation += 1
         pack_path, sidecar = write_pack(root, task_id, generation, fresh)
         report.update(generation=generation, members=len(fresh), raw=sidecar["raw_total"], packed=sidecar["packed_total"])
         generations.append(sidecar)
