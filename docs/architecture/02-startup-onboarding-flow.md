@@ -50,7 +50,7 @@ An active Evolution transaction or managed merge uses `rescue_and_block` to pres
 
 ### Interpreters
 
-`server.py` establishes `OUROBOROS_AGENT_PYTHON` from its actual interpreter right after binding the repo import root, before workers or review subprocesses start; hermetic commit/review preflight uses that handle (then `sys.executable`, then `python3`) so tests run in the environment that contains Ouroboros dependencies. User process tools have a separate surface-aware resolver, `ouroboros/process_interpreters.py` (its docstring carries the priority ladder; the rule: DEVELOPMENT "Mutation Attribution Rule"): an unversioned `python`/`python3` resolves once before the deterministic guards, so guard and handler see one argv, and bare `node` after the dispatch gates, because its health probe executes the candidate; nothing installs, and only an unprovable system interpreter fails closed.
+`server.py` establishes `OUROBOROS_AGENT_PYTHON` from its actual interpreter right after binding the repo import root, before workers or review subprocesses start; hermetic commit/review preflight uses that handle (then `sys.executable`, then `python3`) so tests run in the environment that contains Ouroboros dependencies. User process tools have a separate surface-aware resolver, `ouroboros/process_interpreters.py` (its docstring: the priority ladder; the rule: DEVELOPMENT "Mutation Attribution Rule"): an unversioned `python`/`python3` resolves once before the deterministic guards, so guard and handler see one argv, and bare `node` after the dispatch gates, because its health probe executes the candidate; nothing installs, and only an unprovable system interpreter fails closed.
 
 ### Body switch at entry
 

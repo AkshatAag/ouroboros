@@ -720,7 +720,11 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``ouroboros/working_checkpoint.py``; one row beside the source-handle rows).
 # 353 -> 354 (storage on SQLite, S0): the dormant current-facts store ``state/current.sqlite``
 # (``ouroboros/store.py``; one section-3 row covers it with its siblings and locks).
-EXPECTED_SCAN_PATHS = 354
+# 354 -> 356 (storage on SQLite, S0): the store's name-tier lock ``state/current.lock``
+# (``ouroboros/store_import.py``; the same section-3 row) and the reconciliation's copy of a row
+# whose file an older body deleted, ``task_results/quarantine/<id>.deleted-<UTC>.json`` (the
+# quarantine row).
+EXPECTED_SCAN_PATHS = 356
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

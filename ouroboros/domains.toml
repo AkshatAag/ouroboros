@@ -518,6 +518,7 @@ D20 = "Presence"
 "ouroboros/task_finalization.py" = "D01"
 "ouroboros/task_pacing.py" = "D01"
 "ouroboros/store.py" = "D17"
+"ouroboros/store_import.py" = "D17"
 "ouroboros/task_results.py" = "D17"
 "ouroboros/task_result_schema.py" = "D17"
 "ouroboros/task_result_facts.py" = "D17"
@@ -939,6 +940,7 @@ allowed = [
   "D17->D01",
   "D17->D04",
   "D17->D06",
+  "D17->D11",
   "D17->D15",
   "D17->D16",
   "D17->D18",
@@ -1067,7 +1069,6 @@ lazy_only = [
   "D17->D07",
   "D17->D08",
   "D17->D09",
-  "D17->D11",
   "D17->D12",
   "D17->D13",
   "D18->D01",
