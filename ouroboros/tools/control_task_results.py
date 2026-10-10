@@ -1039,8 +1039,8 @@ def _count_live_sibling_children(ctx: ToolContext, status_drive_root: Path, *, e
 
 _UNMINTED_WAIT_GRACE_SEC = 30.0
 # The wait ceilings, read by the tool schemas, the expiry disclosure and the one
-# ``_wait_window`` ladder. Each ToolEntry kill timeout stays at least ceiling +
-# NESTED_SETTLEMENT_MARGIN_SEC, so a full window ends inside its executor bound.
+# ``_wait_window`` ladder. ToolEntry uses the operation window plus settlement
+# margin; a shorter configured task lifetime independently ends an explicit wait.
 _WAIT_TASK_CLAMP_SEC = 3600
 _WAIT_TASKS_CLAMP_SEC = 7200
 
