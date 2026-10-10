@@ -359,7 +359,13 @@ class RetentionWalk:
                     except (OSError, ValueError):
                         raw = read_manifest_version(root, ref["sha256"])
                     return (raw, manifest), root
-                return (packs.blob_bytes(root, ref), obs._blob_ref_path(root, ref)), root  # loose or packed
+                try:  # this root's loose copy, else the exact locator inside a retained root
+                    path = obs._blob_ref_path(root, ref)
+                except FileNotFoundError:  # nothing loose: the member may sit in one of this root's packs
+                    path = root / "observability" / "blobs" / f"{ref['sha256']}.{ref['kind']}.gz"
+                # Bytes and placement come from the SAME root, so a corrupt canonical copy is
+                # repaired from the child placement instead of being read through it.
+                return (packs.blob_bytes(pathlib.Path(*path.parts[:-3]), {**ref, "path": ""}), path), root
             except (OSError, ValueError, KeyError, TypeError, EOFError, zlib.error) as exc:
                 failures.append(exc)
 
@@ -452,9 +458,9 @@ class RetentionWalk:
             except PublicationClosed:
                 raise
             except (OSError, EOFError, zlib.error):
-                try:  # the parent may already hold these bytes as a pack member
-                    return packs.blob_bytes(self.parent, {**ref, "path": str(target)}) == raw
-                except (OSError, ValueError):
+                try:  # the parent itself may hold these bytes as a pack member (never a child placement)
+                    return packs.blob_bytes(self.parent, {**ref, "path": ""}) == raw
+                except (OSError, ValueError, EOFError, zlib.error):
                     return False
             return digest.hexdigest() == ref["sha256"] and size == int(ref["size"])
 
