@@ -737,7 +737,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # ``state/delegate_terminal_refresh_cursor.json`` (the closing receipts in ``delegated_runs`` rows
 # replace the chain offset) and the ``logs/containment_faults.jsonl`` projection (the fault lives on
 # the run's ``custody_runs`` row) are gone.
-EXPECTED_SCAN_PATHS = 356
+# 356 -> 359 (storage on SQLite, S5): the evidence-pack directory, its per-task packs
+# and sidecars and the index cache ``observability/packs``, ``observability/packs/*``,
+# ``observability/packs/index.sqlite`` (``ouroboros/evidence_packs.py``; one section-2 row).
+EXPECTED_SCAN_PATHS = 359
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

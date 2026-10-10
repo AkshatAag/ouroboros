@@ -668,14 +668,14 @@ def manifest_blob_refs(root: Any, task_id: str) -> List[Tuple[str, str, int]]:
     seen: set = set()
     directory = pathlib.Path(root) / "observability" / "calls" / str(task_id)
     try:
-        names = sorted(os.listdir(directory))
+        entries = sorted(os.scandir(directory), key=lambda e: e.name)
     except FileNotFoundError:
         return out
-    for name in names:
-        if name.startswith(".") or not name.endswith(".json"):
+    for entry in entries:
+        if entry.name.startswith(".") or not entry.name.endswith(".json"):
             continue
         with contextlib.suppress(OSError, ValueError):
-            _walk_blob_refs(json.loads((directory / name).read_text(encoding="utf-8")), out, seen)
+            _walk_blob_refs(json.loads(pathlib.Path(entry.path).read_text(encoding="utf-8")), out, seen)
     return out
 
 
