@@ -212,7 +212,7 @@ def test_real_owner_restart_retires_exact_worker_invocation(tmp_path, monkeypatc
     try:
         slot = workers.Worker(0, child, stdqueue.Queue(), busy_task_id='root')
         monkeypatch.setattr(workers, 'WORKERS', {0: slot})
-        worker_pool_lifecycle._record_worker_pids()
+        worker_pool_lifecycle._record_worker_processes()
         end = time.monotonic() + 20
         while not (tmp_path / 'inside').exists() and child.is_alive() and time.monotonic() < end:
             time.sleep(.02)

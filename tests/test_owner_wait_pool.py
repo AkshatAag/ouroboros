@@ -52,7 +52,7 @@ def pool(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "repo_writer_task_allowed", lambda task: True)
     monkeypatch.setattr(workers, "load_state", lambda: {})
-    monkeypatch.setattr(worker_pool_lifecycle, "_record_worker_pids", lambda: None)
+    monkeypatch.setattr(worker_pool_lifecycle, "_record_worker_processes", lambda: None)
     monkeypatch.setattr(worker_pool_lifecycle.threading, "Thread",
                         lambda **kw: SimpleNamespace(start=lambda: None))
     monkeypatch.setattr(workers, "get_event_q", InputQueue)

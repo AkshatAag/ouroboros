@@ -6,7 +6,6 @@ thread — and the delegated-snapshot GC that fails closed on an unreadable log.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import pathlib
@@ -1059,26 +1058,17 @@ def _startup_live_task_ids(drive_root: pathlib.Path, *, include_pending: bool = 
 
 
 def _startup_worker_pids(drive_root: pathlib.Path) -> set[int] | None:
-    """Capture prior worker ownership before spawn overwrites its legacy pid file.
+    """Capture prior worker ownership from the process ledger before spawn.
 
     These observations only defer recovery; they grant no signal authority. An
     unconfirmed survivor or unreadable record never proves safe file capture.
     """
     from ouroboros.process_custody import _read_ledger_strict
     try:
-        path = pathlib.Path(drive_root) / "state" / "worker_pids.json"
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            record = {"workers": []}
-        pids = {int(row["pid"]) for row in record["workers"]}
-        server_pid = int(record.get("server_pid") or 0)
-        if server_pid and server_pid != os.getpid():
-            pids.add(server_pid)
         readable, entries = _read_ledger_strict(pathlib.Path(drive_root))
         if not readable:
             return None
-        pids.update(int(row["pid"]) for row in entries if str(row.get("purpose") or "").startswith("worker:"))
+        pids = {int(row["pid"]) for row in entries if str(row.get("purpose") or "").startswith("worker:")}
         return pids - {0, os.getpid()}
     except (OSError, ValueError, TypeError, KeyError):
         log.warning("Startup worker ownership is unreadable; file recovery is deferred", exc_info=True)

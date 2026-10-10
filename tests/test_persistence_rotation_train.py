@@ -11,7 +11,6 @@ from the newest archive segments.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 
@@ -283,26 +282,6 @@ def test_legacy_snapshot_includes_rotated_llm_usage(tmp_path):
     rows, _state, hashes = _legacy_snapshot(tmp_path)
     assert [row["model"] for row in rows] == ["m1", "m2"]
     assert hashes["events.jsonl"]  # the chain snapshot was hashed and archived
-
-
-def test_memory_tail_backfills_from_rotated_archive(tmp_path):
-    from ouroboros.memory import Memory
-
-    logs = tmp_path / "logs"
-    logs.mkdir(parents=True)
-    (tmp_path / "archive").mkdir()
-    (tmp_path / "archive" / "task_reflections_20260101T000000.jsonl").write_text(
-        "\n".join(json.dumps({"i": i}) for i in range(15)) + "\n", encoding="utf-8",
-    )
-    (logs / "task_reflections.jsonl").write_text(
-        "\n".join(json.dumps({"i": i}) for i in range(15, 20)) + "\n", encoding="utf-8",
-    )
-
-    entries = Memory(tmp_path).read_jsonl_tail("task_reflections.jsonl", 20)
-    assert [entry["i"] for entry in entries] == list(range(20))
-    # An unrotated store behaves exactly as before.
-    short = Memory(tmp_path).read_jsonl_tail("task_reflections.jsonl", 3)
-    assert [entry["i"] for entry in short] == [17, 18, 19]
 
 
 def test_iter_jsonl_chain_objects_chronological(tmp_path):

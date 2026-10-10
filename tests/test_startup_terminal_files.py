@@ -257,18 +257,19 @@ def test_unknown_or_live_prior_worker_defers_without_sleep_or_capture(roots, mon
     assert report["errors"] == ["prior_worker_ownership_unconfirmed"] and child.exists()
 
 
-def test_worker_pid_evidence_is_captured_before_new_pool_overwrites_it(roots, monkeypatch):
+def test_worker_ledger_evidence_is_captured_before_spawn(roots, monkeypatch):
+    from ouroboros import process_custody
     root, _ = roots
-    path = root / "state/worker_pids.json"
-    path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps({"server_pid": 444, "workers": [{"pid": 555}]}))
-    monkeypatch.setattr("ouroboros.process_custody._read_ledger_strict",
-                        lambda root: (True, [{"pid": 666, "purpose": "worker:1"}, {"pid": 999, "purpose": "claudexor"}]))
+    entries = [{"pid": 666, "purpose": "worker:1"}, {"pid": 999, "purpose": "claudexor"}]
+    monkeypatch.setattr(process_custody, "_read_ledger_strict", lambda root: (True, entries))
     captured = maintenance._startup_worker_pids(root)
-    path.write_text(json.dumps({"workers": [{"pid": 777}]}))
-    assert captured == {444, 555, 666}
-    path.write_text("{")
+    entries.append({"pid": 777, "purpose": "worker:2"})
+    assert captured == {666}
+    assert maintenance._startup_worker_pids(root) == {666, 777}
+    monkeypatch.setattr(process_custody, "_read_ledger_strict", lambda root: (False, entries))
     assert maintenance._startup_worker_pids(root) is None
+    monkeypatch.setattr(process_custody, "_read_ledger_strict", lambda root: (True, []))
+    assert maintenance._startup_worker_pids(root) == set()
 
 
 def test_missing_or_nonterminal_child_does_not_resume_model_work(roots, monkeypatch):

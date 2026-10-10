@@ -216,3 +216,12 @@ def reconcile_receipt(action=None, reason=None):
     2-tuple silently breaks the caller. Keep fakes going through here.
     """
     return {"action": action, "reason": reason, "process": "", "server_reconcile": ""}
+
+
+def live_worker_pids(data_root):
+    """The ledger's live worker identities, including across pool respawns."""
+    from ouroboros.process_custody import _read_ledger_strict, _fingerprint_matches
+    readable, entries = _read_ledger_strict(data_root)
+    assert readable, "worker custody is unreadable"
+    return {int(row["pid"]) for row in entries
+            if str(row.get("purpose") or "").startswith("worker:") and _fingerprint_matches(row)}

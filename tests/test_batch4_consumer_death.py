@@ -134,7 +134,7 @@ def test_real_process_death_uses_recorded_birth_and_retains_unknown_money(tmp_pa
         monkeypatch.setattr(workers, 'WORKERS', {0: slot})
         task = {'id': task_id, 'root_task_id': task_id, '_attempt': 3, 'type': 'task', 'chat_id': 1}
         workers.RUNNING[task_id] = {'task': task, 'attempt': 3, 'worker_id': 0}
-        worker_pool_lifecycle._record_worker_pids()
+        worker_pool_lifecycle._record_worker_processes()
         assert slot.process_birth
         end = time.monotonic() + 20
         while not marker.exists() and process.is_alive() and time.monotonic() < end:

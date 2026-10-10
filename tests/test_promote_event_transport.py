@@ -114,8 +114,7 @@ def test_concurrent_pool_start_cannot_orphan_a_generation(monkeypatch, tmp_path)
     monkeypatch.setattr(workers, "_EVENT_Q", event_q)
     monkeypatch.setattr(workers, "_EVENT_Q_GENERATION", "test-generation")
     monkeypatch.setattr(workers, "WORKERS", {})
-    monkeypatch.setattr(workers, "reap_orphaned_workers", lambda: 0)
-    monkeypatch.setattr(workers, "_record_worker_pids", lambda: None)
+    monkeypatch.setattr(workers, "_record_worker_processes", lambda: None)
     monkeypatch.setattr(workers, "_verify_worker_sha_after_spawn", lambda *_args: None)
     barrier = threading.Barrier(2)
 
@@ -171,7 +170,7 @@ def test_single_slot_respawn_starts_child_without_queue_lock(monkeypatch, tmp_pa
     monkeypatch.setattr(workers, "WORKERS", {0: old})
     monkeypatch.setattr(workers, "_get_ctx", lambda: fake_ctx)
     monkeypatch.setattr(workers, "get_event_q", lambda: object())
-    monkeypatch.setattr(workers, "_record_worker_pids", lambda: None)
+    monkeypatch.setattr(workers, "_record_worker_processes", lambda: None)
     # The readiness seam is stubbed: a fake pid must never reach the real teardown.
     handed = []
     monkeypatch.setattr(workers, "_verify_worker_sha_after_spawn", lambda slots, *_rest: handed.append(dict(slots)))
@@ -202,8 +201,7 @@ def test_worker_pool_respawn_reuses_process_event_bus_and_refuses_live_pool(monk
     monkeypatch.setattr(workers, "_EVENT_Q_GENERATION", "test-generation")
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")
     monkeypatch.setattr(workers, "WORKERS", {})
-    monkeypatch.setattr(workers, "reap_orphaned_workers", lambda: 0)
-    monkeypatch.setattr(workers, "_record_worker_pids", lambda: None)
+    monkeypatch.setattr(workers, "_record_worker_processes", lambda: None)
     monkeypatch.setattr(workers.threading, "Thread", MagicMock())
 
     workers.spawn_workers(1)
