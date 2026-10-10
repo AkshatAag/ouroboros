@@ -15,6 +15,7 @@ from contextlib import nullcontext
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ouroboros.observability import timed_phase
+from ouroboros.finalization_timing import cached_finalization_children
 from ouroboros.headless import (
     ARTIFACT_STATUS_FAILED,
     ARTIFACT_STATUS_FINALIZING,
@@ -1198,6 +1199,7 @@ def wait_for_effective_tasks(
     return out
 
 
+@cached_finalization_children
 @storage_observed
 @timed_phase("child_lookup")
 def find_child_tasks(
@@ -1209,19 +1211,10 @@ def find_child_tasks(
     scope: str = "subtree",
     materialize_artifacts: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Collect a task's subagent children.
+    """Project matching subagents, including retry lineage and live queue rows.
 
-    ``scope`` selects the matching semantics (structural, never prose-parsed — P5):
-
-    - ``"subtree"`` (default): a row matches if it is a DIRECT child
-      (``parent_task_id == parent``) OR any subagent of the same tree
-      (``root_task_id == root``). This is the whole-subtree view UI/API surfaces
-      (`gateway/tasks.py`, `gateway/logs.py`) render as descendant cards.
-    - ``"direct"``: ONLY direct children (``parent_task_id == parent``); the
-      root-subtree fallback is skipped. This is what per-node absorption/handoff
-      wants — a LEAF task must see only its OWN children (none), not its parent
-      and siblings. The v6.56 root-fallback made a childless grandchild receive a
-      false ``children_unabsorbed`` reminder about its parent/sibling.
+    Subtree includes direct children OR members of the named root; direct scope
+    includes only children of parent_task_id. A leaf must not absorb siblings.
     """
     parent = str(parent_task_id or "").strip()
     root = str(root_task_id or "").strip()
@@ -1229,14 +1222,8 @@ def find_child_tasks(
     direct_only = str(scope or "subtree").strip().lower() == "direct"
 
     def _raw_row_may_match(item: Dict[str, Any]) -> bool:
-        # Prefilter on the RAW disk row before paying for the effective
-        # projection (child-drive result, queue, store listing and disposition
-        # reads) for UNRELATED tasks. The lineage fields the filter needs are
-        # already on the raw row. Two classes must still be projected despite not matching
-        # raw: a row with a retry pointer (the retry chain projects the
-        # RETRY's lineage, which may match where the raw row does not), and a
-        # lineage-less row is safe to skip — a LIVE one is re-discovered by
-        # the queue overlay below with the snapshot's lineage.
+        # Retry pointers may change lineage. Lineage-less live rows reappear
+        # through the queue overlay; unrelated bodies need no projection.
         if str(item.get("superseded_by") or item.get("retry_task_id") or "").strip():
             return True
         if str(item.get("delegation_role") or "") != "subagent":
@@ -1290,12 +1277,8 @@ def find_child_tasks(
                 row["status"] = status
                 existing = rows.get(tid, {})
                 if not existing:
-                    # The raw prefilter skips a disk row with no lineage of its own;
-                    # the queue snapshot re-identifies it as a child here, but its
-                    # thin queue row lacks the disk row's cost, result, artifacts and
-                    # ts. Materialize the disk row now (bounded — this runs only for
-                    # the handful of actual queue children) so a live lineage-less
-                    # child keeps its content, not just its id.
+                    # Queue lineage can recover a row skipped by the prefilter;
+                    # retain its disk cost, result and artifacts as well.
                     disk = load_effective_task_result(
                         pathlib.Path(drive_root), tid, materialize_artifacts=materialize_artifacts
                     )

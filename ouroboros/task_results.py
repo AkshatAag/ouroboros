@@ -808,12 +808,9 @@ def list_task_results(
 ) -> List[Dict[str, Any]]:
     """List task results, optionally refusing an incomplete authority scan.
 
-    Authority reducers use strict=True: unreadable rows cannot mean absent.
-
-    Schema admission (ABI 7.0, Q8=B): the fail-soft scan QUARANTINES every
-    inadmissible row it meets and reports the whole sweep as ONE durable
-    event; the strict scan raises WITHOUT moving anything. Rows already under
-    ``task_results/quarantine/`` are outside this scan (non-recursive glob).
+    Strict authority readers cannot treat unreadable rows as absent.
+    Fail-soft scans quarantine inadmissible rows with one event; strict scans
+    refuse without moving. The glob excludes task_results/quarantine/.
     """
     wanted = {str(item) for item in list(statuses or []) if str(item).strip()}
     results: List[Dict[str, Any]] = []
@@ -879,6 +876,9 @@ def write_task_result(
         if create_only and existing:
             return None
         prepared_fields = dict(fields)
+        if not existing and "swarm_fanout_rollup" not in prepared_fields:
+            from ouroboros.swarm_rollup import initial_swarm_rollup
+            prepared_fields.setdefault("swarm_fanout_rollup", initial_swarm_rollup(results_drive_root))
         from ouroboros.acceptance_history import preserve_acceptance_history
         prepared_fields = preserve_acceptance_history(existing, prepared_fields)
         if "review_projection" in prepared_fields:

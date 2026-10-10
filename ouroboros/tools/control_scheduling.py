@@ -150,6 +150,8 @@ def _emit_swarm_fanout(
     }
     try:
         append_jsonl(ctx.drive_logs() / "events.jsonl", evt)
+        from ouroboros.swarm_rollup import load_swarm_rollup
+        load_swarm_rollup(ctx.drive_logs().parent, parent_task_id)
     except Exception:
         log.debug("Failed to emit swarm_fanout telemetry", exc_info=True)
 
