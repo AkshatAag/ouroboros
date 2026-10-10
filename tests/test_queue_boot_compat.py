@@ -1,6 +1,7 @@
 """Legacy snapshots retain boot recovery without becoming live ownership proof."""
 
 import datetime as dt
+import json
 
 import pytest
 
@@ -8,7 +9,7 @@ from ouroboros import server_maintenance as maintenance, task_status
 from ouroboros.task_results import load_task_result
 from ouroboros.utils import atomic_write_json
 from supervisor import queue
-from tests.test_startup_terminal_files import _recovery, _started_split_root
+from tests.test_startup_terminal_files import _interrupted_running_row, _recovery, _restore_rows, _started_split_root
 from tests.test_startup_terminal_files import roots as roots
 
 
@@ -75,3 +76,29 @@ def test_split_root_boot_recovery_obeys_the_snapshot_protocol(
     assert report.get("rebound", []) == (["split"] if settled else [])
     assert report["errors"] == report["unresolved"] == []
     assert load_task_result(root, "split")["status"] == ("failed" if settled else "scheduled")
+
+
+@pytest.mark.parametrize("publication", ["legacy_stale", "stamp_stale", "stamp_missing", "stamp_mismatch", "fresh"])
+@pytest.mark.parametrize("malformed", [False, True])
+def test_restore_records_invalid_fences_before_stale_empty_return(roots, publication, malformed):
+    root, _repo = roots
+    _interrupted_running_row(root, "fenced")
+    snapshot = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    now = dt.datetime.now(dt.timezone.utc)
+    old = (now - dt.timedelta(seconds=2000)).isoformat()
+    snapshot["ts"] = old if publication in {"legacy_stale", "fresh"} else now.isoformat()
+    if publication != "legacy_stale":
+        snapshot["generation"] = "snapshot-generation"
+        if publication != "stamp_missing":
+            atomic_write_json(root / "state/queue.alive", {
+                "generation": "foreign-generation" if publication == "stamp_mismatch" else "snapshot-generation",
+                "ts": old if publication == "stamp_stale" else now.isoformat(), "heartbeats": {},
+            })
+    snapshot["acceptance_fences"] = ["not-a-fence-object"] if malformed else []
+    atomic_write_json(queue.QUEUE_SNAPSHOT_PATH, snapshot)
+    fenced = []
+    assert queue.restore_pending_from_snapshot(terminalized=fenced) == 0
+    assert fenced == ["fenced"]
+    assert bool(_restore_rows(root, "queue_restore_invalid_acceptance_fences")) is malformed
+    recorded = _restore_rows(root, "queue_restored_from_snapshot")
+    assert recorded[-1]["terminalized_running"] == ["fenced"]

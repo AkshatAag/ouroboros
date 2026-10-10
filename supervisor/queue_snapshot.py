@@ -848,10 +848,6 @@ def restore_pending_from_snapshot(
         )
         if terminalized is not None:
             terminalized.extend(fenced_running)
-        if stale and not snapshot_pending:
-            _record_queue_restore(terminalized_running=fenced_running,
-                                  direct_roots_incomplete=direct_roots.get("incomplete", False))
-            return 0
         snapshot_pending, pending_by_id, restored = restore_terminalization_retry_rows(
             snapshot_pending, pending=_queue().PENDING, running=_queue().RUNNING,
             queue_seq_counter_ref=_queue().QUEUE_SEQ_COUNTER_REF, sort_pending=_queue().sort_pending,
@@ -866,6 +862,10 @@ def restore_pending_from_snapshot(
             if restored > 0:
                 _queue().persist_queue_snapshot(reason="queue_restored")
             return restored
+        if stale and not snapshot_pending and not restored:
+            _record_queue_restore(terminalized_running=fenced_running,
+                                  direct_roots_incomplete=direct_roots.get("incomplete", False))
+            return 0
 
         skipped_terminal, invalid_depth_restore = 0, []
         cancel_authority_holds: list[str] = []
