@@ -3,6 +3,7 @@ publication and its crash points, child roots, quarantine at import, the byte-id
 export round trip, and the per-row reconciliation of an out-of-band change."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -251,6 +252,50 @@ def test_a_changed_file_replaces_its_row_and_a_touched_file_does_not(tmp_path):
     assert load(root, "done1")["note"] == "an old body wrote this"
     assert meta(root, "baseline")["done1"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
+
+
+def test_a_file_rewritten_with_the_same_size_and_mtime_is_still_reconciled_by_content(tmp_path):
+    root = fixture_root(tmp_path)
+    ensure_current_store(root, with_children=False)
+    path = task_result_path(root, "done1")
+    before = meta(root, "baseline")["done1"]
+    text = path.read_text(encoding="utf-8")
+    assert '"status": "failed"' in text
+    path.write_text(text.replace('"status": "failed"', '"status": "passed"'), encoding="utf-8")  # same length
+    os.utime(path, ns=(before["mtime_ns"], before["mtime_ns"]))
+    assert path.stat().st_size == before["size"] and path.stat().st_mtime_ns == before["mtime_ns"]
+    report = ensure_current_store(root, with_children=False)
+    assert report["status"] == "reconciled" and report["changed"] == 1
+    assert load(root, "done1")["status"] == "passed"
+    # the quiet direction stays quiet: a touch with the same bytes refreshes the baseline, nothing else
+    os.utime(path, ns=(5, 5))
+    assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
+    assert meta(root, "baseline")["done1"]["mtime_ns"] == 5
+
+
+def test_a_read_error_aborts_the_import_typed_and_stamps_nothing(tmp_path, monkeypatch):
+    root = fixture_root(tmp_path)
+    real_read_bytes = pathlib.Path.read_bytes
+
+    def exhausted(self):
+        if self.name == "done1.json":
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", exhausted)
+    with pytest.raises(store.StoreBusy, match="EMFILE"):
+        ensure_current_store(root, with_children=False)
+    assert store.probe(root)[0] == "absent" and not store.generation_stamped(root)
+    assert not list((root / "state").glob("current.sqlite.import-*"))
+    monkeypatch.setattr(pathlib.Path, "read_bytes", real_read_bytes)
+    report = ensure_current_store(root, with_children=False)
+    assert report["status"] == "completed" and report["results"] == 3 and report["refused"] == 1  # only the schema refusal
+    # the same on a published store: the reconciliation aborts typed and the store keeps its rows
+    monkeypatch.setattr(pathlib.Path, "read_bytes", exhausted)
+    with pytest.raises(store.StoreBusy):
+        ensure_current_store(root, with_children=False)
+    monkeypatch.setattr(pathlib.Path, "read_bytes", real_read_bytes)
+    assert load(root, "done1")["status"] == "failed"
 
 
 def test_a_new_file_is_imported_and_a_deleted_file_moves_its_row_to_quarantine(tmp_path):

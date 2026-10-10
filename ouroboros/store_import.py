@@ -21,6 +21,7 @@ obligation set file in FULL, fsync.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -184,16 +185,27 @@ def _baseline_entry(path: pathlib.Path, raw: bytes, document: Optional[Dict[str,
     return {**entry, "body_sha256": sha256_hex(encode_document(document).encode("utf-8"))}
 
 
+def _read_result(path: pathlib.Path) -> Optional[bytes]:
+    """The file's bytes, ``None`` when it is gone; a resource or I/O error is typed and ABORTS
+    the import (an unreadable file is never a refused row, and nothing gets stamped)."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        name = errno.errorcode.get(exc.errno, str(exc.errno))
+        kind = store.StoreBusy if exc.errno in (errno.EMFILE, errno.ENFILE) else store.StoreError
+        raise kind(f"task result not readable ({name}), import aborted: {path}") from exc
+
+
 def _read_results(root: pathlib.Path):
     records: List[Record] = []
     baseline: Dict[str, Dict[str, Any]] = {}
     quarantined: List[Dict[str, str]] = []
     refused: Dict[str, str] = {}
     for path in sorted(task_results_dir(root, create=False).glob("*.json")):
-        try:
-            raw = path.read_bytes()
-        except OSError as exc:
-            refused[path.stem] = type(exc).__name__
+        raw = _read_result(path)
+        if raw is None:
             continue
         document, reason, outcome = _admit(path, raw)
         if outcome == "quarantined":
@@ -266,21 +278,22 @@ def _quarantine_copy(root: pathlib.Path, task_id: str, body: str) -> None:
 def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
     """Per-row reconciliation of an out-of-band change against the content baseline (P6')."""
     baseline: Dict[str, Dict[str, Any]] = txn.meta("baseline") or {}
-    present: Dict[str, pathlib.Path] = {}
+    present: Dict[str, Tuple[pathlib.Path, bytes]] = {}
     changed: List[str] = []
     for path in sorted(task_results_dir(root, create=False).glob("*.json")):
-        try:
-            info = path.stat()
-        except FileNotFoundError:
+        raw = _read_result(path)
+        if raw is None:
             continue
-        present[path.stem] = path
+        present[path.stem] = (path, raw)
         entry = baseline.get(path.stem)
-        if entry is None or (info.st_size, info.st_mtime_ns) == (entry["size"], entry["mtime_ns"]):
-            continue  # new (imported below) or untouched
-        if sha256_hex(path.read_bytes()) == entry["sha256"]:  # touched, same bytes: timestamps prove nothing
-            baseline[path.stem] = {**entry, "size": info.st_size, "mtime_ns": info.st_mtime_ns}
+        if entry is None:
+            continue  # new: imported below
+        if sha256_hex(raw) != entry["sha256"]:  # content decides; size and mtime prove nothing either way
+            changed.append(path.stem)
             continue
-        changed.append(path.stem)
+        info = path.stat()
+        if (info.st_size, info.st_mtime_ns) != (entry["size"], entry["mtime_ns"]):
+            baseline[path.stem] = {**entry, "size": info.st_size, "mtime_ns": info.st_mtime_ns}  # touched, same bytes
     fresh = sorted(task_id for task_id in present if task_id not in baseline)
     deleted = sorted(task_id for task_id in baseline if task_id not in present)
     counts = {"changed": len(changed), "new": len(fresh), "deleted": len(deleted), "results": len(baseline)}
@@ -292,8 +305,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
     refused: Dict[str, str] = {}
     conflicts: Dict[str, Any] = txn.meta("conflicts") or {}
     for task_id in changed + fresh:  # the old body was the authority while it ran: its files win
-        path = present[task_id]
-        raw = path.read_bytes()
+        path, raw = present[task_id]
         document, reason, outcome = _admit(path, raw)
         if outcome == "quarantined":  # the file left the directory with its bytes; the row goes with it
             quarantined.append({"task_id": task_id, "reason": reason})
@@ -342,11 +354,7 @@ def export_facts(root: Any) -> Dict[str, Any]:
             text = encode_document(document)
             data = text.encode("utf-8")
             path = task_result_path(root, task_id)
-            try:
-                current = path.read_bytes()
-            except OSError:
-                current = None
-            if current != data:
+            if _read_result(path) != data:  # a read error aborts the export typed, never «rewrite blindly»
                 write_text_atomic(path, text, fsync=True)
                 written += 1
             total += len(data)
