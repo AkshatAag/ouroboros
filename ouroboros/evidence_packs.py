@@ -767,16 +767,6 @@ def _member_key(member: Dict[str, Any]) -> tuple:
     return member["kind"], member["sha256"], str(member.get("path") or "")
 
 
-def verified_generations(root: Any, task_id: str) -> set:
-    """Generations the index records as re-verified from disk (empty when the cache is unavailable)."""
-    try:
-        with open_index(root) as conn:
-            return {int(row["generation"]) for row in conn.execute(
-                "SELECT generation FROM packs WHERE task_id=? AND verified_at IS NOT NULL", (str(task_id),))}
-    except (store.StoreError, sqlite3.Error, OSError):
-        return set()
-
-
 def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set) -> Dict[str, int]:
     """Remove loose files whose bytes a VERIFIED pack holds; a blob some non-settled task's
     manifests still reference (``keep_shas``) stays loose. A busy file is retried next pass."""
@@ -815,15 +805,11 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
         generations.append(sidecar)
         if listing is not None:
             listing.append((pack_path.with_name(sidecar_name(task_id, generation)), sidecar))
-    verified = verified_generations(root, task_id)
     for sidecar in generations:
-        if int(sidecar["generation"]) in verified:
-            continue
         pack_path = packs_dir(root) / pack_name(task_id, sidecar["generation"])
         verify_pack(pack_path, sidecar)  # from disk, EVERY member, before any unlink
         index_upsert(root, pack_path, {**sidecar, "verified_at": utc_now_iso()})
-        verified.add(int(sidecar["generation"]))
-    report.update(unlink_loose(root, task_id, [s for s in generations if int(s["generation"]) in verified], keep_shas=keep_shas))
+    report.update(unlink_loose(root, task_id, generations, keep_shas=keep_shas))
     record(phase="packed", **report)
     return report
 

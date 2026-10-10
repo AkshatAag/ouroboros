@@ -43,7 +43,7 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
   packer child (`ouroboros/evidence_packer.py`, spawned from the maintenance
   sweep, never at boot) copies its context-checkpoint handles and the blobs its
   call manifests reference into one xz stream under `observability/packs/`,
-  re-verifies every member from disk, indexes it, and only then unlinks the
+  re-verifies every member from disk on each pass, indexes it, then unlinks the
   loose files. A loose placement is replaced by a sha-verified pack member;
   evidence bytes are kept forever. Every reader resolves loose → index → pack;
   a damaged member is an explicit `evidence_corrupt` failure, never empty bytes.
