@@ -236,8 +236,9 @@ def _abandon(root: pathlib.Path, receipt: Dict[str, Any]) -> Dict[str, Any]:
     for drive in _roots(root)[0]:
         with store.open_store(drive, write=True) as txn:
             if txn.phase() != PUBLISHED:
+                absorbed = store_import.absorb_own_export(drive, txn)  # its own partial writes join the baseline
                 txn.set_meta("phase", PUBLISHED)
-                txn.set_meta("export", {"status": "abandoned", "at": utc_now_iso()})
+                txn.set_meta("export", {"status": "abandoned", "at": utc_now_iso(), **absorbed})
                 restored.setdefault("facts", []).append(str(drive))
     receipt["abandoned"] = {"at": utc_now_iso(), **restored}
     _write_receipt(root, receipt)

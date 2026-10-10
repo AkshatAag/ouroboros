@@ -238,6 +238,57 @@ def test_the_export_writes_derived_sets_in_full_from_the_columns(tmp_path):
     assert set(pending) == {"root1", "done1"}
 
 
+def test_the_export_writes_the_whole_document_once_fields_live_in_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "ROW_BACKED_FIELDS", ("status",))  # the cutover's first candidate
+    root = fixture_root(tmp_path)
+    ensure_current_store(root, with_children=False)
+    with store.open_store(root, write=False) as txn:
+        assert "status" not in json.loads(txn.body_text("done1"))  # the body holds the rest
+        assert txn.load("done1")["status"] == "failed"
+    for task_id in ("root1", "child1", "done1"):
+        task_result_path(root, task_id).unlink()
+    export_facts(root)
+    for task_id in ("root1", "child1", "done1"):
+        written = json.loads(task_result_path(root, task_id).read_text(encoding="utf-8"))
+        assert written == load(root, task_id) and "status" in written  # the exact inverse of load, not the body
+
+
+def test_the_export_removes_stale_admissible_files_and_keeps_the_evidence(tmp_path):
+    root = fixture_root(tmp_path)
+    ensure_current_store(root, with_children=False)
+    with store.open_store(root, write=True) as txn:
+        txn.delete_task("done1")  # a row the store no longer holds: its file is stale
+    atomic_write_json(task_result_path(root, "stray"), result("stray"))  # admissible, unknown to the store
+    report = export_facts(root)
+    assert report["removed"] == 2 and meta(root, "export_manifest")["removed"] == ["done1", "stray"]
+    assert not task_result_path(root, "done1", create=False).exists()
+    assert not task_result_path(root, "stray", create=False).exists()
+    assert task_result_path(root, "mismatch", create=False).exists()  # refused: evidence, kept
+    assert (root / "task_results" / "quarantine" / "legacy.json").exists()
+    assert "done1" not in meta(root, "baseline") and "mismatch" in meta(root, "baseline")
+    assert ensure_current_store(root, with_children=False)["status"] == "unchanged"
+
+
+def test_the_export_manifest_is_durable_before_the_first_write(tmp_path, monkeypatch):
+    root = fixture_root(tmp_path)
+    ensure_current_store(root, with_children=False)
+    store.update_task(root, "done1", lambda current: {**current, "db_era": True})
+    for path in (root / "task_results").glob("*.json"):
+        path.unlink()
+    monkeypatch.setattr(store_import, "write_text_atomic", lambda *a, **k: (_ for _ in ()).throw(OSError("disk went away")))
+    with pytest.raises(OSError):
+        export_facts(root)
+    manifest = meta(root, "export_manifest")
+    assert manifest["status"] == "writing" and sorted(manifest["results"]) == ["child1", "done1", "root1"]
+    expected = store.document_text(load(root, "done1")).encode("utf-8")
+    assert manifest["results"]["done1"] == {"size": len(expected), "sha256": hashlib.sha256(expected).hexdigest()}
+    assert set(manifest["sets"]) >= set(o.BOOT_SETS) and manifest["removed"] == []
+    # the abandonment: nothing was written, nothing is adopted; the baseline stays as it was
+    with store.open_store(root, write=True) as txn:
+        assert store_import.absorb_own_export(root, txn) == {"adopted": 0, "planned": 3}
+    assert meta(root, "export_manifest")["status"] == "abandoned"
+
+
 # ---- per-row reconciliation (P6') -------------------------------------------------------
 
 def test_a_changed_file_replaces_its_row_and_a_touched_file_does_not(tmp_path):

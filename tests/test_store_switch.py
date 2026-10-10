@@ -275,6 +275,44 @@ def test_abandonment_after_a_partial_export_restores_both_authorities(switch_roo
     assert store.update_task(root, "done1", lambda current: {**current, "after": "abandonment"})["after"] == "abandonment"
 
 
+def test_abandonment_after_a_partial_facts_export_keeps_the_db_only_rows(switch_root, target_repo, monkeypatch):
+    """The store's own partial writes are recognised by the manifest at abandonment; the next
+    boot sees nothing out of band and keeps every row, a DB-only owner-held set row included."""
+    from ouroboros import store_import
+
+    root, (repo, old, _new) = switch_root, target_repo
+    # the DB era: two rows changed in the store (their files are stale) and one DB-only custody row
+    for task_id in ("done1", "root1"):
+        store.update_task(root, task_id, lambda current: {**current, "db_era": True})
+    with store.open_store(root, write=True) as txn:
+        txn.replace_set("custody_open", {**txn.set_rows("custody_open"), "run:r9": {"task_id": "root1", "custody": "{}"}})
+        assert len(txn.set_rows("custody_open")) == 3
+    intent(root, old)
+    real, calls = store_import.write_text_atomic, []
+
+    def dies_on_the_second_file(path, text, **kwargs):
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError("disk went away")
+        return real(path, text, **kwargs)
+
+    monkeypatch.setattr(store_import, "write_text_atomic", dies_on_the_second_file)
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner())["status"] == "failed"
+    monkeypatch.setattr(store_import, "write_text_atomic", real)
+    assert [p.name for p in calls] == ["done1.json", "root1.json"] and meta(root, "phase") == store.EXPORTING
+    report = store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner(), blockers=["worker:1"])
+    assert report["status"] == "refused" and report["restored"]["facts"] == [str(d) for d in (root, *drives_of(root))]
+    boot = ensure_current_store(root)
+    with store.open_store(root, write=False) as txn:
+        assert len(txn.set_rows("custody_open")) == 3 and "run:r9" in txn.set_rows("custody_open")  # 3 stays 3
+        assert txn.load("done1")["db_era"] is True and txn.load("root1")["db_era"] is True
+    assert boot["status"] == "unchanged"  # the own write of done1.json is not an old body's change
+    assert "db_era" not in task_result_path(root, "root1").read_text(encoding="utf-8")  # the stale file stays stale
+    # adopted: done1 (written) and child1 (already identical); root1's stale file matches nothing
+    assert meta(root, "export") == {**meta(root, "export"), "status": "abandoned", "adopted": 2, "planned": 3}
+    assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=Owner()) == {"status": "nothing_pending"}
+
+
 def before_journal_size(root: pathlib.Path) -> int:
     rows_ = (root / LEDGER_REL).read_text(encoding="utf-8").splitlines()
     return sum(len(line.encode("utf-8")) + 1 for line in rows_)

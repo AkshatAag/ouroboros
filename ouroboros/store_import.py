@@ -34,7 +34,7 @@ from ouroboros import obligations as o
 from ouroboros import store
 from ouroboros.store import (
     FLAG_COLUMNS, GENERATION, GENERATION_KEY, IMPORT_LOCK_NAME, LOCK_NAME, PUBLISHED, TIER_ENFORCED, TIER_NAME,
-    StoreLost, Txn, encode_document,
+    StoreLost, Txn, document_text, encode_document,
 )
 from ouroboros.task_custody import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR, own_child_drives
 from ouroboros.task_result_schema import (
@@ -339,40 +339,100 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
             "conflicts": len(conflicts)}, quarantined
 
 
+def _set_rows_in_full(txn: Txn, name: str) -> Dict[str, Any]:
+    """An obligation set file's content: the stored rows plus the members the flag and
+    status columns derive (owner-held sets are rows only)."""
+    rows = dict(txn.set_rows(name))
+    if name in FLAG_COLUMNS:
+        derived = txn.flagged(name)
+    elif name == "nonterminal":
+        derived = [record["task_id"] for record in txn.conn.execute(
+            "SELECT task_id FROM tasks WHERE status IN ('running', 'interrupted') ORDER BY task_id")]
+    else:
+        derived = []
+    for task_id in derived:
+        rows.setdefault(task_id, o.result_facts(txn.load(task_id)))
+    return rows
+
+
+def _identity(text: str) -> Dict[str, Any]:
+    data = text.encode("utf-8")
+    return {"size": len(data), "sha256": sha256_hex(data)}
+
+
 def export_facts(root: Any) -> Dict[str, Any]:
-    """Every task row to ``task_results/<id>.json`` (tmp + rename, a byte-identical file left
-    alone), every obligation set file in FULL (the stored rows plus the derived members from
-    the flag and status columns), fsync of files and directories; the content baseline is
-    refreshed to what was written, so a later boot sees these files as untouched."""
+    """The exact inverse of the import, in two transactions around the writes.
+
+    T1 commits ``meta.export_manifest``: the name, size and sha256 of every file the export
+    will write (every row's whole ``load`` document to ``task_results/<id>.json``, every
+    obligation set file in FULL) and the stale result files it removes (admissible files
+    whose row the store no longer holds; refused files and the quarantine stay as evidence).
+    Then the files: tmp + rename, a byte-identical file left alone, fsync of files and
+    directories. T2 refreshes the content baseline to what was written and completes the
+    manifest. A death in between leaves a manifest ``absorb_own_export`` reads at
+    abandonment, so the store's own partial writes are never mistaken for an old body's."""
     root = pathlib.Path(root)
-    written = total = exported = 0
-    with store.open_store(root, write=True) as txn:
-        baseline = {task_id: entry for task_id, entry in (txn.meta("baseline") or {}).items() if entry.get("refused")}
-        for task_id in txn.task_ids():
-            exported += 1
+    names: List[str] = []
+    with store.open_store(root, write=True) as txn:  # T1: the plan, durable before the first write
+        baseline = txn.meta("baseline") or {}
+        task_ids = txn.task_ids()
+        names = sorted(set(txn.set_names()) | set(o.BOOT_SETS))  # an older body expects every set file
+        stale = sorted(path.stem for path in task_results_dir(root, create=False).glob("*.json")
+                       if path.stem not in task_ids and not (baseline.get(path.stem) or {}).get("refused"))
+        manifest = {"status": "writing", "started_at": utc_now_iso(),
+                    "results": {task_id: _identity(document_text(txn.load(task_id))) for task_id in task_ids},
+                    "sets": {name: _identity(json.dumps(_set_rows_in_full(txn, name), ensure_ascii=False, indent=2))
+                             for name in names},
+                    "removed": stale}
+        txn.set_meta("export_manifest", manifest)
+    written = total = 0
+    entries: Dict[str, Dict[str, Any]] = {}
+    with store.open_store(root, write=False) as txn:  # the frozen rows, streamed to their files
+        for task_id in task_ids:
             document = txn.load(task_id)
-            text = encode_document(document)
+            text = document_text(document)
             data = text.encode("utf-8")
             path = task_result_path(root, task_id)
             if _read_result(path) != data:  # a read error aborts the export typed, never «rewrite blindly»
                 write_text_atomic(path, text, fsync=True)
                 written += 1
             total += len(data)
-            baseline[task_id] = _baseline_entry(path, data, document)
-        names = sorted(set(txn.set_names()) | set(o.BOOT_SETS))  # an older body expects every set file
+            entries[task_id] = _baseline_entry(path, data, document)
         for name in names:
-            rows = dict(txn.set_rows(name))
-            if name in FLAG_COLUMNS:
-                derived = txn.flagged(name)
-            elif name == "nonterminal":
-                derived = [record["task_id"] for record in txn.conn.execute(
-                    "SELECT task_id FROM tasks WHERE status IN ('running', 'interrupted') ORDER BY task_id")]
-            else:
-                derived = []  # owner-held sets: rows only
-            for task_id in derived:
-                rows.setdefault(task_id, o.result_facts(txn.load(task_id)))
-            atomic_write_json(o.path(root, name), rows, fsync=True)
-        txn.set_meta("baseline", baseline)
+            atomic_write_json(o.path(root, name), _set_rows_in_full(txn, name), fsync=True)
+    for task_id in stale:
+        with contextlib.suppress(FileNotFoundError):
+            task_result_path(root, task_id).unlink()
     store.fsync_directory(task_results_dir(root, create=False))
     store.fsync_directory(o.path(root, "nonterminal").parent)
-    return {"results": exported, "written": written, "bytes": total, "sets": len(names)}
+    with store.open_store(root, write=True) as txn:  # T2: the baseline follows what was written
+        refused = {task_id: entry for task_id, entry in (txn.meta("baseline") or {}).items() if entry.get("refused")}
+        txn.set_meta("baseline", {**refused, **entries})
+        txn.set_meta("export_manifest", {**manifest, "status": "completed", "completed_at": utc_now_iso()})
+    return {"results": len(task_ids), "written": written, "removed": len(stale), "bytes": total, "sets": len(names)}
+
+
+def absorb_own_export(root: Any, txn: Txn) -> Dict[str, Any]:
+    """At the abandonment of a partial export (inside the transaction that republishes the
+    store): every file on disk whose size and sha256 match the manifest is this store's own
+    write and joins the baseline; a removed stale file leaves it. The next boot then sees
+    nothing out of band and keeps every row, the owner-held sets included, instead of
+    re-importing the store's own partial export as an old body's change."""
+    root = pathlib.Path(root)
+    manifest = txn.meta("export_manifest") or {}
+    if manifest.get("status") != "writing":
+        return {}
+    baseline = txn.meta("baseline") or {}
+    adopted = 0
+    for task_id, identity in manifest.get("results", {}).items():
+        path = task_result_path(root, task_id)
+        raw = _read_result(path)
+        if raw is not None and len(raw) == identity["size"] and sha256_hex(raw) == identity["sha256"]:
+            baseline[task_id] = _baseline_entry(path, raw, txn.load(task_id))
+            adopted += 1
+    for task_id in manifest.get("removed", []):
+        if _read_result(task_result_path(root, task_id)) is None:
+            baseline.pop(task_id, None)
+    txn.set_meta("baseline", baseline)
+    txn.set_meta("export_manifest", {**manifest, "status": "abandoned", "adopted": adopted, "at": utc_now_iso()})
+    return {"adopted": adopted, "planned": len(manifest.get("results", {}))}

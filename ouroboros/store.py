@@ -287,11 +287,15 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))  # key order kept: facts round-trip
 
 
+def document_text(document: Dict[str, Any]) -> str:
+    """The whole document serialized exactly as the result writer serializes a file: what an
+    export writes (the exact inverse of ``load``), what the content baseline hashes."""
+    return json.dumps(document, ensure_ascii=False, indent=2)
+
+
 def encode_document(document: Dict[str, Any]) -> str:
-    """The body text: the document minus its row-backed fields, serialized exactly as the
-    result writer serializes a file (so an export reproduces the imported bytes)."""
-    body = {key: value for key, value in document.items() if key not in ROW_BACKED_FIELDS}
-    return json.dumps(body, ensure_ascii=False, indent=2)
+    """The body text stored in ``task_bodies``: the document minus its row-backed fields."""
+    return document_text({key: value for key, value in document.items() if key not in ROW_BACKED_FIELDS})
 
 
 def typed_columns(document: Dict[str, Any], *, pending_drive: Optional[bool] = None) -> Dict[str, Any]:
