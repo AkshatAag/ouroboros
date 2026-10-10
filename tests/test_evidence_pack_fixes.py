@@ -436,3 +436,36 @@ def test_manifest_members_follow_first_appearance_with_name_ties(root):
     # A later atomic rewrite preserves the original created_at order.
     obs.write_call_manifest(root, task_id="ordered", call_id="z", manifest={"created_at": "2026-01-01T00:00:01Z", "ref": first})
     assert [sha for _, sha, _ in packs.manifest_blob_refs(root, "ordered")] == expected
+
+
+@pytest.mark.parametrize("kind", ["task", "archive"])
+def test_unpacker_is_published_before_unlink_and_write_failure_keeps_loose(root, monkeypatch, kind):
+    if kind == "task":
+        refs, handle = _task(root, "manual", blobs=1)
+        loose = {pathlib.Path(refs[0]["path"]), _handle_path(root, "manual", handle)}
+    else:
+        source = root / "archive/usage_ledger/segment_ep1.jsonl"
+        source.parent.mkdir(parents=True)
+        source.write_text('{"attempt_id":"example"}\n', encoding="utf-8")
+        loose = {source}
+    original_write, original_unlink = packs.write_bytes_atomic, os.unlink
+
+    def fail_readme(path, *args, **kwargs):
+        if pathlib.Path(path).name == packs.README_NAME:
+            raise PermissionError("read-only unpacker destination")
+        return original_write(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(packs, "write_bytes_atomic", fail_readme)
+        report = packer.run_pass(root)
+    assert report["faults"] >= 1 and all(path.exists() for path in loose)
+
+    def unlink(path, *args, **kwargs):
+        if pathlib.Path(path) in loose:
+            assert (packs.packs_dir(root) / packs.UNPACKER_NAME).read_text() == packs._UNPACKER
+            assert (packs.packs_dir(root) / packs.README_NAME).read_text() == packs._README
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    assert packer.run_pass(root)["faults"] == 0
+    assert not any(path.exists() for path in loose)

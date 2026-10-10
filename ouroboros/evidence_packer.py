@@ -173,8 +173,6 @@ def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
     except Exception as exc:
         report["faults"] += 1
         packs.record_storage_pack(root, phase="fault", task_id="", exception_class=type(exc).__name__)
-    with contextlib.suppress(OSError):
-        packs.write_unpacker(root)
     return report
 
 

@@ -924,6 +924,7 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
         pack_path = packs_dir(root) / pack_name(task_id, sidecar["generation"])
         verify_pack(pack_path, sidecar)  # from disk, EVERY member, before any unlink
         index_upsert(root, pack_path, {**sidecar, "verified_at": utc_now_iso()})
+    write_unpacker(root)
     report.update(unlink_loose(root, task_id, generations, keep_shas=keep_shas, revision=revision))
     record(phase="packed", **report)
     return report
@@ -937,6 +938,7 @@ def archive_usage_segments(root: Any) -> Dict[str, int]:
     directory = pathlib.Path(root) / USAGE_ARCHIVE_REL
     report = {"archived": 0, "bytes": 0, "compressed": 0}
     for source in sorted(directory.glob("segment_ep*.jsonl")) if directory.is_dir() else []:
+        write_unpacker(root)
         target, meta = source.with_name(source.name + ".xz"), source.with_name(source.name + ".xz.json")
         tmp = target.with_name(f".{target.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
         digest, size = hashlib.sha256(), 0
@@ -1062,11 +1064,10 @@ Blobs return as `observability/blobs/<sha256>.<kind>.gz` (gzip), handles under
 """
 
 
-def write_unpacker(root: Any) -> bool:
+def write_unpacker(root: Any) -> None:
     """Refresh the data-root unpacker and its README when their content changed."""
     directory = packs_dir(root)
     directory.mkdir(parents=True, exist_ok=True)
-    changed = False
     for name, text in ((UNPACKER_NAME, _UNPACKER), (README_NAME, _README)):
         path = directory / name
         try:
@@ -1074,9 +1075,8 @@ def write_unpacker(root: Any) -> bool:
                 continue
         except OSError:
             pass
-        write_bytes_atomic(path, text.encode("utf-8"))
-        changed = True
-    return changed
+        write_bytes_atomic(path, text.encode("utf-8"), fsync=True)
+    store.fsync_directory(directory)
 
 
 def record_storage_pack(root: Any, **facts: Any) -> None:

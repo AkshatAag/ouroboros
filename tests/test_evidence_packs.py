@@ -399,8 +399,8 @@ def test_usage_archive_segments_become_xz_and_attempt_ids_stay_findable(root):
     archived.write_bytes(archived.read_bytes()[:-9])  # truncated: unknown, never absence
     assert _retained_attempt_ids(root, {"att-999"}) is None
     done = subprocess.run([sys.executable, str(root / "observability" / "packs" / packs.UNPACKER_NAME), "--usage-archive"],
-                          capture_output=True, text=True, cwd=str(root)) if (root / "observability" / "packs" / packs.UNPACKER_NAME).exists() else None
-    assert done is None or done.returncode != 0  # a damaged archive is refused, not silently emptied
+                          capture_output=True, text=True, cwd=str(root))
+    assert done.returncode != 0 and "EOFError" in done.stderr
 
 
 def test_unpacker_restores_usage_archive(root):
