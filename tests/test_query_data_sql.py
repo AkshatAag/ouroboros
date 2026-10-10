@@ -69,6 +69,51 @@ def test_attach_cannot_create_a_file(ctx):
     assert run(ctx, "SELECT 42")["data"]["rows"] == [[42]]
 
 
+@pytest.mark.parametrize("layer", ["mode_ro", "query_only"])
+def test_sql_write_layers_independently(ctx, monkeypatch, layer):
+    original_connect = sqlite3.connect
+
+    class ProbeConnection(sqlite3.Connection):
+        def set_authorizer(self, callback):
+            return super().set_authorizer(lambda *args: sqlite3.SQLITE_OK)
+
+        def execute(self, statement, *args, **kwargs):
+            # Exercise the real connection setup without changing pytest's heap limit.
+            if statement.startswith("PRAGMA hard_heap_limit="):
+                statement = "SELECT 1"
+            elif layer == "mode_ro" and statement == "PRAGMA query_only=ON":
+                statement = "PRAGMA query_only=OFF"
+            return super().execute(statement, *args, **kwargs)
+
+    def connect(database, **kwargs):
+        if layer == "query_only":
+            database = database.replace("mode=ro", "mode=rw")
+        return original_connect(database, factory=ProbeConnection, **kwargs)
+
+    monkeypatch.setattr(sql.sqlite3, "connect", connect)
+    request = dict(db="current", query="SELECT task_id FROM tasks", max_rows=10, max_bytes=4096)
+    with sql._connection(store.store_path(ctx.drive_root), store.TIER_ENFORCED, 1) as conn:
+        assert sql._fetch(conn, request)["rows"] == [["caller"]]
+        assert conn.execute("PRAGMA query_only").fetchone() == (int(layer == "query_only"),)
+        with pytest.raises(sqlite3.OperationalError, match="readonly database"):
+            sql._fetch(conn, {**request, "query": "CREATE TABLE query_probe(value)"})
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name='query_probe'").fetchall() == []
+
+
+def test_authorizer_denies_extension_function_independently():
+    conn = sqlite3.connect(":memory:")  # Writable, with query_only off.
+    try:
+        # A callable replacement removes SQLite's separate extension-loading refusal.
+        conn.create_function("load_extension", 1, lambda name: "callable")
+        assert conn.execute("SELECT load_extension('test-extension')").fetchone() == ("callable",)
+        conn.set_authorizer(sql._authorizer("money"))
+        assert conn.execute("SELECT length('readable')").fetchone() == (8,)
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized to use function: load_extension"):
+            conn.execute("SELECT load_extension('test-extension')")
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("pragma", ["table_info(tasks)", "table_xinfo(tasks)", "table_list",
                                     "index_list(tasks)", "index_info(tasks_parent)"])
 def test_metadata_pragmas_are_readable(ctx, pragma):
