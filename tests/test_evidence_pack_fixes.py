@@ -1,6 +1,7 @@
 """Regressions for the dispositioned S5 pack and reader findings."""
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 
@@ -8,6 +9,7 @@ import pytest
 
 from ouroboros import evidence_packer as packer
 from ouroboros import evidence_packs as packs
+from ouroboros.artifacts import store_actor_source_bytes
 from tests.test_evidence_packs import _handle_path, _loose, _task
 from tests.test_evidence_packs import root as root
 
@@ -93,3 +95,22 @@ def test_generation_is_never_reused_while_either_publication_file_exists(root, o
     with pytest.raises(FileExistsError):
         packs.write_pack(root, "orphan", 1, packs.loose_members(root, "orphan"))
     assert path.read_bytes() == before
+
+
+def test_presence_reentry_projection_reads_loose_and_packed_source(root, monkeypatch):
+    from ouroboros import artifacts
+    from ouroboros.presence_continuation import reentry_source_projection
+
+    _task(root, "presence", blobs=1)
+    raw = json.dumps({"kind": "presence_reentry", "task_id": "presence", "conversation_key": "room",
+                      "history": {"status": "ok", "start": 0, "end": 1}}).encode()
+    ref = store_actor_source_bytes(root, "presence", category="context_checkpoints",
+                                  source_id="presence-reentry", data=raw, extension="json")
+    before = reentry_source_projection(root, "presence", ref["sha256"])
+    assert before["complete_sha256"] == ref["sha256"]
+    assert packer.run_pass(root)["faults"] == 0
+    assert not _handle_path(root, "presence", ref).exists()
+    assert reentry_source_projection(root, "presence", ref["sha256"]) == before
+    assert reentry_source_projection(root, "presence", "0" * 64)["reason"] == "source_unavailable"
+    monkeypatch.setattr(artifacts, "read_actor_source_bytes", lambda *a, **k: (_ for _ in ()).throw(OSError("read failed")))
+    assert reentry_source_projection(root, "presence", ref["sha256"])["reason"] == "source_unreadable"

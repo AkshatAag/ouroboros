@@ -760,18 +760,19 @@ def reentry_source_projection(root: Path, task_id: str, digest: str,
                               start_char: Any = None, end_char: Any = None,
                               history_offset: Any = None) -> dict:
     """Resolve one physical author's immutable reentry checkpoint, never a caller path."""
-    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path, text_source_range_projection
+    from ouroboros.artifacts import read_actor_source_bytes, text_source_range_projection
+    from ouroboros.evidence_packs import handle_info
 
     unavailable = {"schema": 1, "kind": "presence_reentry", "status": "unavailable"}
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         return {**unavailable, "reason": "source_ref_invalid"}
     path = f"source_handles/context_checkpoints/presence-reentry-{digest}.json"
     try:
-        stored = task_artifact_dir_path(root, task_id, create=False) / path
-        if not stored.exists():
+        stored = handle_info(root, task_id, path)
+        if stored is None:
             return {**unavailable, "reason": "source_unavailable"}
         ref = {"kind": "task_source", "root": "artifact_store", "path": path,
-               "size": stored.stat().st_size, "sha256": digest}
+               "size": stored["size"], "sha256": digest}
         raw = read_actor_source_bytes(root, task_id, ref)
         snapshot = json.loads(raw)
         if snapshot.get("kind") != "presence_reentry" or snapshot.get("task_id") != task_id:
@@ -796,7 +797,7 @@ def reentry_source_projection(root: Path, task_id: str, digest: str,
     except (ValueError, TypeError, AttributeError, UnicodeError):
         return {**unavailable, "reason": "source_identity_mismatch"}
     except (OSError, RuntimeError):
-        return {**unavailable, "reason": "source_unavailable"}
+        return {**unavailable, "reason": "source_unreadable"}
 
 
 def replay_envelope(drive_root: Path, task_id: str, identity: str) -> Any:
