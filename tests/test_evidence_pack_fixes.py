@@ -407,3 +407,32 @@ def test_restore_and_preflight_cover_all_descendants_but_not_symlink_drives(root
     assert not _handle_path(outside, "outside", outside_handle).exists()
     assert packs.pending_restore_bytes(root) == 0
     assert packs.restore_checkpoint_handles(root)["handles"] == 0
+
+
+def test_first_backfill_by_size_then_new_settlements_before_backlog(root):
+    from ouroboros.task_results import task_result_path
+
+    _task(root, "large", blobs=1, payloads=[b"x" * 10000])
+    _task(root, "small", blobs=1, payloads=[b"small"])
+    os.utime(task_result_path(root, "large"), ns=(10, 10))
+    os.utime(task_result_path(root, "small"), ns=(20, 20))
+    assert [task for task, _ in packer.ordered_candidates(root, ["small", "large"])] == ["large", "small"]
+    _task(root, "published", blobs=1)
+    packs.pack_task(root, "published", keep_shas=set())
+    _task(root, "new", blobs=1, payloads=[b"new"])
+    assert [task for task, _ in packer.ordered_candidates(root, ["large", "small", "new"])] == ["new", "large", "small"]
+
+
+def test_manifest_members_follow_first_appearance_with_name_ties(root):
+    _task(root, "ordered", blobs=0)
+    directory = root / "observability/calls/ordered"
+    first, second, third = [_blob(root, value) for value in (b"first", b"second", b"third")]
+    for name, ref, created in [("z", first, "2026-01-01T00:00:01Z"), ("b", third, "2026-01-01T00:00:02Z"),
+                               ("a", second, "2026-01-01T00:00:02Z")]:
+        path = directory / (name + ".json")
+        path.write_text(json.dumps({"created_at": created, "ref": ref}), encoding="utf-8")
+    expected = [ref["sha256"] for ref in (first, second, third)]
+    assert [sha for _, sha, _ in packs.manifest_blob_refs(root, "ordered")] == expected
+    # A later atomic rewrite preserves the original created_at order.
+    obs.write_call_manifest(root, task_id="ordered", call_id="z", manifest={"created_at": "2026-01-01T00:00:01Z", "ref": first})
+    assert [sha for _, sha, _ in packs.manifest_blob_refs(root, "ordered")] == expected

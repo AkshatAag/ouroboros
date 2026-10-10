@@ -740,18 +740,26 @@ def _walk_blob_refs(value: Any, out: List[Tuple[str, str, int]], seen: set) -> N
 
 def manifest_blob_refs(root: Any, task_id: str) -> List[Tuple[str, str, int]]:
     """``(kind, sha256, size)`` of every blob the task's call manifests reference, first appearance first."""
+    from ouroboros.deadline_utils import parse_deadline_ts
+
     out: List[Tuple[str, str, int]] = []
     seen: set = set()
+    manifests = []
     directory = pathlib.Path(root) / "observability" / "calls" / str(task_id)
     try:
-        entries = sorted(os.scandir(directory), key=lambda e: e.name)
+        entries = list(os.scandir(directory))
     except FileNotFoundError:
         return out
     for entry in entries:
         if entry.name.startswith(".") or not entry.name.endswith(".json"):
             continue
         with contextlib.suppress(OSError, ValueError):
-            _walk_blob_refs(json.loads(pathlib.Path(entry.path).read_text(encoding="utf-8")), out, seen)
+            value = json.loads(pathlib.Path(entry.path).read_text(encoding="utf-8"))
+            created = parse_deadline_ts(value.get("created_at")) if isinstance(value, dict) else None
+            first = created.timestamp() if created else entry.stat(follow_symlinks=False).st_mtime_ns / 1e9
+            manifests.append((first, entry.name, value))
+    for _, _, value in sorted(manifests):
+        _walk_blob_refs(value, out, seen)
     return out
 
 

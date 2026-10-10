@@ -118,9 +118,9 @@ def ordered_candidates(root: pathlib.Path, settled: List[str]) -> List[Tuple[str
             touched = task_result_path(root, task, create=False).stat().st_mtime_ns
         except (OSError, ValueError):
             touched = 0
-        (recent if touched > newest_pack else backfill).append((task, raw, touched))
-    recent.sort(key=lambda item: -item[2])
-    backfill.sort(key=lambda item: -item[1])
+        (recent if newest_pack and touched > newest_pack else backfill).append((task, raw, touched))
+    recent.sort(key=lambda item: (-item[2], item[0]))
+    backfill.sort(key=lambda item: (-item[1], item[0]))
     return [(task, raw) for task, raw, _ in recent + backfill]
 
 
