@@ -578,7 +578,9 @@ def test_default_wait_queue_io_gap_returns_exact_set_repair(tmp_path, snapshot):
 
 
 @pytest.mark.parametrize("delegated", [False, True])
-def test_wait_source_survives_real_child_drive_settlement_and_fresh_registry(tmp_path, delegated):
+@pytest.mark.parametrize("authored", [False, True])
+@pytest.mark.parametrize("copied_back", [False, True])
+def test_wait_source_survives_real_child_drive_settlement_and_fresh_registry(tmp_path, delegated, authored, copied_back):
     from ouroboros import artifacts, headless, task_custody
     from ouroboros.tools.registry import ToolRegistry
 
@@ -603,12 +605,49 @@ def test_wait_source_survives_real_child_drive_settlement_and_fresh_registry(tmp
         ref = view["complete_source"]
     full = artifacts.read_actor_source_bytes(drive, parent, ref)
     assert (json.loads(full)["result"] if delegated else json.loads(full)["tasks"]["large"]["result"]) == text
-    write_task_result(drive, parent, "running")
-    write_task_result(data, parent, "cancelled", result="ended", child_drive_root=str(drive))
+    if authored:
+        artifacts.store_task_artifact_bytes(drive, parent, "report.txt", b"authored result")
+    expected = {"report.txt"} if authored else set()
+
+    def assert_deliverables(root):
+        from ouroboros.review_evidence_sections import _accept_artifact_manifest
+        from ouroboros.task_finalization import rescued_files_fact
+        from ouroboros.task_results import load_task_result
+
+        for measure in (False, True):
+            rows = artifacts.collect_task_artifact_records(root, parent, measure=measure,
+                                                          strict=True, require_registered=True)
+            assert {r["name"] for r in rows} == expected
+        stored = load_task_result(root, parent) or {}
+        assert {r["name"] for r in task_custody.store_artifact_view(root, parent, stored.get("artifacts") or [])} == expected
+        assert {r["name"] for r in _accept_artifact_manifest(root, parent, set())} == expected
+        fact = rescued_files_fact(parent, [artifacts.task_artifact_dir_path(root, parent)])
+        assert (fact["count"], fact["state"]) == (len(expected), "positive" if authored else "zero")
+        assert fact["hash_computed"] is False
+
+    assert_deliverables(drive)
+    if copied_back:
+        write_task_result(drive, parent, "completed", result="ended",
+                          artifacts=artifacts.collect_task_artifact_records(drive, parent))
+        adopted = headless.copy_child_task_result(data, {"id": parent, "drive_root": str(drive)})
+        assert adopted["status"] == "completed"
+        retained = headless.retry_child_task_refs(data, drive, parent)
+        assert retained["child_ref_promotion"]["status"] == "complete"
+        assert_deliverables(data)
+    else:
+        write_task_result(drive, parent, "running")
+        write_task_result(data, parent, "cancelled", result="ended", child_drive_root=str(drive))
     outcome = task_custody.settle_child_drive(data, parent, drive, live=lambda _task: False)
     assert outcome["status"] == "removed", outcome
     assert not drive.exists()
     assert artifacts.read_actor_source_bytes(data, parent, ref) == full
+    assert_deliverables(data)
+    from ouroboros.task_results import load_task_result
+    settled = load_task_result(data, parent)
+    assert {r["name"] for r in settled.get("artifacts") or []} == expected
+    assert {r["name"] for r in (settled.get("artifact_bundle") or {}).get("artifacts") or []} == expected
+    registration = artifacts.registered_task_artifact(data, parent, ref["path"])
+    assert registration["kind"] == "task_source" and registration["sha256"] == ref["sha256"]
     with pytest.raises(ValueError):
         artifacts.read_actor_source_bytes(data, parent, {**ref, "sha256": "0" * 64})
     with pytest.raises(ValueError):
@@ -618,3 +657,29 @@ def test_wait_source_survives_real_child_drive_settlement_and_fresh_registry(tmp
     args = {**ref["read"]["arguments"], "start_char": full.decode().index("LAST_PRIVATE_FACT") - 30,
             "max_lines": 2000}
     assert "LAST_PRIVATE_FACT" in fresh.execute("read_file", args)
+
+
+@pytest.mark.parametrize("failure", ["missing", "mismatch"])
+def test_internal_wait_source_remains_a_required_custody_obligation(tmp_path, failure):
+    from ouroboros import artifacts, headless, task_custody
+
+    data, tid = tmp_path / "canonical", "source-obligation"
+    drive = headless.prepare_task_drive(data, tid, "empty")
+    full = b'{"internal": "complete source"}'
+    ref = artifacts.store_actor_source_bytes(drive, tid, category="tool_results", source_id="wait-handoff",
+                                            data=full, extension="json", register=True)
+    source = artifacts.task_artifact_dir_path(drive, tid) / ref["path"]
+    write_task_result(drive, tid, "running")
+    write_task_result(data, tid, "cancelled", result="ended", child_drive_root=str(drive))
+    if failure == "missing":
+        source.unlink()
+    else:
+        source.write_bytes(b"changed")
+    outcome = task_custody.settle_child_drive(data, tid, drive, live=lambda _task: False)
+    assert outcome["status"] == "retained"
+    assert outcome["reason"] == ("artifact_source_missing" if failure == "missing" else "artifact_source_mismatch")
+    assert drive.exists()
+    source.write_bytes(full)
+    assert task_custody.settle_child_drive(data, tid, drive, live=lambda _task: False)["status"] == "removed"
+    assert artifacts.read_actor_source_bytes(data, tid, ref) == full
+    assert artifacts.collect_task_artifact_records(data, tid, strict=True) == []
