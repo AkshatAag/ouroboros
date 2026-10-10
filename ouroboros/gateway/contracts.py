@@ -695,6 +695,7 @@ class ActiveDirectTurn(TypedDict):
     phase: str
     started_at: float
     model_waits: NotRequired[Dict[str, Any]]
+    model_activity: NotRequired[Dict[str, Any]]  # content-free observation bound to the active Main call
     task_attempt: NotRequired[int]
 
 

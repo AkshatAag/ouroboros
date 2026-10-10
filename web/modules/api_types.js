@@ -66,18 +66,7 @@
  * @property {number} unknown_unmetered  // window rows without a price: spent_24h_usd is then a floor ("at least")
  * @property {boolean} integrity_degraded  // the ledger was quarantined/repaired; the numbers are best-effort
  */
-/**
- * @typedef {Object} ActiveDirectTurn
- * @property {Object.<string,Object>=} model_waits
- * @property {number=} task_attempt
- * @property {string} activity_id
- * @property {number} chat_id
- * @property {string} project_id
- * @property {string} client_message_id
- * @property {string} kind
- * @property {string} phase
- * @property {number} started_at
- */
+/** @typedef {import('./task_activity_types.js').ActiveDirectTurn} ActiveDirectTurn */
 /** @typedef {import('./task_activity_types.js').ActiveChatActivity} ActiveChatActivity */
 /**
  * @typedef {Object} EvolutionDataResponse

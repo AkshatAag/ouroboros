@@ -93,6 +93,37 @@ function makeInstance({ details = {}, calls = [], state = { census: null }, chat
     };
 }
 
+for (const chatId of [1, 7]) {
+    test(`model observations reach header and card without typing or new polling (chat ${chatId})`, () => {
+        const fx = makeInstance({ chatId });
+        const row = { activity_id: 'observed-call', chat_id: chatId, kind: 'direct_chat', phase: 'working', task_attempt: 1 };
+        const show = phase => fx.census([{ ...row, model_activity: { phase, operation_id: 'same', invocation_id: 'same-send' } }], true);
+        try {
+            fx.handlers.get('chat')({ task_id: row.activity_id, chat_id: chatId, role: 'assistant',
+                is_progress: true, content: 'Inspecting current work', ts: '2026-10-11T00:00:00Z' });
+            for (const [phase, expected] of [
+                ['queued', 'Request accepted · waiting for admission'],
+                ['dispatching', 'Preparing request dispatch'],
+                ['awaiting_response', 'Sending request / waiting for response'],
+                ['rejoining', 'Rejoining the same model operation'],
+                ['response_received', 'Response received · processing'],
+            ]) {
+                show(phase);
+                assert.equal(fx.status(), expected);
+                assert.equal(fx.card(row.activity_id).querySelector('[data-live-phase]').textContent, expected);
+                assert.equal(fx.card(row.activity_id).querySelector('[data-wait-id]'), null);
+            }
+            fx.close();
+            assert.equal(fx.status(), 'Reconnecting...');
+            fx.handlers.get('chat')({ task_id: row.activity_id, chat_id: chatId, role: 'assistant',
+                content: 'Done', system_type: 'task_summary', task_terminal_status: 'completed', ts: '2026-10-11T00:00:01Z' });
+            show('queued');
+            assert.equal(fx.card(row.activity_id).querySelector('[data-live-phase]').textContent, 'Done');
+            assert.notEqual(fx.status(), 'Request accepted · waiting for admission');
+        } finally { fx.instance.destroy(); restoreDom(fx.prior); }
+    });
+}
+
 test('incident replay: a finished turn whose subagent typed with no kind returns to Online', async () => {
     const fx = makeInstance();
     try {
