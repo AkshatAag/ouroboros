@@ -495,6 +495,7 @@ def _pin_lane_groups(items, shards: int) -> None:
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config):
+    config.addinivalue_line("markers", "scale: storage operation-count acceptance measurements")
     if _PYTEST_ROOT is not None:
         config.inicfg["cache_dir"] = str(_PYTEST_ROOT / "pytest-cache")
     _guard_test_tree_deletion(config)

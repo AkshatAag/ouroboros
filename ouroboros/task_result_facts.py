@@ -19,6 +19,7 @@ from ouroboros.task_result_schema import (
     task_result_schema_refusal,
 )
 from ouroboros.utils import read_json_dict
+from ouroboros.storage_observation import storage_count
 
 # Never retain bodies: a cached row only chooses which authoritative files to
 # read. Immutable tuple values publish atomically; concurrent scans may repeat
@@ -39,6 +40,7 @@ _RESULT_FACT_KEYS = (
 
 
 def _result_stat(path: pathlib.Path) -> tuple:
+    storage_count("fact_stats")
     stat = path.stat()
     return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
@@ -56,6 +58,7 @@ def raw_result_facts(results_dir: pathlib.Path, *, reader=None) -> tuple[Dict[st
             names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
     except FileNotFoundError:
         names = []
+    storage_count("fact_entries", len(names))
     dir_key = str(results_dir)
     present = set(names)
     for key in [k for k in list(_RAW_TS_MEMO) if k[0] == dir_key and k[1] not in present]:
@@ -72,6 +75,7 @@ def raw_result_facts(results_dir: pathlib.Path, *, reader=None) -> tuple[Dict[st
                 rows[name] = dict(cached[1])
                 continue
             _RAW_TS_MEMO.pop(key, None)
+            storage_count("fact_decodes")
             data = reader(path)
             if data is None or _result_stat(path) != signature:
                 malformed.append(name)
@@ -119,6 +123,7 @@ def selected_task_results(drive_root: pathlib.Path, may_match) -> List[dict]:
     rows, quarantined = [], []
     for name in sorted(names):
         path = directory / name
+        storage_count("selected_decodes")
         data = read_json_dict(path)
         if data is None and not path.is_file():
             continue

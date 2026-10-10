@@ -32,6 +32,7 @@ import pathlib
 import stat
 from typing import Any, Dict, List
 
+from ouroboros.storage_observation import storage_observed, storage_phase, storage_count
 from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
 from ouroboros.observability import stamp_finalization_enqueue
 
@@ -802,6 +803,7 @@ def model_execution_projection(usage: Dict[str, Any]) -> Dict[str, Any] | None:
     }
 
 
+@storage_observed
 def build_swarm_efficiency(env: Any, task: Dict[str, Any]) -> Dict[str, Any] | None:
     """Compact derived swarm-efficiency rollup: observed fan-out, or the
     zero-fanout disclosure block for a host-attested Swarm-intent task.
@@ -856,29 +858,31 @@ def build_swarm_efficiency(env: Any, task: Dict[str, Any]) -> Dict[str, Any] | N
         # finalization (not a hot path), for fan-out and Swarm-intent tasks.
         # Chain-aware (CPL4-C1): early fan-out events may already have rotated
         # into archive/events_*.jsonl by finalization time.
-        for ev in iter_jsonl_chain_objects(events_path):
-            if ev.get("type") != "swarm_fanout":
-                continue
-            if str(ev.get("parent_task_id") or ev.get("task_id") or "") != task_id:
-                continue
-            fanout_count += 1
-            try:
-                requested_count_total += int(ev.get("requested_count") or 0)
-            except (TypeError, ValueError):
-                pass
-            for tid in ev.get("task_ids") or []:
-                if str(tid or "").strip():
-                    child_ids.add(str(tid))
-            try:
-                fanout_interval_total += float(ev.get("fanout_interval_sec", ev.get("inter_wave_latency_sec")) or 0.0)
-            except (TypeError, ValueError):
-                pass
-            # The lane a fan-out ASKED for. A fan-out event is written before any child
-            # starts, so it cannot know what they ran on — that is a per-child
-            # dispatch fact and lives on each child's own record.
-            lane = str(ev.get("requested_model_lane") or "").strip()
-            if lane and lane not in lanes:
-                lanes.append(lane)
+        with storage_phase("fanout_scan"):
+            for ev in iter_jsonl_chain_objects(events_path):
+                storage_count("event_rows")
+                if ev.get("type") != "swarm_fanout":
+                    continue
+                if str(ev.get("parent_task_id") or ev.get("task_id") or "") != task_id:
+                    continue
+                fanout_count += 1
+                try:
+                    requested_count_total += int(ev.get("requested_count") or 0)
+                except (TypeError, ValueError):
+                    pass
+                for tid in ev.get("task_ids") or []:
+                    if str(tid or "").strip():
+                        child_ids.add(str(tid))
+                try:
+                    fanout_interval_total += float(ev.get("fanout_interval_sec", ev.get("inter_wave_latency_sec")) or 0.0)
+                except (TypeError, ValueError):
+                    pass
+                # The lane a fan-out ASKED for. A fan-out event is written before any child
+                # starts, so it cannot know what they ran on — that is a per-child
+                # dispatch fact and lives on each child's own record.
+                lane = str(ev.get("requested_model_lane") or "").strip()
+                if lane and lane not in lanes:
+                    lanes.append(lane)
         if not child_ids:
             if swarm_intent:
                 # The owner asked for a swarm and nothing fanned out: say so instead
@@ -907,14 +911,15 @@ def build_swarm_efficiency(env: Any, task: Dict[str, Any]) -> Dict[str, Any] | N
             from ouroboros.depth_evidence import build_depth_summary
             from ouroboros.task_status import find_child_tasks
 
-            canonical = pathlib.Path(task.get("budget_drive_root") or drive_root)
-            rollup["depth"] = build_depth_summary(
-                task.get("task_contract"),
-                find_child_tasks(
-                    canonical, parent_task_id=task_id, root_task_id=task_id,
-                    scope="subtree", materialize_artifacts=False,
-                ),
-            )
+            with storage_phase("depth"):
+                canonical = pathlib.Path(task.get("budget_drive_root") or drive_root)
+                rollup["depth"] = build_depth_summary(
+                    task.get("task_contract"),
+                    find_child_tasks(
+                        canonical, parent_task_id=task_id, root_task_id=task_id,
+                        scope="subtree", materialize_artifacts=False,
+                    ),
+                )
         except Exception:
             log.debug("swarm depth summary failed", exc_info=True)
         if swarm_intent:

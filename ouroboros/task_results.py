@@ -10,6 +10,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.cost_projection import COST_ALIAS_PAIRS, COST_OPENNESS_FIELDS, normalize_task_result_cost_planes
+from ouroboros.storage_observation import counted_result_paths, storage_observed
 from ouroboros.utils import read_json_dict, read_text_across_replace, update_json_locked, utc_now_iso
 # Projection owner retains read custody; this historical import remains compatible.
 from ouroboros.review_projection import merge_review_projection as merge_review_projection
@@ -798,6 +799,7 @@ def load_task_result(
     return _normalize_swarm_efficiency(data) if data is not None else None
 
 
+@storage_observed
 def list_task_results(
     drive_root: Any,
     *,
@@ -806,9 +808,7 @@ def list_task_results(
 ) -> List[Dict[str, Any]]:
     """List task results, optionally refusing an incomplete authority scan.
 
-    Most observational callers remain tolerant of a malformed historical row.
-    Authority reducers such as direct-child admission pass ``strict=True`` so
-    an unreadable row cannot be silently reinterpreted as an absent child.
+    Authority reducers use strict=True: unreadable rows cannot mean absent.
 
     Schema admission (ABI 7.0, Q8=B): the fail-soft scan QUARANTINES every
     inadmissible row it meets and reports the whole sweep as ONE durable
@@ -818,7 +818,7 @@ def list_task_results(
     wanted = {str(item) for item in list(statuses or []) if str(item).strip()}
     results: List[Dict[str, Any]] = []
     quarantined: List[Dict[str, str]] = []
-    for path in sorted(task_results_dir(drive_root, create=False).glob("*.json")):
+    for path in counted_result_paths(task_results_dir(drive_root, create=False).glob("*.json")):
         data = read_json_dict(path)
         if data is None and not path.is_file():
             continue  # vanished mid-scan — nothing to admit or quarantine
