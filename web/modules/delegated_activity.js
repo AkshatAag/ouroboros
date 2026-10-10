@@ -313,7 +313,7 @@ export function delegatedActivityBodyHtml(view, { expanded = false } = {}) {
         if (shown.part.kind === 'message') {
             html.push(`<div class="chat-delegated-message">${actor(shown)}${text(shown)}${notes(shown)}</div>`);
         } else if (shown.part.kind === 'problem') {
-            html.push(`<div class="chat-delegated-problem">⚠ ${escapeHtml([actorLabel(shown.part.actor), shown.part.label].filter(Boolean).join(' · '))}: ${escapeHtml(shown.text)}${notes(shown)}</div>`);
+            html.push(`<div class="chat-delegated-problem">${escapeHtml([actorLabel(shown.part.actor), shown.part.label].filter(Boolean).join(' · '))}: ${escapeHtml(shown.text)}${notes(shown)}</div>`);
         }
     }
     const thinking = view.parts.filter((shown) => shown.part.kind === 'thinking');

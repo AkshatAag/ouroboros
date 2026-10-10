@@ -4,6 +4,7 @@ import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
 import { tx } from './i18n.js';
+import { hostRowDisplayText } from './host_notice_text.js';
 import { decorateProjectRow, syncSavedProjectContext } from './project_answer.js';
 import { createProjectHandoffs, receiptNotice } from './project_handoff.js';
 import { bindComposerFileTargets, cleanupUploadedAttachments, createChatMedia, showTaskIncidentToast } from './chat_media.js';
@@ -62,6 +63,7 @@ import {
     desiredLiveCardPhase,
     liveCardCountBits,
     liveCardLabel,
+    markOwnerHurry,
     replayTerminalPhase,
     restoreLiveCardPhaseState,
     setLiveCardPhase,
@@ -1285,6 +1287,7 @@ export function createChatInstance({
                     <div class="chat-live-summary-main">
                         <span class="chat-live-phase working" data-live-phase role="status" aria-live="polite" aria-atomic="true" aria-label="${options.isSubagent ? 'Subagent' : 'Task'} status: Working">Working</span>
                         <span class="chat-live-phase-secondary" data-live-phase-secondary hidden></span>
+                        <span class="chat-live-hurry" data-live-hurry role="img" hidden></span>
                         <div class="chat-live-typing" data-live-typing aria-hidden="true">
                             <span></span><span></span><span></span>
                         </div>
@@ -1982,8 +1985,8 @@ export function createChatInstance({
                 'trace_summary', 'error', 'artifact_status'].map((key) => [key, msg[key] || ''])),
             ...cardMetaKeys(msg),
             lifecycle: msg.lifecycle || null,
-            // The frame's voice, live and on replay; absent stays absent.
-            narration: msg.narration,
+            // Preserve source authorship and kind, live and on replay.
+            role: msg.role, system_type: msg.system_type, narration: msg.narration,
         });
         if (!summary) return changed;
         const presented = withTaskCostMeta(summary, msg, { rawTs });
@@ -2136,6 +2139,10 @@ export function createChatInstance({
         }
         const reference = admitCardMetadata(evt);
         if (reference !== undefined) return reference;
+        // Typed and never progress (owner_hurry.py): it only marks an existing card.
+        if (eventType === 'owner_hurry') {
+            return markOwnerHurry(ownerHurryProjection(evt).applied ? liveCardRecords.get(getLogTaskGroupId(evt)) : null);
+        }
         if (!isGroupedTaskEvent(evt)) return false;
         const taskId = getLogTaskGroupId(evt) || '';
         if (!taskId) return false;
@@ -2144,13 +2151,6 @@ export function createChatInstance({
         // never a synthetic lifecycle task card.
         const review = attachReviewFromRow(evt, rawTs);
         if (review !== undefined) return review;
-        if (eventType === 'owner_hurry') {
-            const root = ownerHurryProjection(evt).applied
-                ? liveCardRecords.get(taskId)?.root : null;
-            if (!root || root.getAttribute('data-owner-hurry') === '1') return false;
-            root.setAttribute('data-owner-hurry', '1');
-            return true;
-        }
         const childInfo = subagentChildParents.get(taskId);
         if (childInfo && eventType === 'task_done') return routeSubagentTerminalToCard(taskId, evt);
         const summary = summarizeChatLiveEvent(evt);
@@ -2243,6 +2243,7 @@ export function createChatInstance({
                 ts,
                 markdown: !!markdown,
                 systemType,
+                narration: opts.narration,
                 source,
                 initiator,
                 senderLabel: senderLabelOverride,
@@ -2281,18 +2282,22 @@ export function createChatInstance({
         const sender = senderLabel(role, isProgress, systemType, {
             source, senderLabel: senderLabelOverride, senderSessionId, initiator,
         }, chatSessionId);
+        const stored = text;
         if (role === 'system' && ['task_pause_notice', 'legacy_memory_notice'].includes(systemType)) text = tx(text);
-        const richMarkdown = role !== 'user' && systemType !== 'skill_review' && (role !== 'system' || markdown === true);
+        // Render-only: Copy below keeps `shown`, the pre-cleanup sentence.
+        const painted = hostRowDisplayText({ text: stored, role, system_type: systemType, narration: opts.narration }, text);
+        const skillReview = role === 'system' && systemType === 'skill_review' && opts.narration !== true;
+        const richMarkdown = role !== 'user' && !skillReview && (role !== 'system' || markdown === true);
         // Only the web composer writes the file-name tail; a Telegram/skill caption is kept word for word.
         const shown = attachments.length ? attachmentCaption(text, attachments,
             { placeholder: opts.textPlaceholder === true, composed: source === 'web' }) : text;
         const rendered = role === 'user'
             ? escapeHtml(shown)
-            : role === 'system' && systemType === 'skill_review'
+            : skillReview
                 ? renderSkillReviewDisclosure(text, opts.skillReview || null)
-                : role === 'system' && systemType !== 'skill_review' && markdown !== true
-                    ? escapeHtml(text)
-                    : renderChatMarkdown(text);
+                : role === 'system' && markdown !== true
+                    ? escapeHtml(painted)
+                    : renderChatMarkdown(painted);
         const timeFmt = formatMsgTime(ts);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
@@ -2331,7 +2336,7 @@ export function createChatInstance({
     function addProjectRow(msg, text, opts) {
         const a = msg.completion_answer;
         return addMessage(a || text, a ? 'assistant' : 'system', !!(a || msg.markdown), msg.ts || null, false, {
-            ...opts, systemType: msg.system_type, projectId: msg.project_id || '',
+            ...opts, systemType: msg.system_type, narration: msg.narration, projectId: msg.project_id || '',
             projectName: msg.project_name || '', taskName: msg.task_name || '', handoffId: msg.handoff_id || '', terminalTime: msg.terminal_time || null,
         });
     }
@@ -2510,7 +2515,7 @@ export function createChatInstance({
                 // A stored row as its bubble: its own identity and labels, plus what its kind adds.
                 const addStoredRow = (msg, taskId, extra) => addMessage(msg.text, msg.role, !!msg.markdown, msg.ts || null, false, {
                     historyId: msg.history_id, historyPosition: msg.history_position,
-                    systemType: msg.system_type || '', taskId,
+                    systemType: msg.system_type || '', narration: msg.narration, taskId,
                     source: msg.source || '', initiator: msg.initiator || '',
                     senderLabel: msg.sender_label || '', senderSessionId: msg.sender_session_id || '',
                     ...extra,
@@ -3703,7 +3708,7 @@ export function createChatInstance({
             }
             const routingCleared = clearTransientRoutingAnnotations(messagesDiv);
             const added = addMessage(msg.content, msg.role, msg.markdown, msg.ts || null, false, {
-                systemType: msg.system_type || '',
+                systemType: msg.system_type || '', narration: msg.narration,
                 source: msg.source || '',
                 initiator: msg.initiator || '',
                 taskId: explicitTaskId,
@@ -3794,7 +3799,7 @@ export function createChatInstance({
             : wsHasConnectedOnce;
         const reconnectBanner =
             pendingReconnectBannerText
-            || (isReconnect ? '♻️ Reconnected' : '');
+            || (isReconnect ? 'Reconnected' : '');
         const shouldClearReconnectParams = Boolean(pendingReconnectBannerText);
         pendingReconnectBannerText = '';
         wsHasConnectedOnce = true;

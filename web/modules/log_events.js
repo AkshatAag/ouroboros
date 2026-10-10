@@ -6,6 +6,7 @@ import { harnessPresentation } from './harness_presentation.js';
 import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js';
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
+import { hostRowDisplayText } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
 import { workerShaLogView, workerShaRelation } from './worker_sha_presentation.js';
@@ -1350,13 +1351,14 @@ function summarizeChatLiveEventView(evt) {
         // host note is a typed fact, never a text match. Both stay visible rows; only
         // narration is promoted (title, collapsed line). ABSENT = predates the fact.
         const narration = evt.narration === true || evt.narration === undefined;
+        const note = describeText(hostRowDisplayText({ ...evt, text: progressText.full }), 240, { markdown: true });
         return chatView({
             phase: lifecycleTerminal ? (/failed\b/i.test(progressText.full) ? 'lifecycle_error' : 'done') : 'working',
             // An empty note is no narration: a placeholder would become the card title as if said (#1369).
-            headline: progressText.preview || '',
-            fullHeadline: progressText.full || '',
-            activityPreview: progressText.preview || '',
-            visible: Boolean(progressText.preview),
+            headline: note.preview || '',
+            fullHeadline: note.full || '',
+            activityPreview: note.preview || '',
+            visible: Boolean(note.preview),
             promote: narration,
             human: narration,
             // «ТУТ бабл … на codex» — an ordinary progress bubble carries the chip

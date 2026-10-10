@@ -326,11 +326,6 @@ body.resizing-panels { user-select: none; }
     cursor: default;
 }
 
-/* HQ1 compact card status: hurry applied — a phase chip, never a chat bubble. */
-.chat-live-card[data-owner-hurry] [data-live-phase]::after {
-    content: ' ⏩';
-}
-
 /* Layout-only composition for the row under a question, a Project lifecycle row or a
    routed message, with room for keyboard focus above and below. What sits in it is a
    reference (`project_reference.js`) or the shared `.btn.btn-default.btn-sm` verb. */
@@ -2041,6 +2036,14 @@ body.resizing-panels { user-select: none; }
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     white-space: nowrap;
+}
+
+/* HQ1: an applied owner hurry, never a chat bubble — the house fast-forward vector
+   beside the chip, named by its aria-label (task_phase_chip.markOwnerHurry). */
+.chat-live-hurry {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-meta);
 }
 
 .chat-live-meta-text {
@@ -7992,6 +7995,11 @@ textarea.chat-input {
     flex: 0 0 auto;
     min-width: 32px;
     padding: 4px 7px;
+}
+
+.chat-media-controls button > svg {
+    display: block;
+    margin: 0 auto;
 }
 
 .chat-media-progress {

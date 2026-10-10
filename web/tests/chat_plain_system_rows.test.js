@@ -602,7 +602,7 @@ for (const noticeRow of ORIGIN_ADDRESSED_NOTICE_ROWS) {
                 made.handlers.get('chat')(noticeRow);
                 const bubble = findBubble('system');
                 assert.ok(bubble, 'the notice row rendered a system bubble');
-                assert.match(bubble.innerHTML, /📋 System/);
+                assert.match(bubble.innerHTML, /<div class="sender">System<\/div>/);
                 assert.match(bubble.innerHTML, expectedText);
                 assert.doesNotMatch(bubble.innerHTML, /<br>|<h1|<h2|md-h1|md-h2|<strong/);
                 assert.equal(bubble.getAttribute('data-chat-markdown-enhanced'), '');
@@ -669,7 +669,7 @@ test('a refused steer leaves the running target card open', () => {
         made.handlers.get('chat')(notice);
         assert.equal(card.dataset.finished, '0', 'a refused message is no terminal task fact');
         assert.equal(liveCards().length, 1);
-        assert.match(findBubble('system').innerHTML, /📋 System/);
+        assert.match(findBubble('system').innerHTML, /<div class="sender">System<\/div>/);
     } finally {
         instance?.destroy();
         restoreDom(prior);
@@ -684,8 +684,11 @@ test('render arm order and enhancement guard are pinned in source', () => {
         chatSource.indexOf('const timeFmt =', chatSource.indexOf("const rendered = role === 'user'")),
     );
     assert.match(ternary, /renderSkillReviewDisclosure\(text, opts\.skillReview \|\| null\)/);
-    assert.match(ternary, /role === 'system' && systemType !== 'skill_review' && markdown !== true\n\s+\? escapeHtml\(text\)/);
-    assert.match(chatSource, /: renderChatMarkdown\(text\);/);
+    assert.match(ternary, /role === 'system' && systemType !== 'skill_review' && markdown !== true\n\s+\? escapeHtml\(painted\)/);
+    assert.match(chatSource, /: renderChatMarkdown\(painted\);/);
+    // `painted` is render-only (host_notice_text.js); Copy keeps the pre-cleanup `shown`.
+    assert.match(chatSource, /const painted = role === 'system' \? hostNoticeDisplayText\(stored, systemType, text\) : text;/);
+    assert.match(chatSource, /chatMedia\.attachCopyControl\(bubble, String\(shown\)\)/);
     // The enhancement pass skips exactly the plain-system case.
     assert.match(
         chatSource,
