@@ -30,8 +30,6 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
         '⚙️ Review settings could not be migrated automatically: '],
     optional_bounds_notice: ['⚙️ Task limits on this install: '],
     legacy_memory_notice: ['🧠 Memory: '],
-    attachment_notice: ['📎 Attachment staging report for ', '⚠️ Task not started: every attachment was rejected.',
-        '⚠️ Some declared attachments could not be staged; '],
     task_admission_notice: ['✅ Repair task ', '⚠️ Cost accounting is unavailable. ', '🚫 Budget exhausted. '],
     budget_notice: ['🚫 Model budget reached. '],
     deep_self_review_queued: ['🔎 Deep self-review queued: '],

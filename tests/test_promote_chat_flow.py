@@ -2497,7 +2497,7 @@ def test_handle_steer_task_delivers_once_to_running_task(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("chat_id", [1, 0, None])
-def test_steering_delivers_text_and_identical_typed_attachment_report(
+def test_steering_delivers_text_and_keeps_the_attachment_report_on_receipt_and_mailbox_only(
     tmp_path, monkeypatch, chat_id,
 ):
     import supervisor.queue as queue
@@ -2538,10 +2538,8 @@ def test_steering_delivers_text_and_identical_typed_attachment_report(
     delivered = drain_owner_entries(tmp_path, "t-report")[0]["text"]
     assert delivered.startswith(exact)
     report = delivered.split("[ATTACHMENTS]\n", 1)[1].split("\n[END_ATTACHMENTS]", 1)[0]
-    if chat_id is None:
-        assert notices == []
-    else:
-        assert report in notices[-1]
+    assert "read_file(" in report and "rejected (reason=" in report  # the model keeps its whole block
+    assert notices == []  # a landed act publishes no row, whatever the chat
     annotation = latest_chat_annotations(tmp_path)["cm-report"]
     assert annotation["attachment_manifest"] == acks[-1]["attachment_manifest"]
     assert [row["status"] for row in annotation["attachment_manifest"]] == [
@@ -2609,9 +2607,8 @@ def test_direct_root_steering_uses_live_human_identity_for_receipt_and_notice(
 
     assert acks[-1]["target"] == "direct-live-opaque-id"
     assert acks[-1]["target_label"] == "Tower Defence › Fix nested delegation"
-    assert notices[-1].splitlines()[0] == (
-        "📎 Attachment staging report for Tower Defence › Fix nested delegation:"
-    )
+    assert [row["status"] for row in acks[-1]["attachment_manifest"]] == ["staged"]
+    assert notices == []  # the receipt carries the identity; no staging row in the chat
 
 
 def test_direct_project_followup_carries_same_live_human_identity(tmp_path):
@@ -2662,9 +2659,8 @@ def test_direct_project_followup_carries_same_live_human_identity(tmp_path):
 
     assert routed == "direct-live-opaque-id"
     assert metadata["_routing_target_label"] == "Tower Defence › Fix nested delegation"
-    assert notices[-1].splitlines()[0] == (
-        "📎 Attachment staging report for Tower Defence › Fix nested delegation:"
-    )
+    assert [row["status"] for row in metadata["_attachment_manifest"]] == ["staged"]
+    assert notices == []  # the receipt recorded from this stash is the whole record
 
 
 def test_handle_steer_task_stale_target_notifies_visibly(tmp_path, monkeypatch):

@@ -293,15 +293,8 @@ def _route_project_chat_to_running_task(
             task_metadata["_attachment_report"] = attachment_report
         if isinstance(task_metadata, dict):
             task_metadata["_routing_target_label"] = target_label
-        if attachment_report:
-            try:
-                ctx.send_with_budget(
-                    chat_id,
-                    f"📎 Attachment staging report for {target_label or 'Task'}:\n"
-                    f"{attachment_report}",
-                    role="system", system_type="attachment_notice")
-            except Exception:
-                log.debug("Mailbox attachment report notice failed for %s", tid, exc_info=True)
+        # A landed delivery publishes no row: the receipt the caller records
+        # from this stash carries the manifest; the task's mailbox carries the block.
         return tid
     except Exception:
         log.debug("Mailbox follow-up routing failed; falling back to direct lane", exc_info=True)
