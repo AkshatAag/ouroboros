@@ -232,14 +232,15 @@ focus stays in the modal context and returns on close when the caller remains
 available. Popups sit outside decorative clipping and fit the usable viewport.
 
 A **message field** — the Main and Project composer, a question's own answer —
-sends with Enter. The key presses that field's own Send action, so the action's
-validation, disabled and pending state decide what is sent, and a message is
-sent once. Shift+Enter inserts a line break; Ctrl, Cmd or Alt with Enter send
-like Enter. An Enter that commits an input-method composition sends nothing, a
-held Enter sends once, and an empty, disabled, read-only or settled field sends
-nothing; a rejected answer keeps its draft. The field requests a Send label
-from touch keyboards; native keyboard support varies. Every other multiline field — file editors, JSON, settings and
-widget forms — keeps Enter as a line break.
+sends with Enter by pressing its own Send action, whose validation, disabled
+and pending state decide what is sent; a message is sent once. Shift+Enter
+breaks the line; Ctrl, Cmd or Alt with Enter send like Enter. Enter sends
+nothing when it commits an input-method composition or the field is empty,
+disabled, read-only or settled, and once when held; a rejected answer keeps
+its draft. The composer grows with its text or placeholder to one cap, then
+scrolls. Touch keyboards are asked for a Send label; support varies. Every
+other multiline field — file editors, JSON, settings and widget forms — keeps
+Enter as a line break.
 
 ### Composer owner controls
 
@@ -1629,14 +1630,12 @@ has migrated. Migrated today:
 - `web/settings.css` (settings shell, model/effort cards, MCP cards)
 - `web/onboarding.css` (the whole first-run wizard)
 - `web/model_roles.css` (shared role editor)
-- `web/style.css` between the `design-system:migrated-begin` and
-  `design-system:migrated-end` marker pairs (several — migrated surfaces are
-  not contiguous in the file): harness accounts, the
-  Dashboard → Updates tab (status card, one action row, collapsed Recovery
-  with a single restore list), and chat (typography, foreground and status
-  colour; component geometry keeps its local literals per the viewport
-  reserve contract, while the shared palette channels keep translucent glass
-  surfaces coherent across themes)
+- `web/style.css` regions paired by `design-system:migrated-begin` /
+  `design-system:migrated-end`: harness accounts; Dashboard → Updates (status
+  card, one action row, collapsed Recovery with one restore list) and Storage;
+  chat typography, foreground and status colour. Chat geometry retains local
+  literals per the viewport reserve contract; shared palette channels keep
+  translucent glass coherent across themes.
 - the global `.muted`, `.form-section h3` and shared `.ui-status` tone rules
 
 The remaining page-specific typography in skills, marketplace, widgets, logs

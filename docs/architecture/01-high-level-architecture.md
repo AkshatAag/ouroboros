@@ -1,6 +1,6 @@
 # 1. High-Level Architecture
 
-Module ownership, code-navigation, devtools, gateway/CLI boundaries, desktop/Android/Docker topology and the data layout under `~/Ouroboros/` define the runtime map. A packaged desktop launcher stays outside the self-editable server so it can restart it after a failed edit. The server hosts the supervisor and direct turns; queued tasks use worker processes for crash isolation.
+The runtime map covers module ownership, navigation, devtools, gateway/CLI boundaries, host topology and `~/Ouroboros/` data. The packaged launcher can restart the self-editable server after a failed edit. The server hosts supervisor/direct turns; queued tasks use crash-isolated workers.
 
 ```
 User → launcher.py (desktop/native) — shared lifecycle: PID lock, bundle bootstrap, server process, restart, cleanup; the packaged desktop shell is immutable, Android runs source over an immutable seed (Runtime topology below; §2)
@@ -33,7 +33,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     acceptance_incident_presentation.js — local evidence-preparation warning; no reviewer authority (§6 Task acceptance)
     widgets.js, widget_module.js, widget_frame.js, widget_card.js, widget_reorder.js, widget_list.js, widget_size.js, widget_chart.js, widget_job.js, masonry.js — Widgets page: host and card registry, framed mounts, card chrome, list-request policy, reorder/size/chart helpers and masonry (§3 Widgets page)
 supervisor/ — background thread inside server.py (§5)
-  active_activity.py — process-local registry of in-flight native chat actors behind `/api/state` `active_direct_turns` and WS typing; no queue records (§3 Direct turns and the activity block)
+  active_activity.py — process-local direct actors and current call observations behind `/api/state`; typing receipts remain separate, with no queue records (§3 Direct turns and the activity block)
   message_bus.py — local message bus for the Web UI and transport skills; re-exports the ingress names
   message_ingress.py — one accepted row per message id before dispatch, through a process-local chat-chain index
   workers.py — worker pool: forkserver on Linux, spawn elsewhere, never fork, because a child forked from the multi-threaded supervisor inherits a held import lock and wedges
@@ -60,7 +60,7 @@ supervisor/ — background thread inside server.py (§5)
   schedule_time.py, schedule_occurrence.py — cron/timezone parsing; a due occurrence admits at most one root
   schedule_notes.py — a due `kind:"notify"` row becomes a signed `reminder` System row; no model, no retry
   evolution_lifecycle.py — evolution campaign state and cycle lifecycle (§6 Background consciousness)
-  events.py — worker→supervisor event dispatcher with exact attempt/round/call correlation; a type absent from `EVENT_HANDLERS` is dropped as `unknown_worker_event`
+  events.py — worker→supervisor dispatcher; `main_llm_call_state` binds observations to the active attempt/round/call; unregistered types become `unknown_worker_event`
   subagent_task_truth.py — delegation-truth enrichment of the subagent `task_done` frame (§11.1)
   event_taxonomy.py, events_budget.py, events_chat_delivery.py, events_coop_checkpoint.py, events_evolution_done.py, events_project_routing.py, events_runtime_controls.py, events_schedule_task.py, events_subagent_admission.py, events_task_done.py, events_worker_reports.py — `EVENT_HANDLERS` leaves, one event family each; `event_taxonomy.py` declares each `EVENT_Q` disposition; `events_project_routing.py` is the single durable writer of promote/route refusals (§5)
   task_dispatch.py — admitted event → worker payload, with the depth and route projections workers consume
@@ -111,7 +111,7 @@ ouroboros/ — agent core and shared runtime (§6)
   acceptance_settlement.py — quorum/final mailbox wake and durable post-terminal `late_settlement` (§6 Task acceptance)
   acceptance_history.py, owner_source.py, acceptance_late.py — frozen answer debt, cap and owner authority; historical review settlement (§6 Task acceptance)
   loop_acceptance.py, loop_acceptance_review.py, acceptance_preparation.py, acceptance_retrieving.py — acceptance machinery re-exported from `loop`: fence and obligations with the sole decision writer, host packet/panel, retrieving-source fit, pre-binding incident identity (§6 Task acceptance)
-  loop_llm_call.py — single-round LLM call plus usage accounting
+  loop_llm_call.py — single-round LLM call, current-call event producer and usage accounting
   transcript_prefix.py — append-only transcript between the sends of one loop execution; a break is a recorded `prompt_prefix_break` fact, never a blocked send (§6 Task lifecycle)
   loop_transport.py — transport-outage wait episodes and provider-failure terminal text (§6 Context fitting)
   loop_delivery.py — delivery candidates and the delivery-control protocol (§6 Task lifecycle)
@@ -154,6 +154,7 @@ ouroboros/ — agent core and shared runtime (§6)
   _usage_cache_splits.py — process-local cache split by task/provider/route/review; a missing entry prices a full cache write (§6)
   usage_store.py, usage_journal.py, openrouter_cost.py — `state/usage.sqlite`, its journal import and explicit OpenRouter price receipts (docs/USAGE_STORE.md)
   cost_projection.py — the one task-cost projection for every producer: `accounted_upper_bound_usd`, null as None and never $0.00 (§6 Budget tracking)
+  storage.py — Dashboard Storage: one bounded, link-safe metadata walk at a time, kept in memory (§3 Dashboard)
   delegate_custody.py, delegate_custody_reconcile.py, delegate_state_sweep.py, delegate_custody_usage.py, delegate_custody_memo.py — Durable delegated-run custody, reconciliation, sweeps, usage and process memo; ownership stays OWNED/FOREIGN/UNKNOWN (§6 Nanny, transport and custody)
   delegate_hold.py — unknown-provider hold in supervised_wait until the leaf wakes; never resends (§6 Context fitting)
   delegate_source_coverage.py — oversized work-order source custody; incomplete source cannot authorize a passing terminal verdict or an apply
@@ -366,7 +367,7 @@ ouroboros/ — agent core and shared runtime (§6)
     claudexor.py — Loopback descriptor/handshake/runs/quota transport; the daemon token stays private; prefers the owned daemon, `discover_daemon_at` reads daemon/control-api.json (§6 Delegated subagents)
     claudexor_run_events.py — Catalog-negotiated, bounded run-journal SSE frames and durable seq cursors; no polling owner (§6 Delegated subagents)
   claudexor_runtime.py — Reviewed engine pin: seed-or-download, verify, probe and atomic promote under `data/state/cx`; the reviewed pin is the next-spawn selection, with no mutable `current` pointer; `OUROBOROS_CLAUDEXOR_BIN` is an explicit operator override (§6 Delegated subagents)
-  claudexor_exit_facts.py — Bounded saved engine-exit and capacity facts for context and status, without lifecycle policy (§9)
+  claudexor_exit_facts.py — Bounded saved exits; live memory/loop/store/admission facts and dated capacity snapshots, without lifecycle policy (§9)
   claudexor_daemon.py — Installation-owned Claudexor lifecycle over `data/claudexor`: lazy first use, authenticated attach, `stop_outcome`, the start-failure spawn latch, `install_missing_harness_cli` (§9)
   claudexor_startup_failure.py — Typed vocabulary of a failed owned-daemon start: `ExitFact` (`failed_without_control` is the spawn-latch predicate), diagnostic-only log classification, the latch record; stdlib only (§9)
   gateway/ — Gateway Boundary v1: browser-facing route ownership and the frontend contract SSOT (Gateway Boundary v1 below)
@@ -387,7 +388,7 @@ ouroboros/ — agent core and shared runtime (§6)
     task_decision.py — The one `POST /api/decisions` ingress with family-parsed ids (`quiz:` here, `routing:` → routing_decision.py, `interaction:` reserved); writes `KIND_QUIZ_ANSWER` (owner_quiz.py; §11.1)
     task_model_wait.py — Shared model-wait decision effects over the existing mailbox, with live-owner/revision checks
     routing_decision.py — Validates a click against the durable `needs_manual_target` row, recovers the original text, dispatches `steer_task`/`promote_chat_to_task`, confirms through routing_wait receipts
-    logs.py — Read-only runtime log tail
+    logs.py — Read-only runtime log tail; storage.py — Storage routes
     onboarding.py — `POST /api/onboarding/complete`: install-time latch, validation, live engine read, preset compile, one settings write under lock; a typed 503 persists nothing, except `settings_save_timeout`, the unknown outcome (§2)
     onboarding_host.py — GET /onboarding: side-effect-free wizard page served as ES modules
     owner_settings.py — Settings-lock-as-precondition and `CommitBoundary` (Gateway Boundary v1 below); owner_effort.py — the effort range
@@ -529,7 +530,7 @@ ouroboros/ — agent core and shared runtime (§6)
 
 ### Gateway Boundary v1
 
-`ouroboros/gateway/` is the single inbound browser/CLI boundary; `ouroboros/gateways/` holds the thin outbound adapters. `contracts.py` owns the envelopes, `endpoint_index.py` the endpoint index, `router.py` collects the routes, and `files.py`/`host_service.py` stay separate trust boundaries. The contract is executable: `gateway/schema.py` validates ingress against JSON Schema derived from those TypedDicts. Handlers translate transport into calls on existing runtime owners and hold no second copy of queue, review, settings or lifecycle policy. The facade exists for dependency direction: the UI evolves without importing the agent body, the runtime without ad-hoc browser contracts. `gateway/owner_settings.py` is the single owner-scoped settings write seam (every owner write calls `_owner_update_settings`): the settings lock is a precondition, so a timed-out acquisition refuses before any write, and `CommitBoundary` marks the commit instant with `saved` present on both sides, so a later-step failure is reported as that step, not as an ambiguous omission (read-change-write and digest rule: §7 Reading and writing the settings document). Frontend calls go through `web/modules/api_client.js` with the JSDoc mirror `web/modules/api_types.js`, pinned by the gateway parity tests; extension HTTP lives under `/api/extensions/<skill>/…` with namespaced WS dispatch.
+`ouroboros/gateway/` is the single inbound browser/CLI boundary; `ouroboros/gateways/` holds the thin outbound adapters. `files.py` and `host_service.py` stay separate trust boundaries. Handlers translate transport into calls on existing runtime owners and hold no second copy of queue, review, settings or lifecycle policy. The facade exists for dependency direction: the UI evolves without importing the agent body, the runtime without ad-hoc browser contracts. `gateway/owner_settings.py` is the single owner-scoped settings write seam (every owner write calls `_owner_update_settings`): the settings lock is a precondition, so a timed-out acquisition refuses before any write, and `CommitBoundary` marks the commit instant with `saved` present on both sides, so a later-step failure is reported as that step, not as an ambiguous omission (read-change-write and digest rule: §7 Reading and writing the settings document). Frontend calls go through `web/modules/api_client.js` (typed mirror: §11); extension HTTP lives under `/api/extensions/<skill>/…` with namespaced WS dispatch.
 
 ### CLI / Headless Boundary
 
@@ -675,6 +676,6 @@ Birth identity is separate from PID presence. Linux mints boot-qualified ticks, 
 └── ouroboros.pid                  ← launcher PID lock; auto-released on crash
 ```
 
-The generated `docs/inventories/DATA_LAYOUT_INVENTORY.md` probes every entry of this tree: its last literal path segment must be a tracked repo path or a literal in the runtime sources, so a durable file renamed in code while its row survives turns red. The check proves nothing stronger about an entry.
+The generated `docs/inventories/DATA_LAYOUT_INVENTORY.md` probes each entry's last literal segment against tracked paths and runtime literals, so a durable file renamed in code turns its row red; it proves nothing stronger.
 
 ---
