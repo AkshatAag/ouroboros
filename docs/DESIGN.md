@@ -651,6 +651,15 @@ renderer regardless of `markdown`; ordinary System text is escaped unless
 Voice does not confer task finality. The existing untyped terminal-host-notice
 contract remains a documented exception, not a pattern for new notices.
 
+Built-in chrome uses words and monochrome `currentColor` vectors, not decorative
+emoji. System keeps its amber bubble and plain label; status stays explicit in
+words and the tone primitive. Functional icons keep state and accessible names.
+Known typed host prefixes are hidden only at display (`host_notice_text.js`);
+unlisted or ambiguous records remain literal. History, keys, exports and the
+existing Copy input are unchanged (Copy already uses translated text for two
+notice types). Authored text, quoted evidence, names, documents, logs and author
+widget icons/interiors are not chrome and keep their characters.
+
 Main's empty-chat greeting speaks in neither voice: it is host copy in a quiet
 `.chat-empty-welcome` placeholder (a `Welcome` label over one sentence), never a
 bubble, a history row or a model reply (`web/modules/welcome_preference.js`). It

@@ -326,11 +326,6 @@ body.resizing-panels { user-select: none; }
     cursor: default;
 }
 
-/* HQ1 compact card status: hurry applied — a phase chip, never a chat bubble. */
-.chat-live-card[data-owner-hurry] [data-live-phase]::after {
-    content: ' ⏩';
-}
-
 /* Layout-only composition for the row under a question, a Project lifecycle row or a
    routed message, with room for keyboard focus above and below. What sits in it is a
    reference (`project_reference.js`) or the shared `.btn.btn-default.btn-sm` verb. */
@@ -1589,26 +1584,26 @@ body.resizing-panels { user-select: none; }
 .ui-rich-content p:first-child { margin-block-start: 0; }
 .ui-rich-content p:last-child { margin-block-end: 0; }
 
-.chat-bubble.system[data-system-type="skill_review"] {
+.chat-bubble.system.chat-skill-review {
     padding: 0;
     overflow: hidden;
 }
 
-.chat-bubble.system[data-system-type="skill_review"] .sender,
-.chat-bubble.system[data-system-type="skill_review"] .msg-time {
+.chat-bubble.system.chat-skill-review .sender,
+.chat-bubble.system.chat-skill-review .msg-time {
     margin-left: 14px;
     margin-right: 14px;
 }
 
-.chat-bubble.system[data-system-type="skill_review"] .sender {
+.chat-bubble.system.chat-skill-review .sender {
     margin-top: 10px;
 }
 
-.chat-bubble.system[data-system-type="skill_review"] .msg-time {
+.chat-bubble.system.chat-skill-review .msg-time {
     margin-bottom: 10px;
 }
 
-.chat-bubble.system[data-system-type="skill_review"] .message {
+.chat-bubble.system.chat-skill-review .message {
     white-space: normal;
 }
 
@@ -2048,6 +2043,14 @@ body.resizing-panels { user-select: none; }
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     white-space: nowrap;
+}
+
+/* HQ1: an applied owner hurry, never a chat bubble — the house fast-forward vector
+   beside the chip, named by its aria-label (task_phase_chip.markOwnerHurry). */
+.chat-live-hurry {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-meta);
 }
 
 .chat-live-meta-text {
@@ -4770,12 +4773,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .skills-status-chip[role="button"]:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: 2px;
-}
-
-.skills-lock-hint::before {
-    content: '\1F512';
-    font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif;
-    font-size: 11px;
 }
 
 .skills-review-progress {
@@ -7965,6 +7962,11 @@ textarea.chat-input {
     padding: 4px 7px;
 }
 
+.chat-media-controls button > svg {
+    display: block;
+    margin: 0 auto;
+}
+
 .chat-media-progress {
     --media-progress: 0%;
     flex: 1 1 120px;
@@ -8381,6 +8383,9 @@ textarea.chat-input {
 .skills-card-menu-dialog:not(.ui-popup) .skills-menu-item:hover {
     background: var(--menu-item-hover);
     color: var(--text-primary);
+}
+.skills-card-menu-dialog .skills-menu-item.skills-attest-warn {
+    color: var(--status-warn-fg);
 }
 
 
