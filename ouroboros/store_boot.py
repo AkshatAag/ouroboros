@@ -158,8 +158,17 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
     outcome; an unconfirmed stop in any of them (a missing census included) is a blocker the
     seam refuses on, never a wait. Never raises."""
     root = pathlib.Path(root)
+    owner = None
     if store_switch.read_switch_intent(root) is None:
-        return {"status": "no_intent"}
+        head = store_switch.rev_parse(repo_dir, "HEAD")
+        if not head or not store_switch.switch_needs(repo_dir, head)["facts"]:
+            return {"status": "no_intent"}
+        # T2: the checked-out tree already lacks the store (the agent's vcs_revert, a manual
+        # checkout) and no door recorded the switch: the export runs before this exit with HEAD
+        # as the target; nothing resets a second time.
+        store_switch.record_switch_intent(root, target_sha=head, target_ref="HEAD", door="vcs_rollback",
+                                          reason="the checked-out tree already lacks the store")
+        owner = lambda intent: (True, "the checkout already is the target")  # noqa: E731
     wait_ready(root)  # a boot-smoke rollback can arrive while this process still imports: the export reads a published store
     facts = cleanup if isinstance(cleanup, dict) else {}
     stop = facts.get("owned_stop") if isinstance(facts.get("owned_stop"), dict) else {}
@@ -170,8 +179,8 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
         ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
     ) if blocked]
     try:
-        outcome = store_switch.run_switch_seam(
-            root, repo_dir=repo_dir, blockers=blockers, restore_handles=evidence_packs.restore_checkpoint_handles)
+        outcome = store_switch.run_switch_seam(root, repo_dir=repo_dir, owner=owner, blockers=blockers,
+                                               restore_handles=evidence_packs.restore_checkpoint_handles)
     except Exception as exc:
         log.critical("Authority switch at the restart exit raised; the intent waits for the next boot", exc_info=True)
         outcome = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}

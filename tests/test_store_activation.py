@@ -416,6 +416,24 @@ def test_switch_at_restart_without_an_intent_is_a_no_op(tmp_path):
     assert store_boot.switch_at_restart(tmp_path / "data", REPO, _census()) == {"status": "no_intent"}
 
 
+def test_a_tree_that_already_lost_the_store_exports_at_the_restart_exit_without_a_second_reset(tmp_path, monkeypatch, target_repo):
+    """T2 (S3 fix 15, Astra M13): the agent's ``vcs_revert`` or a manual checkout moved HEAD to a
+    tree without the store and no door recorded an intent; the restart exit exports the facts for
+    that tree and moves nothing."""
+    repo, old, new = target_repo
+    git(repo, "checkout", "-q", "--detach", old)
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
+    root = fixture_root(tmp_path)
+    ensure_current_store(root)
+    monkeypatch.setattr(store_switch, "switching_owner", lambda door: pytest.fail("nothing may reset a second time"))
+    outcome = store_boot.switch_at_restart(root, repo, _census())
+    assert outcome["status"] == "switched" and outcome["exit"] == 42, outcome
+    assert git(repo, "rev-parse", "HEAD") == old and store.probe(root)[0] == "absent"
+    assert (root / "task_results" / "root1.json").exists() and store_switch.read_switch_intent(root) is None
+    receipt = json.loads((root / store_switch.RECEIPT_REL).read_text(encoding="utf-8"))
+    assert receipt["intent"]["target_sha"] == old and receipt["intent"]["door"] == "vcs_rollback"
+
+
 @pytest.mark.parametrize("cleanup, blocker", [
     (None, "worker_exits_unconfirmed"),
     (_census(worker_exits=None), "worker_exits_unconfirmed"),
