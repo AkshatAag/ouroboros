@@ -53,6 +53,23 @@ def read_job_report(process, signal):
         process.stdout.close()
 
 
+def finish_maintenance_job(job, process, data_root, started, parse, record):
+    """Publish custody before rechecking Stop; owners retain report schemas and error policy."""
+    with job._lock:
+        job._process = process
+    if job._stopped.is_set():
+        job._signal(process)
+    record(data_root, phase="started", pid=process.pid)
+    raw, exit_code = read_job_report(process, job._signal)
+    fields = parse(raw)
+    phase = ("stopped" if job._stopped.is_set() else "unknown" if not fields
+             else "failed" if exit_code else fields.pop("status", "unknown"))
+    fields.pop("status", None)
+    record(data_root, phase=phase, exit_code=exit_code,
+           duration_seconds=time.monotonic() - started, **fields)
+    return fields
+
+
 class HistoricalAudit:
     def __init__(self):
         self._lock = threading.Lock()
@@ -104,19 +121,7 @@ class HistoricalAudit:
                 self._record(data_root, "stopped")
                 return
             process = spawn_maintenance_job(data_root, repo_dir, "startup_historical_audit")
-            with self._lock:
-                self._process = process
-            if self._stopped.is_set():
-                self._signal(process)
-            self._record(data_root, "started", pid=process.pid)
-            raw, exit_code = read_job_report(process, self._signal)
-            fields = _report_fields(raw)
-            phase = ("stopped" if self._stopped.is_set() else
-                     "unknown" if not fields else
-                     "failed" if exit_code else fields.pop("status", "unknown"))
-            fields.pop("status", None)
-            self._record(data_root, phase, exit_code=exit_code,
-                         duration_seconds=time.monotonic() - started, **fields)
+            finish_maintenance_job(self, process, data_root, started, _report_fields, self._record)
         except Exception as exc:
             # Output has a closed, bounded schema. No raw exception, path or
             # archived payload can reach the parent diagnostic record.

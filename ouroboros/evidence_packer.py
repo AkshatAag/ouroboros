@@ -14,7 +14,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros import evidence_packs as packs, store
-from ouroboros.startup_historical_audit import _REPORT_BYTES, read_job_report, spawn_maintenance_job
+from ouroboros.startup_historical_audit import _REPORT_BYTES, finish_maintenance_job, spawn_maintenance_job
 
 log = logging.getLogger(__name__)
 
@@ -216,18 +216,7 @@ class EvidencePacker:
             if self._stopped.is_set():
                 return
             process = spawn_maintenance_job(data_root, repo_dir, "evidence_packer")
-            with self._lock:
-                self._process = process
-            if self._stopped.is_set():
-                self._signal(process)
-            packs.record_storage_pack(data_root, phase="started", pid=process.pid)
-            raw, exit_code = read_job_report(process, self._signal)
-            fields = _report_fields(raw)
-            phase = ("stopped" if self._stopped.is_set() else "unknown" if not fields
-                     else "failed" if exit_code else fields.pop("status", "unknown"))
-            fields.pop("status", None)
-            packs.record_storage_pack(data_root, phase=phase, exit_code=exit_code,
-                                      duration_seconds=time.monotonic() - started, **fields)
+            fields = finish_maintenance_job(self, process, data_root, started, _report_fields, packs.record_storage_pack)
             if fields.get("packed"):
                 log.info("Evidence packs: packed %d/%d tasks, %.2f GB -> %.2f GB", fields["packed"], fields["candidates"],
                          fields["raw"] / 1e9, fields["compressed"] / 1e9)
