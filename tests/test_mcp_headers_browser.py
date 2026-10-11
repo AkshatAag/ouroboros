@@ -217,7 +217,7 @@ def test_header_switch_stdio(direct_server_with_data, engine, saved_headers, rel
     Cover both a draft-only row and an edited previously saved map: the latter
     must not be resurrected from header row state after Remove unsupported.
     """
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 
     url, data_dir = direct_server_with_data['url'], direct_server_with_data['data_dir']
     with sync_playwright() as pw:
@@ -233,6 +233,9 @@ def test_header_switch_stdio(direct_server_with_data, engine, saved_headers, rel
                 else:
                     route.continue_()
             def start_reload():
+                # The page's own load on showing Settings must settle first: held, it is not the
+                # owner's reload, and landing later its status replaces the reload's own sentence.
+                expect(page.locator('#settings-status')).to_have_text('Settings refreshed', timeout=30_000)
                 page.route('**/api/settings', hold_reload)
                 with page.expect_request(lambda request: request.url.endswith('/api/settings')
                                          and request.method == 'GET'):
@@ -782,3 +785,60 @@ def test_mcp_import_replaces_legacy_ui(direct_server_with_data, loopback, engine
             browser.close()
     # Before Save the old single token was still the saved credential; after it, only the file's values.
     assert http_app.seen[seen_before:] and {headers["authorization"] for headers in http_app.seen[seen_before:]} == {BASIC}
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('imported', ['empty', 'map', 'absent'])
+def test_removed_legacy_then_import(direct_server_with_data, loopback, engine, imported):  # noqa: F811
+    """Remove the saved single token without saving, then import the same server: Apply, Test and Save keep it gone.
+
+    The removed row lives only in the editor, while the server object still holds
+    the saved token's mask; a file's ``headers`` clears that pair in its own patch.
+    A file without ``headers`` keeps the draft list as edited, removal included.
+    """
+    from playwright.sync_api import expect, sync_playwright
+
+    url, data_dir = direct_server_with_data["url"], direct_server_with_data["data_dir"]
+    expected = {"empty": {}, "map": {"X-Api-Key": CUSTOM}, "absent": {"X-Tenant": TENANT}}[imported]
+    http_app, http_url = loopback("http", expected)
+    entry = {"type": "http", "url": http_url, **({} if imported == "absent" else {"headers": expected})}
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        page._evidence_engine = engine
+        try:
+            _seed(page, url, [{"id": "legacy_docs", "enabled": True, "transport": "streamable_http", "url": http_url,
+                               "auth_header": "Authorization", "auth_token": BEARER, "headers": {"X-Tenant": TENANT}}])
+            tests = []
+            page.on("request", lambda request: tests.append(request.post_data_json)
+                    if request.url.endswith("/api/mcp/test") else None)
+            card = page.locator("[data-mcp-card]").first
+            assert _rows(card) == [("Authorization", BEARER[:8] + "..."), ("X-Tenant", "***set***")]
+            card.locator('[data-mcp-header-row="0"] [data-mcp-header-remove]').click()
+            page.click("#btn-mcp-import")
+            dialog = page.locator(".mcp-import-dialog")
+            dialog.locator("#mcp-import-text").fill(json.dumps({"mcpServers": {"legacy_docs": entry}}))
+            dialog.locator("[data-mcp-import-preview-btn]").click()
+            dialog.locator(".mcp-import-entry").first.wait_for(timeout=15_000)
+            assert "Update" in dialog.inner_text() and "Authorization" not in dialog.inner_text()
+            dialog.locator("[data-mcp-import-apply]").click()
+            assert dialog.count() == 0
+            card = page.locator("[data-mcp-card]").first
+            rows = [(name, "***set***" if imported == "absent" else value) for name, value in expected.items()]
+            assert _rows(card) == rows, _rows(card)
+            card.locator('[data-mcp-header-row="0"]' if rows else '[data-mcp-test]').scroll_into_view_if_needed()
+            _capture(page, f"mcp-removed-legacy-import-{imported}")
+            seen = len(http_app.seen)
+            card.locator("[data-mcp-test]").click()
+            expect(card.locator("[data-mcp-message]")).to_contain_text("Draft connection OK", timeout=20_000)
+            assert tests[-1]["server"].get("auth_token", "") == ""
+            assert http_app.seen[seen:] and all("authorization" not in headers for headers in http_app.seen[seen:])
+            _save(page)
+            disk = _disk(data_dir)["legacy_docs"]
+            assert (disk.get("auth_token", ""), disk["headers"]) == ("", expected)
+            assert BEARER not in json.dumps(disk)
+            page.reload(wait_until="domcontentloaded")
+            _open_mcp(page, url)
+            assert _rows(page.locator("[data-mcp-card]").first) == [(name, "***set***") for name in expected]
+        finally:
+            browser.close()

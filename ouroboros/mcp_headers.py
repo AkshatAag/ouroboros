@@ -1,12 +1,15 @@
 """Literal HTTP headers of configured MCP servers: validation, masks and restoration.
 
 An HTTP/SSE server may carry an optional ``headers`` map of ``{name: value}``.
-Values are sent exactly as written (no scheme is added or removed) and every
-value is a credential whatever its header name: passive Settings projections
-emit one placeholder per value, and only the exact placeholder of the one
-saved server with the same identity and the same case-insensitive header name
-restores a saved value. An empty value is kept in the configuration but is not
-sent. The legacy ``auth_header``/``auth_token`` pair keeps its own storage and
+Values are sent exactly as written (no scheme is added or removed), only to
+the configured origin, and Settings protects every value whatever its header
+name: passive projections emit one placeholder per value, and only the exact
+placeholder of the one saved server with the same identity and the same
+case-insensitive header name restores a saved value. That is a display and
+forwarding policy, not a text filter: a value may be ``7`` or ``en``, so
+results, descriptions, errors and logs are never searched for header values,
+and a server's echo of one stays visible (the legacy token is still redacted).
+An empty value is kept in the configuration but is not sent. The legacy ``auth_header``/``auth_token`` pair keeps its own storage and
 prefix mask; the Settings editor shows it as one more header row without
 rewriting it. A header that the active legacy pair also sets is a
 configuration error, never a silent precedence.

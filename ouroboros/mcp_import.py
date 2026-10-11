@@ -171,9 +171,9 @@ def _header_changes(entry: Dict[str, Any], target: Dict[str, Any]) -> None:
         "replaced": [name for name in names if name.casefold() in incoming],
         "removed": [name for name in names if name.casefold() not in incoming],
     }
-    if legacy:
-        # The file's list is the whole list: the old single token goes with it, atomically.
-        entry["patch"].update(auth_header="Authorization", auth_token="")
+    # The file's list is the whole list: the old single token goes with it, atomically. Cleared even
+    # when the draft no longer lists it: a row removed unsaved still leaves the saved mask on the server.
+    entry["patch"].update(auth_header="Authorization", auth_token="")
 
 
 def preview_import(text: str, draft: List[Any]) -> Dict[str, Any]:

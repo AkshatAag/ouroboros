@@ -176,7 +176,19 @@ def test_imported_authorization_replaces_the_saved_single_token_instead_of_colli
     plain = [dict(DRAFT[0], header_names=["X-Tenant"], legacy_header=None), DRAFT[1]]
     entry = entries({"mcpServers": {"docs": {"url": "https://docs.example/mcp",
                                              "headers": {"Authorization": BEARER}}}}, plain)["docs"]
-    assert "auth_token" not in entry["patch"] and "legacy_header" not in entry
+    assert entry["patch"]["auth_token"] == "" and "legacy_header" not in entry
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-Api-Key": CUSTOM}])
+def test_present_headers_clear_the_legacy_pair_even_when_the_draft_no_longer_shows_it(headers):
+    """The draft row was removed unsaved: its server object still holds the saved token, so the patch clears it."""
+    removed = [dict(DRAFT[0], header_names=["X-Tenant"], legacy_header=None), DRAFT[1]]
+    entry = entries({"mcpServers": {"docs": {"url": "https://docs.example/mcp", "headers": headers}}}, removed)["docs"]
+    assert entry["patch"]["headers"] == headers
+    assert (entry["patch"]["auth_header"], entry["patch"]["auth_token"]) == ("Authorization", "")
+    assert entry["header_changes"]["removed"] == ["X-Tenant"] and "legacy_header" not in entry
+    kept = entries({"mcpServers": {"docs": {"url": "https://docs.example/mcp"}}}, removed)["docs"]
+    assert "auth_token" not in kept["patch"] and kept["kept_header_names"] == ["X-Tenant"]
 
 
 def test_an_unreadable_saved_map_is_named_when_a_file_replaces_it():

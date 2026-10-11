@@ -113,13 +113,13 @@ def test_stdio_keeps_env_and_references_and_refuses_nonempty_headers():
     assert "unsupported by this transport: headers" in errors[0]
 
 
-def test_values_stay_out_of_repr_and_every_diagnostic_echo_is_redacted():
-    cfg, _ = config(headers={"Authorization": BEARER, "X-Quoted": QUOTED})
+def test_values_stay_out_of_repr_and_only_the_legacy_token_is_a_redaction_key():
+    """Header values are masked configuration, not text filters; the legacy single token keeps its redaction."""
+    cfg, _ = config(auth_header="X-Legacy", auth_token=BEARER, headers={"X-Quoted": QUOTED, "X-Tenant": "7"})
     assert BEARER not in repr(cfg) and QUOTED not in repr(cfg)
-    echoed = f"401 for {BEARER}; body {json.dumps({'header': QUOTED})}; raw {QUOTED}"
-    redacted = mcp_client._redact_error_text(echoed, cfg)
-    assert BEARER not in redacted and QUOTED not in redacted
-    assert json.dumps(QUOTED)[1:-1] not in redacted
+    diagnostic = f"HTTP 502 after 17 s; body {json.dumps({'tenant': 7})}"
+    assert mcp_client._redact_error_text(diagnostic, cfg) == diagnostic
+    assert BEARER not in mcp_client._redact_error_text(f"401 for {BEARER}", cfg)
 
 
 def test_status_names_headers_and_a_malformed_saved_map_never_echoes_values():
@@ -418,10 +418,10 @@ def test_production_read_and_write_keep_untouched_legacy_and_malformed_values(re
             zip(stored, entries[1:])] == entries[1:]
 
 
-def test_invalid_config_diagnostic_masks_header_echoes_even_before_a_config_exists(caplog):
-    secret = "syntheticsecret"
-    cfg, errors = config(url=secret + "://example.test", headers={"X-Key": secret})
-    assert cfg is None and secret not in json.dumps(errors) and secret not in caplog.text
+def test_invalid_config_diagnostics_keep_their_own_text_and_never_repeat_a_header_value(caplog):
+    cfg, errors = config(url="ftp://docs.example", headers={"X-Region": "us", "X-Api-Key": CUSTOM})
+    assert cfg is None and errors == ["MCP_CONFIG_ERROR: MCP server url must use http:// or https:// (got 'ftp')"]
+    assert CUSTOM not in caplog.text
 
 
 @pytest.mark.parametrize("transport, sdk_name", [("streamable_http", "streamablehttp_client"), ("sse", "sse_client")])

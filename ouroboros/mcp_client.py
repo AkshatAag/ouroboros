@@ -411,9 +411,6 @@ def normalize_server_config(
 ) -> Optional[MCPServerConfig]:
     """Validate one ``MCP_SERVERS`` entry; return ``None`` if unsalvageable."""
     def invalid(message: str) -> None:
-        headers = raw.get("headers") if isinstance(raw, dict) else None
-        if isinstance(headers, dict):
-            message = redact_known_values(message, tuple(value for value in headers.values() if isinstance(value, str)))
         if errors is not None:
             errors.append(f"MCP_CONFIG_ERROR: {message}")
         log.warning("Invalid MCP server config: %s", message)
@@ -460,8 +457,10 @@ def normalize_server_config(
             args = []
             auth_header = _validate_auth_header(raw.get("auth_header") or "Authorization")
             auth_token = _validate_auth_token(raw.get("auth_token") or "")
+        # Header values are forwarded configuration, not redaction keys: Settings masks them
+        # and the origin guard bounds their destination, but text from or about the server
+        # is never searched for them (a value may be "7" or "en"; an echo stays visible).
         headers = validate_headers(raw.get("headers"), legacy_header=auth_header, legacy_token=auth_token)
-        secret_values = (*secret_values, *headers.values())
     except ValueError as exc:
         return invalid(str(exc))
 
@@ -622,15 +621,17 @@ def _wrap_schema_text_fields(value: Any, cfg: Optional[MCPServerConfig] = None) 
 
 @contextmanager
 def _redacted_sdk_logs(cfg: MCPServerConfig, logger_name: str):
-    """Project one SDK logger's records from this connection through ``_redact_error_text``.
+    """Project this connection's SDK log records through ``_redact_error_text``.
 
-    Invalid server JSON makes the SDK log a validation traceback that can carry
-    the raw input (an echoed header or environment value) before Ouroboros sees
-    the error. The record's message and formatted exception become one redacted
-    message. The selection is a context variable the SDK's tasks inherit, so
-    concurrent servers never share it; the filter leaves with the connection.
+    Invalid server JSON makes the transport logger record a validation traceback,
+    and an invalid message makes the shared session warn on the root logger, both
+    with the raw input (an echoed saved token or environment secret) before Ouroboros
+    sees an error. The record's message and formatted exception become one
+    redacted message. The selection is a context variable the SDK's tasks
+    inherit, so concurrent servers and other root records are never projected;
+    the filters leave with the connection.
     """
-    sdk_log = logging.getLogger(logger_name)
+    sdk_logs = (logging.getLogger(logger_name), logging.getLogger())
 
     def project_log(record: logging.LogRecord) -> bool:
         if _SDK_DIAGNOSTIC_CONFIG.get() is cfg:
@@ -642,11 +643,13 @@ def _redacted_sdk_logs(cfg: MCPServerConfig, logger_name: str):
         return True
 
     token = _SDK_DIAGNOSTIC_CONFIG.set(cfg)
-    sdk_log.addFilter(project_log)
+    for sdk_log in sdk_logs:
+        sdk_log.addFilter(project_log)
     try:
         yield
     finally:
-        sdk_log.removeFilter(project_log)
+        for sdk_log in sdk_logs:
+            sdk_log.removeFilter(project_log)
         _SDK_DIAGNOSTIC_CONFIG.reset(token)
 
 

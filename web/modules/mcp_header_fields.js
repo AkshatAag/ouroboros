@@ -190,7 +190,7 @@ export function renderHeaderFields(server, index) {
     return `<section class="mcp-headers-fields">
         <div class="settings-section-head"><h4>HTTP headers</h4><button type="button" class="btn btn-default" data-mcp-header-add ${state.unreadable ? 'disabled' : ''}>Add header</button></div>
         <p class="ui-field-help">Each value is sent exactly as written, for example Authorization with Bearer &lt;token&gt; or Basic &lt;value&gt;, or X-API-Key.
-            No scheme is added, and every value is protected. Clear keeps the header with an empty value, which is not sent; Remove deletes it.
+            No scheme is added. Values are masked here, not scrubbed from server replies. Clear keeps an empty value, which is not sent; Remove deletes it.
             ${server.transport === 'sse'
         ? 'SSE sets Accept and Cache-Control on its event stream; message requests send every row as written, so a Content-Type row replaces application/json and the server may refuse it.'
         : 'Streamable HTTP sets Accept and Content-Type on every request, and its session headers once known; those replace a row with the same name.'}</p>

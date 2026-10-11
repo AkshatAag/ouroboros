@@ -8,11 +8,14 @@ MCPManager, and the real SDK transports initialize, list and call a tool.
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
+from typing import Annotated
 
 import pytest
+from pydantic import BaseModel, Field
 
 from ouroboros import mcp_client
 from tests.test_settings_secret_mask import settings_client  # noqa: F401
@@ -133,6 +136,74 @@ def test_a_rejected_header_reports_the_failure_without_its_value(loopback):
     assert wrong not in str(manager.status_payload())
 
 
+ORDINARY = {"X-Tenant": "7", "Accept-Language": "en", "X-Api-Version": "2", "X-Release": "2023-06-01"}
+SUMMARY = "Found 17 items; open the 7th one. lang en, api 2, release 2023-06-01."
+DESCRIPTION = "Search documents; returns at most 7 entries in English (en), API 2 of 2023-06-01."
+
+
+class _Window(BaseModel):
+    since: str = Field(description="Release such as 2023-06-01; at most 7 days, en dates.")
+
+
+class _Ordinary(_Synthetic):
+    """A server whose ordinary text and data contain the same characters as the configured header values."""
+
+    def __init__(self, transport, required):
+        from mcp.server.fastmcp import FastMCP
+
+        server = FastMCP("ordinary", host="127.0.0.1", log_level="WARNING")
+
+        @server.tool(description=DESCRIPTION)
+        def search(query: Annotated[str, Field(description="Words; open the 7th result.")], window: _Window) -> dict:
+            return {"summary": f"{SUMMARY} {query}", "count": 7, "release": window.since}
+
+        self.app = server.streamable_http_app() if transport == "http" else server.sse_app()
+        self.required, self.seen = required, []
+
+
+@pytest.mark.parametrize("transport", ["http", "sse"])
+def test_header_values_are_forwarded_configuration_not_filters_over_server_content(loopback, transport):
+    """Short and long ordinary header values leave results, descriptions, nested schemas and addresses intact.
+
+    Settings masks every value and the origin guard limits where values go; text the
+    server returns is not searched for them. So an echoed custom credential reaches the
+    result (an accepted residual, not a goal), while the legacy single token keeps its
+    own redaction.
+    """
+    import json
+
+    headers = {**ORDINARY, "X-Api-Key": CUSTOM}
+    app = _Ordinary(transport, headers)
+    _unused, url = loopback(transport, {}, wrap=lambda _echo: app)
+    kind = "sse" if transport == "sse" else "streamable_http"
+    servers = [{"id": "ordinary", "enabled": True, "transport": kind, "url": url, "headers": headers},
+               {"id": "legacy", "enabled": True, "transport": kind, "url": url, "headers": ORDINARY,
+                "auth_header": "X-Api-Key", "auth_token": CUSTOM}]
+    manager = mcp_client.get_manager()
+    manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 10, "MCP_SERVERS": servers})
+    assert manager.refresh_server("ordinary")["ok"] and manager.refresh_server("legacy")["ok"]
+    tool = next(item for item in manager.list_tools_for_registry() if item["server_id"] == "ordinary")
+    assert tool["raw_description"] == DESCRIPTION and DESCRIPTION in tool["description"]
+    schema = json.dumps(tool["schema"])
+    assert "Words; open the 7th result." in schema and "Release such as 2023-06-01; at most 7 days, en dates." in schema
+    status = {row["id"]: row for row in manager.status_payload()["servers"]}["ordinary"]
+    assert status["url"] == url and status["tools"][0]["description"] == DESCRIPTION
+    assert manager.test_server(servers[0])["tools"][0]["description"] == DESCRIPTION
+
+    def call(server_id):
+        name = next(item["name"] for item in manager.list_tools_for_registry() if item["server_id"] == server_id)
+        text = manager.call_tool(name, {"query": "invalid key " + CUSTOM, "window": {"since": "2023-06-01"}})
+        return text.split("\n\n", 1)[1]
+
+    body = call("ordinary")
+    structured = json.loads(body.rsplit("structuredContent: ", 1)[-1])
+    assert structured == {"summary": f"{SUMMARY} invalid key {CUSTOM}", "count": 7, "release": "2023-06-01"}
+    assert SUMMARY in body and CUSTOM in body  # the server's own echo is not rewritten
+    legacy = call("legacy")
+    assert CUSTOM not in legacy and SUMMARY in legacy and "<redacted:mcp-auth-token>" in legacy
+    assert {row["x-api-key"] for row in app.seen} == {CUSTOM} and {row["x-tenant"] for row in app.seen} == {"7"}
+
+
 class _Echoing:
     """Answers the first MCP message with invalid JSON that starts with a received header value."""
 
@@ -165,12 +236,13 @@ class _Echoing:
 @pytest.mark.parametrize("transport, sdk_line", [("http", "Error parsing JSON response"),
                                                   ("sse", "Error parsing server message")])
 @pytest.mark.parametrize("redacted", [True, False])
-def test_sdk_parse_tracebacks_in_process_logs_never_carry_a_header_value(loopback, monkeypatch, transport, sdk_line,
-                                                                         redacted):
+def test_sdk_parse_tracebacks_in_process_logs_never_carry_a_saved_token(loopback, monkeypatch, transport, sdk_line,
+                                                                        redacted):
     """The SDK logs the raw invalid body with its traceback before Ouroboros sees an error.
 
-    The real formatted log text is captured. Disabling the projection (negative
-    control) shows the witness would see the echoed value.
+    The real formatted log text is captured; the echo is the legacy token (a
+    redaction key, unlike a header-map value). Disabling the projection
+    (negative control) shows the witness would see the echoed value.
     """
     import contextlib
     import io
@@ -188,7 +260,7 @@ def test_sdk_parse_tracebacks_in_process_logs_never_carry_a_header_value(loopbac
         manager = mcp_client.get_manager()
         manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 3, "MCP_SERVERS": [
             {"id": "echo", "enabled": True, "transport": "sse" if transport == "sse" else "streamable_http",
-             "url": url, "headers": {"X-Api-Key": CUSTOM}}]})
+             "url": url, "auth_header": "X-Api-Key", "auth_token": CUSTOM}]})
         outcome = manager.refresh_server("echo")
     finally:
         root.removeHandler(handler)
@@ -196,9 +268,66 @@ def test_sdk_parse_tracebacks_in_process_logs_never_carry_a_header_value(loopbac
     assert outcome["ok"] is False and CUSTOM not in outcome["error"]
     assert sdk_line in logged and "json_invalid" in logged, logged
     if redacted:
-        assert CUSTOM not in logged and "*** is not JSON" in logged, logged
+        assert CUSTOM not in logged and "<redacted:mcp-auth-token> is not JSON" in logged, logged
     else:
         assert CUSTOM in logged  # negative control: the unprojected SDK record carries the value
+
+
+class _NotifyingSSE(_Echoing):
+    """Streams a log notification whose invalid level echoes a received header; the session warns on the root logger."""
+
+    async def __call__(self, scope, receive, send):
+        headers = {key.decode().lower(): value.decode() for key, value in scope.get("headers", [])}
+        if scope["type"] == "http" and scope["method"] == "GET":
+            note = {"jsonrpc": "2.0", "method": "notifications/message",
+                    "params": {"level": headers["x-api-key"], "data": "synthetic"}}
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"text/event-stream")]})
+            body = f"event: endpoint\ndata: /messages/?session_id=fixture\n\nevent: message\ndata: {json.dumps(note)}\n\n"
+            await send({"type": "http.response.body", "body": body.encode(), "more_body": True})
+            while (await receive())["type"] != "http.disconnect":
+                pass
+            return
+        await super().__call__(scope, receive, send)
+
+
+@pytest.mark.parametrize("redacted", [True, False])
+def test_sdk_session_warnings_on_the_root_logger_never_carry_a_saved_token(loopback, monkeypatch, redacted):
+    """The SDK session logs an invalid notification on the root logger with its raw parameters.
+
+    The echo is the legacy token. Only records made inside this connection are
+    projected; a root record made after it keeps its text, and disabling the
+    projection shows the raw echo.
+    """
+    import contextlib
+    import io
+    import logging
+
+    if not redacted:
+        monkeypatch.setattr(mcp_client, "_redacted_sdk_logs", lambda cfg, name: contextlib.nullcontext())
+    _app, url = loopback("sse", {}, wrap=lambda app: _NotifyingSSE(app, "sse"))
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        manager = mcp_client.get_manager()
+        manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 3, "MCP_SERVERS": [
+            {"id": "notes", "enabled": True, "transport": "sse", "url": url,
+             "auth_header": "X-Api-Key", "auth_token": CUSTOM}]})
+        outcome = manager.refresh_server("notes")
+        logging.warning("after the connection: %s", CUSTOM)
+    finally:
+        root.removeHandler(handler)
+    session, _, after = stream.getvalue().partition("WARNING root after the connection")
+    assert outcome["ok"] is False and CUSTOM not in outcome["error"]
+    assert "WARNING root Failed to validate notification" in session, session
+    assert after.strip() == ": " + CUSTOM  # outside the connection the root logger is not projected
+    if redacted:
+        assert CUSTOM not in session and "<redacted:mcp-auth-token>" in session, session
+    else:
+        assert CUSTOM in session  # negative control: the unprojected session record carries the value
 
 
 class _Recording:
