@@ -217,9 +217,9 @@ def test_a_pending_invocation_of_this_task_is_unknown_custody_never_absence(tmp_
         "cost_coverage": "unproven_preterminal", "stop_policy": "reconcile_first", "review_owned": False,
         "state": budget_pause.EXTERNAL_STOP_UNKNOWN, "stop_outcome": "pending_invocation_unbound",
         "detail": "",
-        # #1572: the row also names its registering source and whether it is an
-        # independent review without apply; a synthetic row without a source is neither.
-        "source": "", "independent_review": False,
+        # The real pending-request projector supplies the same default source as
+        # the upstream chain path; this unbound delegation is not an independent review.
+        "source": "delegated_subagent", "independent_review": False,
     }]
     assert observed["runs"][0]["state"] != budget_pause.EXTERNAL_STOP_CONFIRMED  # unsettled for a grant
 
