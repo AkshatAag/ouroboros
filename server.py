@@ -1598,6 +1598,8 @@ def _restart_cleanup_kwargs() -> dict:
 
 def _emergency_process_cleanup(*, port_sweep: bool = True) -> dict:
     """Kill child processes, workers, companions, and runtime port holders; the kill census."""
+    from ouroboros.evidence_packer import packer
+    packer.stop()
     begin_owned_stop(DATA_DIR)  # the grace starts here; pending stops are recorded before any wait
     worker_exits = None  # the pool's own PID census; None until kill_workers ran to its end
     try:
@@ -1608,11 +1610,8 @@ def _emergency_process_cleanup(*, port_sweep: bool = True) -> dict:
             # here; finalize running tasks as an honest interrupted-by-restart,
             # not a worker crash storm.
             cleanup_status, cleanup_reason = _shutdown_task_cleanup_args(True)
-            cleanup_kwargs.update(
-                terminal_status=cleanup_status,
-                result_reason=cleanup_reason,
-                stop_source="server_shutdown",
-            )
+            cleanup_kwargs.update(terminal_status=cleanup_status, result_reason=cleanup_reason,
+                                  stop_source="server_shutdown")
         kill_workers(force=True, archive_service_logs=False,
                      **cleanup_kwargs, **_managed_update_pending_kwargs())
         worker_exits = last_worker_exit_census()
@@ -1637,7 +1636,7 @@ def _emergency_process_cleanup(*, port_sweep: bool = True) -> dict:
         except Exception:
             pass
     if _restart_requested.is_set():  # only the restart that carried an adoption can arm it; never a wait
-        body_adoption.arm(DATA_DIR, worker_exits=worker_exits, live_children=multiprocessing.active_children(),
+        body_adoption.arm(DATA_DIR, worker_exits=worker_exits, live_children=multiprocessing.active_children() + packer.live_children(),
                           owned_stop=owned_stop, owner_restart=_owner_restart_requested.is_set())
     if port_sweep:
         # Sweep the ACTUALLY bound port (find_free_port may have moved off
@@ -1652,7 +1651,7 @@ def _emergency_process_cleanup(*, port_sweep: bool = True) -> dict:
             kill_process_on_port(host_service_port())
     except Exception:
         pass
-    return {"worker_exits": worker_exits, "live_children": multiprocessing.active_children(), "owned_stop": owned_stop}
+    return {"worker_exits": worker_exits, "live_children": multiprocessing.active_children() + packer.live_children(), "owned_stop": owned_stop}
 
 def main() -> int:
     # The server process is the single writer of logs/server.log; a test run on the

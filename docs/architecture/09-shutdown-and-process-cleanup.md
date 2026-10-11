@@ -1,6 +1,6 @@
 # 9. Shutdown & Process Cleanup
 
-Close keeps the shared daemon; Restart stops this generation's work, then transfers; Panic stops everything before cleanup. A signal proves no exit: a stop requires confirmed death; unconfirmed custody stays for the next start to retry.
+Close keeps the shared daemon; Restart stops this generation's work; Panic stops everything. The exit census includes the packer. A signal proves no exit; unconfirmed custody stays for the next start. Switch doors restore packed handles before transfer.
 
 ### Shutdown doors
 

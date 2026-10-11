@@ -229,6 +229,89 @@ def _census(**over):
     return census
 
 
+@pytest.mark.parametrize("alive", [True, False])
+def test_restart_census_refuses_a_packer_exit_until_confirmed(tmp_path, monkeypatch, alive):
+    import server
+    from ouroboros import evidence_packer
+
+    root = tmp_path / "data"
+    root.mkdir()
+    signals, switches = [], []
+    child = SimpleNamespace(poll=lambda: None if alive else 0, kill=lambda: signals.append("kill"))
+    packer = evidence_packer.EvidencePacker()
+    packer._process = child
+    monkeypatch.setattr(evidence_packer, "packer", packer)
+    monkeypatch.setattr(server, "DATA_DIR", root)
+    monkeypatch.setattr(server, "begin_owned_stop", lambda *_: None)
+    monkeypatch.setattr(server, "stop_owned_work", lambda *_: {"state": "completed"})
+    monkeypatch.setattr("supervisor.workers.kill_workers", lambda **_: None)
+    monkeypatch.setattr("supervisor.workers.last_worker_exit_census", lambda: {"unconfirmed": []})
+    monkeypatch.setattr("multiprocessing.active_children", lambda: [])
+    monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
+    server._restart_requested.clear()
+    cleanup = server._emergency_process_cleanup(port_sweep=False)
+    assert bool(cleanup["live_children"]) is alive
+    assert packer._stopped.is_set() and signals == ["kill"]
+    monkeypatch.setattr(store_switch, "switch_needs", lambda *a: {"handles": False, "money": False, "facts": False})
+    monkeypatch.setattr(store_switch, "rev_parse", lambda *a: "example-target")
+    monkeypatch.setattr(store_switch, "switching_owner", lambda *_: lambda intent: (switches.append(intent) or True, "switched"))
+    store_switch.record_switch_intent(root, target_sha="example-target", target_ref="example", reason="test", door="ui_rollback")
+    outcome = store_boot.switch_at_restart(root, root, cleanup)
+    if alive:
+        assert outcome["status"] == "refused" and outcome["reason"] == "quiescence_unconfirmed"
+        assert switches == []
+    else:
+        assert outcome["status"] == "switched" and len(switches) == 1
+
+
+def test_packer_census_covers_a_spawn_before_the_child_handle_is_published():
+    from ouroboros.evidence_packer import EvidencePacker
+
+    packer = EvidencePacker()
+    alive = [True]
+    packer._thread = SimpleNamespace(is_alive=lambda: alive[0])
+    packer.stop()
+    assert packer.live_children() == [packer._thread]
+    alive[0] = False
+    assert packer.live_children() == []
+
+
+@pytest.mark.parametrize("door", ["boot", "restart"])
+def test_switch_doors_pass_restore_callback_and_restore_before_switch(tmp_path, monkeypatch, door):
+    from ouroboros import evidence_packs, evidence_packer
+    from tests.test_evidence_packs import _task, _handle_path
+
+    root = tmp_path / "data"
+    root.mkdir()
+    raw = b"checkpoint restored before switching"
+    _, handle = _task(root, "restore", blobs=1, handle=raw)
+    assert evidence_packer.run_pass(root)["packed"] == 1
+    target = _handle_path(root, "restore", handle)
+    assert not target.exists()
+    monkeypatch.setattr(store_switch, "switch_needs", lambda *a: {"handles": True, "money": False, "facts": False})
+    monkeypatch.setattr(store_switch, "rev_parse", lambda *a: "example-target")
+    store_switch.record_switch_intent(root, target_sha="example-target", target_ref="example", reason="test", door="ui_rollback")
+    calls = []
+
+    def owner(intent):
+        assert target.read_bytes() == raw
+        calls.append(intent)
+        return True, "switched"
+
+    name = "resume_pending_switch" if door == "boot" else "run_switch_seam"
+    original = getattr(store_switch, name)
+
+    def seam(*args, **kwargs):
+        assert kwargs["restore_handles"] is evidence_packs.restore_checkpoint_handles
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store_switch, name, seam)
+    monkeypatch.setattr(store_switch, "switching_owner", lambda *_: owner)
+    outcome = (store_boot.start(root, repo_dir=root, request_restart=lambda: None, owner=owner) if door == "boot"
+               else store_boot.switch_at_restart(root, root, _census()))
+    assert outcome["status"] == "switched" and len(calls) == 1
+
+
 def test_switch_at_restart_without_an_intent_is_a_no_op(tmp_path):
     assert store_boot.switch_at_restart(tmp_path / "data", REPO, _census()) == {"status": "no_intent"}
 

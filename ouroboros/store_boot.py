@@ -19,7 +19,7 @@ import pathlib
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
-from ouroboros import store, store_switch
+from ouroboros import evidence_packs, store, store_switch
 
 log = logging.getLogger(__name__)
 _GUARD = threading.Lock()
@@ -39,7 +39,8 @@ def start(root: Any, *, repo_dir: Any, request_restart: Callable[[], Any],
     outcome when one ran, else ``{"status": "importing"}``."""
     root = pathlib.Path(root)
     try:
-        resumed = store_switch.resume_pending_switch(root, repo_dir=repo_dir, owner=owner, restore_handles=None)
+        resumed = store_switch.resume_pending_switch(
+            root, repo_dir=repo_dir, owner=owner, restore_handles=evidence_packs.restore_checkpoint_handles)
     except Exception as exc:
         log.critical("Pending authority switch could not be resumed at boot; the intent waits", exc_info=True)
         resumed = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
@@ -128,7 +129,8 @@ def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
         ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
     ) if blocked]
     try:
-        outcome = store_switch.run_switch_seam(root, repo_dir=repo_dir, blockers=blockers, restore_handles=None)
+        outcome = store_switch.run_switch_seam(
+            root, repo_dir=repo_dir, blockers=blockers, restore_handles=evidence_packs.restore_checkpoint_handles)
     except Exception as exc:
         log.critical("Authority switch at the restart exit raised; the intent waits for the next boot", exc_info=True)
         outcome = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}

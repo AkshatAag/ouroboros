@@ -207,6 +207,13 @@ class EvidencePacker:
         if process is not None:
             self._signal(process)
 
+    def live_children(self) -> list:
+        """Exit census after Stop: include an unfinished spawn until its owner returns."""
+        process, thread = self._process, self._thread
+        if process is not None and process.poll() is None:
+            return [process]
+        return [thread] if thread is not None and thread.is_alive() else []
+
     @staticmethod
     def _signal(process) -> None:
         with contextlib.suppress(OSError):
