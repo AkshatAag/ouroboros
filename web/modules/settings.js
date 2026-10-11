@@ -1440,7 +1440,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                     + 'the current task keeps its existing routes';
             }
             if (data.warnings && data.warnings.length) {
-                statusMsg += ' ⚠️ ' + data.warnings.join(' | ');
+                statusMsg += '. Warnings: ' + data.warnings.join(' | ');
                 statusType = 'warn';
             }
             if (runtimeModeResult?.restart_required) {
