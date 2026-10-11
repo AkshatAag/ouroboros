@@ -198,6 +198,22 @@ test('re-typing the mask is a value edit to dirty tracking and import freshness'
     assert.deepEqual(view.errors(), ['***set*** is reserved for keeping a saved value. Enter the real value.']);
 });
 
+test('editing a saved legacy mask away and back refuses it instead of storing mask text', async () => {
+    for (const mask of ['legacy-t...', '***']) {
+        const server = { id: 'docs', transport: 'streamable_http', auth_header: 'X-Legacy', auth_token: mask };
+        const view = mount(server, 'docs');
+        assert.deepEqual(view.errors(), []);
+        assert.deepEqual(credentialPayload(server), {});
+        await view.type(0, 'value', 'synthetic-other');
+        await view.type(0, 'value', mask);
+        assert.match(view.errors()[0] || '', /saved token.*mask/);
+        await view.type(0, 'value', 'synthetic-replacement');
+        assert.deepEqual(view.errors(), []);
+        assert.deepEqual(credentialPayload(server), { auth_header: 'Authorization', auth_token: '',
+            headers: { 'X-Legacy': 'synthetic-replacement' } });
+    }
+});
+
 test('protocol-header help states what each transport actually sets', () => {
     const http = renderHeaderFields({ id: 'h', transport: 'streamable_http', headers: {} }, 0);
     const sse = renderHeaderFields({ id: 's', transport: 'sse', headers: {} }, 1);

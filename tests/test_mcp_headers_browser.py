@@ -842,3 +842,38 @@ def test_removed_legacy_then_import(direct_server_with_data, loopback, engine, i
             assert _rows(page.locator("[data-mcp-card]").first) == [(name, "***set***") for name in expected]
         finally:
             browser.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_retyped_legacy_mask_cannot_replace_saved_token(direct_server_with_data, engine):  # noqa: F811
+    """Edited-away-and-back legacy display masks must not become literal credentials."""
+    from playwright.sync_api import expect, sync_playwright
+
+    url, data_dir = direct_server_with_data['url'], direct_server_with_data['data_dir']
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        page = browser.new_page(viewport={'width': 1280, 'height': 900})
+        try:
+            for token in (BEARER, 'short'):
+                seed = [{'id': 'legacy_mask', 'enabled': False, 'transport': 'streamable_http',
+                         'url': 'https://example.test/mcp', 'auth_header': 'X-Legacy', 'auth_token': token}]
+                _seed(page, url, seed)
+                field = page.locator('#mcp-0-header-0-value')
+                mask = field.input_value()
+                assert mask != token
+                posts = []
+                handler = lambda request: posts.append(request) if request.url.endswith('/api/settings') and request.method == 'POST' else None
+                page.on('request', handler)
+                field.fill('synthetic-other')
+                field.fill(mask)
+                page.click('#btn-save-settings')
+                expect(page.locator('#mcp-0-header-0-value-error')).to_contain_text("saved token's mask")
+                assert posts == []
+                assert _disk(data_dir)['legacy_mask']['auth_token'] == token
+                field.fill('synthetic-new-credential')
+                _save(page)
+                saved = _disk(data_dir)['legacy_mask']
+                assert saved['auth_token'] == '' and saved['headers'] == {'X-Legacy': 'synthetic-new-credential'}
+                page.remove_listener('request', handler)
+        finally:
+            browser.close()

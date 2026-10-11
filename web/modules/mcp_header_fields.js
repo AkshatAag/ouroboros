@@ -268,6 +268,8 @@ export function validateHeaderFields(card, server, savedIdentity = '') {
             errors.push({ input: valueInput, message: kept });
         } else if (keepsSavedValue(row)) {
             // An untouched saved value keeps its own admission rules, legacy prefix masks included.
+        } else if (savedIdentity && row.source === 'legacy' && row.valueEdited && row.value === row.savedValue) {
+            errors.push({ input: valueInput, message: "This is the saved token's mask. Enter the real value or reload Settings." });
         } else if (row.value === HEADER_PLACEHOLDER) {
             errors.push({ input: valueInput, message: `${HEADER_PLACEHOLDER} is reserved for keeping a saved value. Enter the real value.` });
         } else if (typeof row.value !== 'string' || /[^\x20-\x7e]/.test(row.value) || row.value !== row.value.trim()) {
