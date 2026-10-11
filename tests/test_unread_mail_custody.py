@@ -264,6 +264,11 @@ def test_the_terminal_capture_reads_the_mailbox_before_the_row_lock(tmp_path, mo
     monkeypatch.setattr("ouroboros.task_store.open_store", opened)
     stored = write_task_result(data, TASK, "cancelled", result="x")
     assert _msg_ids(stored["unread_mailbox"]) == ["u1"]
+    # A first row repeats its write once to prepare the swarm rollup outside the lock; the
+    # capture happened once, before the first lock, and is kept across the rounds.
+    assert events[0] == "capture" and events.count("capture") == 1 and set(events[1:]) == {"row_lock"}, events
+    events.clear()
+    write_task_result(data, TASK, "cancelled", result="y")  # an existing row: one capture, one lock
     assert events == ["capture", "row_lock"], events
 
 

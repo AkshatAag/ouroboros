@@ -821,13 +821,23 @@ def write_task_result(
         _refuse_occupied(results_drive_root, task_id, write=True)
     explicit_ts = str(fields.pop("ts", "") or "")
     from ouroboros.task_custody import capture_owner_mail, capture_unread_mail, merge_unread_mail
+    from ouroboros.task_store import Reprepare, prepared_write
 
-    # TZ-1 V10: the mailbox bytes are read BEFORE the row lock (a bounded union happens
-    # under it); a terminal write that the projector turns terminal captures under it.
-    captured = capture_unread_mail(results_drive_root, task_id) if status in _TRULY_TERMINAL_STATUSES else None
-    owner_mail = capture_owner_mail(results_drive_root, task_id) if status in _TRULY_TERMINAL_STATUSES else None
+    prepared: Dict[str, Any] = {}
 
-    def _merge(existing: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _write(needs: set) -> Dict[str, Any]:
+        # TZ-1 V10: the mailbox bytes are read BEFORE the row lock (a bounded union happens
+        # under it); a write the projector turns terminal, or a first row, asks once
+        # (``Reprepare``) and the whole write repeats with that input prepared out here
+        # (what an earlier round prepared is kept, not read again).
+        if "mail" not in prepared and (status in _TRULY_TERMINAL_STATUSES or "mail" in needs):
+            prepared["mail"] = (capture_unread_mail(results_drive_root, task_id), capture_owner_mail(results_drive_root, task_id))
+        if "rollup" not in prepared and (create_only or "rollup" in needs) and "swarm_fanout_rollup" not in fields:
+            from ouroboros.swarm_rollup import initial_swarm_rollup
+            prepared["rollup"] = initial_swarm_rollup(results_drive_root)
+        return patch_document(results_drive_root, task_id, lambda existing: _merge(existing, prepared))
+
+    def _merge(existing: Dict[str, Any], prepared: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if strict_existing_dict and existing and (
             str(existing.get("task_id") or "") != str(task_id)
             or not isinstance(existing.get("status"), str)
@@ -842,8 +852,9 @@ def write_task_result(
             return None
         prepared_fields = dict(fields)
         if not existing and "swarm_fanout_rollup" not in prepared_fields:
-            from ouroboros.swarm_rollup import initial_swarm_rollup
-            prepared_fields.setdefault("swarm_fanout_rollup", initial_swarm_rollup(results_drive_root))
+            if "rollup" not in prepared:
+                raise Reprepare("rollup")
+            prepared_fields["swarm_fanout_rollup"] = prepared["rollup"]
         from ouroboros.acceptance_history import preserve_acceptance_history
         prepared_fields = preserve_acceptance_history(existing, prepared_fields)
         if "review_projection" in prepared_fields:
@@ -867,19 +878,19 @@ def write_task_result(
         # erase provenance persisted before the separate readiness write.
         projected_fields.pop("canonical_terminal_projection_origin", None)
         if projected_status in _TRULY_TERMINAL_STATUSES and existing_status not in _TRULY_TERMINAL_STATUSES:
+            if "mail" not in prepared:
+                raise Reprepare("mail")  # the projector turned the row terminal: the capture happens outside
+            captured, owner_mail = prepared["mail"]
             merged = {**existing, **projected_fields}
             lineage_keys = ("root_task_id", "parent_task_id", "delegation_role", "original_task_id", "timeout_retry_from")
             if resolve_task_lineage(task_id, metadata=merged.get("metadata"),
                                     **{key: merged.get(key) for key in lineage_keys})["is_root_task"]:
                 projected_fields["canonical_terminal_projection_origin"] = "terminal_transition"
                 # Batch4: the owner's exact rows, ACKed ones included, outlive the mailbox cleanup.
-                projected_fields["owner_mailbox"] = merge_unread_mail(existing.get("owner_mailbox"), owner_mail
-                                                                      or capture_owner_mail(results_drive_root, task_id))
+                projected_fields["owner_mailbox"] = merge_unread_mail(existing.get("owner_mailbox"), owner_mail)
             # TZ-1 V10: this accepted transition keeps the mail no attempt read (no ACK written);
             # later late mail joins through settlement, never through a rejected write.
-            projected_fields["unread_mailbox"] = merge_unread_mail(
-                projected_fields.get("unread_mailbox"),
-                captured if status in _TRULY_TERMINAL_STATUSES else capture_unread_mail(results_drive_root, task_id))
+            projected_fields["unread_mailbox"] = merge_unread_mail(projected_fields.get("unread_mailbox"), captured)
         # Unread-mail custody only grows: no replica or partial write can shrink it.
         projected_fields["unread_mailbox"] = merge_unread_mail(
             existing.get("unread_mailbox"), projected_fields.get("unread_mailbox"))
@@ -899,7 +910,7 @@ def write_task_result(
             "updated_at": now,
         }))
 
-    return patch_document(results_drive_root, task_id, _merge)
+    return prepared_write(_write)
 
 
 # plan_review_state v2 records each task's plan_task cycles: a fresh series_id,
@@ -1388,12 +1399,11 @@ def record_plan_review_wave(
     if not _PLAN_REVIEW_HASH_RE.fullmatch(fingerprint):
         raise ValueError("PLAN_REVIEW_STATE_INVALID: wave fingerprint is invalid")
 
+    from ouroboros.task_store import prepared_write
     from ouroboros.tools.plan_author_history import prepared_retention
 
-    retain = prepared_retention(results_drive_root, task_id)  # the retention I/O runs before the transaction
-
-    def _record(state: Dict[str, Any]) -> Dict[str, Any]:
-        retain(state)
+    def _record(state: Dict[str, Any], retain: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+        retain(state)  # the retention I/O ran before the transaction; a moved attempt repeats the write
         selected = state.get("current_attempt") or {}
         retained_author = (selected.get("author_subject") or {}).get("review_fingerprint") == fingerprint
         previous = [w for w in state.get("waves") or [] if str(w.get("request_fingerprint") or "") == fingerprint]
@@ -1459,7 +1469,11 @@ def record_plan_review_wave(
         state["current_attempt"] = selected if retained_author else {"fingerprint": fingerprint, "status": "open", "reason": ""}
         return state
 
-    state = _update_plan_review_state(results_drive_root, task_id, _record)
+    def _write(_needs: set) -> Dict[str, Any]:
+        retain = prepared_retention(results_drive_root, task_id)
+        return _update_plan_review_state(results_drive_root, task_id, lambda state: _record(state, retain))
+
+    state = prepared_write(_write)
     return plan_review_wave(state, fingerprint) or {}
 
 

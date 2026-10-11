@@ -100,6 +100,28 @@ def _decode(rows: list, handoff_records: list) -> List[Dict[str, Any]]:
     return [store.project_handoffs(json.loads(record["body"]), handoffs[record["task_id"]]) for record in rows]
 
 
+class Reprepare(Exception):
+    """A mutator's answer when the write needs an input it may only prepare OUTSIDE the lock
+    (a mailbox read, an event-chain snapshot, an artifact write): the transaction rolls back
+    empty and ``prepared_write`` repeats the whole write with that input prepared first."""
+
+    def __init__(self, what: str) -> None:
+        super().__init__(what)
+        self.what = what
+
+
+def prepared_write(write: Callable[[set], Any]) -> Any:
+    """Run ``write(needs)`` until its mutator stops asking: every ``Reprepare`` adds its name to
+    ``needs`` and the next round prepares it before ``BEGIN``. No I/O happens under the lock."""
+    needs: set = set()
+    for _round in range(4):
+        try:
+            return write(needs)
+        except Reprepare as exc:
+            needs.add(exc.what)
+    return write(needs)
+
+
 DELETE_ROW = object()  # a handoff mutator's answer: drop the row
 
 
