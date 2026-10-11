@@ -4,6 +4,7 @@ import pytest
 
 from ouroboros import headless, observability
 from ouroboros.task_results import write_task_result
+from tests._store_shared import result_signature
 
 
 def inventory(root):
@@ -19,8 +20,7 @@ def test_terminal_adoption_drops_cache_before_child_drive_retention(tmp_path, st
     child = headless.prepare_task_drive(parent, task_id, "empty")
     child_cache, canonical_cache = inventory(child), inventory(parent)
     write_task_result(child, task_id, status, result="retained answer", artifact_status="ready")
-    child_result = child / "task_results" / f"{task_id}.json"
-    original = child_result.read_bytes()
+    original = result_signature(child, task_id)
     call = observability.persist_call(child, task_id=task_id, call_id="evidence", call_type="llm_response",
                                       payload={"answer": "retained answer"})
     task = {"id": task_id, "drive_root": str(child)}
@@ -28,7 +28,7 @@ def test_terminal_adoption_drops_cache_before_child_drive_retention(tmp_path, st
         report = headless.prepare_terminal_task_files(parent, task)
         assert report["error"] == "" and report["result"]["status"] == status
         assert not child_cache.parent.parent.exists()
-        assert child.is_dir() and child_result.read_bytes() == original
+        assert child.is_dir() and result_signature(child, task_id) == original
         assert canonical_cache.read_text(encoding="utf-8") == '{"cache": "derived"}'
         manifest = observability.read_call_manifest_ref(child, call["manifest_ref"], task_id=task_id)
         assert observability.read_blob_ref(child, manifest["full_payload_ref"])["answer"] == "retained answer"

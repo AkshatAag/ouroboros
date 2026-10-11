@@ -153,7 +153,7 @@ ouroboros/ — agent core and shared runtime (§6)
   _usage_rows.py, _usage_money.py, _usage_response.py, usage_ledger.py, skill_review_usage.py — the one reducer, exact Decimal cash, the accounting usage normalizer, shared row rules and the money lock, the read-only Skill Review projection (§6 Usage ledger substrate vs. accounting policy)
   _usage_cache_splits.py — process-local cache split by task/provider/route/review; a missing entry prices a full cache write (§6)
   usage_store.py, usage_journal.py, openrouter_cost.py — `state/usage.sqlite`, its journal import and explicit OpenRouter price receipts (docs/USAGE_STORE.md)
-  store.py, store_import.py, store_switch.py — the dormant current-facts store `state/current.sqlite` on the SQLite core money shares (typed `StoreMigrating`/`StoreRetired`/`StoreLost`/`StoreBusy`), its one importer with per-row reconciliation and byte-identical export, and the switch intent, receipt and restart-exit seam that exports before an in-app switch to a tree without the store; the storage cutover activates them (§6 Usage ledger substrate vs. accounting policy)
+  store.py, store_import.py, store_switch.py — the current-facts store `state/current.sqlite` on the SQLite core money shares (one `BEGIN IMMEDIATE` transaction per task-fact write; typed `StoreMigrating`/`StoreRetired`/`StoreLost`/`StoreBusy`), its one importer with per-row reconciliation and byte-identical export, and the switch intent, receipt and restart-exit seam that exports before an in-app switch to a tree without the store
   cost_projection.py — the one task-cost projection for every producer: `accounted_upper_bound_usd`, null as None and never $0.00 (§6 Budget tracking)
   delegate_custody.py, delegate_custody_reconcile.py, delegate_state_sweep.py, delegate_custody_usage.py, delegate_custody_memo.py — Durable delegated-run custody, reconciliation, sweeps, usage and process memo; ownership stays OWNED/FOREIGN/UNKNOWN (§6 Nanny, transport and custody)
   delegate_hold.py — unknown-provider hold in supervised_wait until the leaf wakes; never resends (§6 Context fitting)
@@ -331,8 +331,8 @@ ouroboros/ — agent core and shared runtime (§6)
   server_process.py, server_liveness.py, server_maintenance.py, server_restart.py, server_owner_routing.py, server_routing_context.py — Server leaves the composition root calls: per-process facts, wedge detection, drive upkeep, restart operations, owner-message routing and its per-turn facts (§9)
   terminal_cost_reconciliation.py — Usage recovery/projection (§6 Budget tracking)
   task_continuation.py — Durable review continuation state
-  task_results.py — Durable task results `task_results/<id>.json`; the locked `task_acceptance_review_accounting` claim is unknown without a recoverable terminal host run, never permission to re-dispatch (§6 Task acceptance)
-  task_result_facts.py — One stat-invalidated compact memo for list ordering, child selection, SSE discovery and Main routing; selected bodies still use the schema readers
+  task_results.py — Task-result merge-writes (one store transaction) and typed readers; the locked `task_acceptance_review_accounting` claim is unknown without a recoverable terminal host run, never permission to re-dispatch (§6 Task acceptance)
+  task_store.py — Documents, signatures, indexed lineage/status selects and typed facts over the store's `tasks`/`task_bodies`
   pause_notices.py — Confirmed-pause System disclosures: pending episodes, saved-chat receipts, off-loop local replay
   task_result_schema.py — Task-result schema admission: the `_schema_version` stamp, the classifier, and the quarantine an unstamped, future or malformed row lands in
   task_status.py — Effective status, lineage and waits; `execution_owner` and dated `execution_observation` separate lifecycle from liveness (§5); `task_has_live_queue_ownership` supplies the worker-side cancel predicate and fails open toward liveness (§10 invariant 14)

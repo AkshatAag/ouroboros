@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.observability import without_finalization_timing
 from ouroboros.utils import update_json_locked, utc_now_iso
+from ouroboros.task_store import patch_document
 from ouroboros.task_finalization import (
     HOST_AUTHORED_TERMINAL_ORIGINS, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL,
     artifact_store_roots, rescued_files_fact, rescued_files_sentence,
@@ -1295,9 +1296,6 @@ def _persist_cancel_receipt(
     """
     tid = str(task_id or "")
     try:
-        from ouroboros.task_results import task_result_path
-        from ouroboros.utils import update_json_locked
-
         block: Dict[str, Any] = {
             "settled_status": str(settled_status or ""),
             "outcome": str(outcome or ""),
@@ -1367,7 +1365,7 @@ def _persist_cancel_receipt(
             current["cancel_receipt"] = merged
             return current
 
-        update_json_locked(task_result_path(pathlib.Path(drive_root), tid), _mutate)
+        patch_document(pathlib.Path(drive_root), tid, _mutate)
     except Exception:
         log.debug("cancel-receipt persistence failed for %s", tid, exc_info=True)
 
@@ -1381,8 +1379,6 @@ def record_cancel_receipt_delivery(
     destination evidence unknown; it never authorizes suppressing an excerpt.
     """
     try:
-        from ouroboros.task_results import task_result_path
-
         def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             receipt = current.get("cancel_receipt")
             if (str(current.get("task_id") or "") != task_id
@@ -1391,7 +1387,7 @@ def record_cancel_receipt_delivery(
                 return None
             return {**current, "cancel_receipt": {**receipt, "delivered_chat_id": chat_id}}
 
-        update_json_locked(task_result_path(pathlib.Path(drive_root), task_id), _mutate)
+        patch_document(pathlib.Path(drive_root), task_id, _mutate)
     except Exception:
         log.debug("cancel-receipt delivery evidence failed for %s", task_id, exc_info=True)
 

@@ -10,8 +10,9 @@ from ouroboros.finalization_timing import finalization_child_scope
 from ouroboros.task_finalization import build_swarm_efficiency
 from ouroboros.task_status import find_child_tasks
 from ouroboros.tools.control_scheduling import _emit_swarm_fanout
-from ouroboros.utils import append_jsonl, atomic_write_json
+from ouroboros.utils import append_jsonl
 from tests.test_storage_scale import observations, runtime_journal as runtime_journal
+from tests._store_shared import seed_result
 
 
 def emit(root, child="child"):
@@ -43,7 +44,7 @@ def test_new_parent_skips_history_and_recovers_failed_producer_update(tmp_path, 
 
 @pytest.mark.scale
 def test_legacy_replays_once_and_rotation_keeps_cursor(tmp_path):
-    atomic_write_json(tmp_path / "task_results/parent.json", {"_schema_version": 1, "task_id": "parent", "status": "running"})
+    seed_result(tmp_path, "parent", {"_schema_version": 1, "task_id": "parent", "status": "running"})
     for index in range(64):
         append_jsonl(tmp_path / "logs/events.jsonl", {"type": "unrelated", "index": index})
     append_jsonl(tmp_path / "logs/events.jsonl", {"type": "swarm_fanout", "parent_task_id": "parent",
@@ -111,10 +112,10 @@ def test_child_cache_isolates_query_roots_modes_and_failed_passes(tmp_path, monk
     from ouroboros import task_status
 
     calls = []
-    def select(root, predicate):
+    def select(root, parent, root_id, *, direct_only):
         calls.append(root)
         return []
-    monkeypatch.setattr(task_status, "selected_task_results", select)
+    monkeypatch.setattr(task_status, "select_lineage", select)
     with pytest.raises(RuntimeError), finalization_child_scope():
         find_child_tasks(tmp_path, parent_task_id="parent")
         raise RuntimeError("fixture ended")
@@ -148,5 +149,5 @@ def test_unreadable_journal_does_not_block_admission_and_foreign_cursor_replays(
     emit(tmp_path)
     row = task_results.load_task_result(tmp_path, "parent")
     row["swarm_fanout_rollup"].update(source_root="different-fixture-root", through=10_000_000)
-    atomic_write_json(tmp_path / "task_results/parent.json", row)
+    seed_result(tmp_path, "parent", row)
     assert swarm_rollup.load_swarm_rollup(tmp_path, "parent")["fanout_count"] == 1

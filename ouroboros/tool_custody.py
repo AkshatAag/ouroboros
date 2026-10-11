@@ -24,10 +24,10 @@ def invocation_binding() -> dict:
 def _update_active_claim(update) -> None:
     from ouroboros.owner_pause import _TOOL_OPERATION
     from ouroboros.task_results import stamp_task_result_schema
-    from ouroboros.utils import update_json_locked
+    from ouroboros.task_store import patch_document
 
     active = _TOOL_OPERATION.get()
-    if not active or not active[2].get("claim_path"):
+    if not active or not active[2].get("claim_task"):
         return
     outcome = active[2]
     def change(current):
@@ -37,7 +37,7 @@ def _update_active_claim(update) -> None:
             return None  # A standalone/unbound tool has no durable task claim.
         claims[outcome["operation_id"]] = update(dict(claim))
         return stamp_task_result_schema({**current, "launch_handoffs": claims})
-    update_json_locked(outcome["claim_path"], change, strict_existing_dict=True)
+    patch_document(outcome["claim_root"], outcome["claim_task"], change, strict_existing_dict=True)
 
 
 def retain_unconfirmed_host_operation(reason: str) -> None:
@@ -107,10 +107,9 @@ def retire_tool_invocations(root: Any, task_id: str, root_task_id: str, *,
     claims on its root's row). Keep unknown-effect history and independent
     custody. Legacy/unattributable claims are not evidence and remain untouched.
     """
-    from ouroboros.task_results import (
-        require_writable_task_result_schema, stamp_task_result_schema, task_result_path,
-    )
-    from ouroboros.utils import update_json_locked, utc_now_iso
+    from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
+    from ouroboros.task_store import patch_document
+    from ouroboros.utils import utc_now_iso
 
     if not pid or not process_birth or type(task_attempt) is not int:
         return
@@ -136,7 +135,7 @@ def retire_tool_invocations(root: Any, task_id: str, root_task_id: str, *,
             return None
         return stamp_task_result_schema({**current, "launch_handoffs": claims,
                                          "retired_tool_invocations": retired})
-    update_json_locked(task_result_path(root, holder or task_id), retire, strict_existing_dict=True)
+    patch_document(root, holder or task_id, retire, strict_existing_dict=True)
 
 def task_process_blockers(drive_root: Any, task_ids: set[str]) -> list[dict]:
     """Strict read of existing canonical executor custody without backend I/O.

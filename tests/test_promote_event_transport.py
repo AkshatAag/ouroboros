@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from tests.test_swarm_host_admission import host  # noqa: F401
+from tests._store_shared import result_signature, seed_result, unreadable_result
 
 
 pytestmark = pytest.mark.serial
@@ -781,13 +782,14 @@ def test_admission_reservation_rejects_tokenless_competing_enqueue(
 
 
 def test_exact_id_ingress_fails_closed_on_unreadable_result(monkeypatch, tmp_path):
+    """An exact id whose row the store cannot answer for is neither free nor a duplicate:
+    every ingress door is told ``task_id_lookup_failed`` and the row is left as it is."""
     import supervisor.queue as supervisor_queue
     import supervisor.workers as workers
 
-    result_path = tmp_path / "task_results" / "malformed-id.json"
-    result_path.parent.mkdir()
-    malformed = b"{not-json"
-    result_path.write_bytes(malformed)
+    seed_result(tmp_path, "malformed-id", {"task_id": "malformed-id", "status": "running"})
+    original = result_signature(tmp_path, "malformed-id")
+    unreadable = unreadable_result(monkeypatch, "malformed-id")
     monkeypatch.setattr(supervisor_queue, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(supervisor_queue, "PENDING", [])
     monkeypatch.setattr(supervisor_queue, "RUNNING", {})
@@ -811,33 +813,21 @@ def test_exact_id_ingress_fails_closed_on_unreadable_result(monkeypatch, tmp_pat
     assert queued["_admission_blocked"] == "task_id_lookup_failed"
     assert duplicate_reason == "task_id_lookup_failed"
     assert supervisor_queue.PENDING == []
-    assert result_path.read_bytes() == malformed
-
-    empty_path = tmp_path / "task_results" / "empty-id.json"
-    empty_path.write_text("{}\n", encoding="utf-8")
-    assert supervisor_queue.reserve_task_admission(
-        "empty-id", "empty-token", drive_root=tmp_path,
-    ) == {"status": "blocked", "reason": "task_id_lookup_failed"}
-    empty_queued = supervisor_queue.enqueue_task({
-        "id": "empty-id", "type": "task", "_require_unique_task_id": True,
-    })
-    assert empty_queued["_admission_blocked"] == "task_id_lookup_failed"
-    assert empty_path.read_text(encoding="utf-8") == "{}\n"
+    unreadable["on"] = False
+    assert result_signature(tmp_path, "malformed-id") == original
 
 
 def test_promote_lookup_failure_never_overwrites_exact_result(tmp_path):
     from supervisor.events import _persist_promote_rejection
 
-    result_path = tmp_path / "task_results" / "promote-corrupt.json"
-    result_path.parent.mkdir()
-    original = b"{corrupt"
-    result_path.write_bytes(original)
+    seed_result(tmp_path, "promote-corrupt", {"task_id": "promote-corrupt", "status": "running"})
+    original = result_signature(tmp_path, "promote-corrupt")
     _persist_promote_rejection(
         types.SimpleNamespace(DRIVE_ROOT=tmp_path),
         {"task_id": "promote-corrupt", "routing_token": "token"},
         {"task_id": "promote-corrupt", "reason": "task_id_lookup_failed"},
     )
-    assert result_path.read_bytes() == original
+    assert result_signature(tmp_path, "promote-corrupt") == original  # the unreadable exact-id authority is preserved
 
 
 def test_project_registry_lookup_failure_prevents_clone(monkeypatch, tmp_path):

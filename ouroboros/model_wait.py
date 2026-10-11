@@ -31,7 +31,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
 from ouroboros.usage_accounting import current_usage_scope
-from ouroboros.utils import append_jsonl, update_json_locked, utc_now_iso
+from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros.task_store import patch_document
 
 
 class ModelWaitInterrupted(RuntimeError):
@@ -282,7 +283,7 @@ def _deferral(role: str) -> ResourceDeferral | None:
 def mutate_wait(root: Any, task_id: str, wait_id: str, transform: Callable) -> dict:
     """Mutate only one wait projection in the existing schema-stamped task result."""
     from ouroboros.task_results import (
-        require_writable_task_result_schema, stamp_task_result_schema, task_result_path,
+        require_writable_task_result_schema, stamp_task_result_schema,
     )
 
     result: dict = {}
@@ -303,7 +304,7 @@ def mutate_wait(root: Any, task_id: str, wait_id: str, transform: Callable) -> d
             return None
         return stamp_task_result_schema({**current, "model_waits": {**waits, wait_id: next_row}})
 
-    update_json_locked(task_result_path(pathlib.Path(root), task_id), update, strict_existing_dict=True)
+    patch_document(pathlib.Path(root), task_id, update, strict_existing_dict=True)
     return result
 
 
@@ -840,7 +841,7 @@ def retire_model_consumers(root: Any, task_id: str, consumers: dict[str, int]) -
     This existing result projection releases only local answer-writing custody.
     It changes no usage row, external process or delegated-run obligation.
     """
-    from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema, task_result_path
+    from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
     def retire(current):
         require_writable_task_result_schema(current)
         if not current.get("status") or current.get("task_id") != task_id:
@@ -849,7 +850,7 @@ def retire_model_consumers(root: Any, task_id: str, consumers: dict[str, int]) -
         for consumer, attempt in consumers.items():
             retired[consumer] = {"task_attempt": attempt, "retired_at": utc_now_iso()}
         return stamp_task_result_schema({**current, "retired_model_consumers": retired})
-    update_json_locked(task_result_path(pathlib.Path(root), task_id), retire, strict_existing_dict=True)
+    patch_document(pathlib.Path(root), task_id, retire, strict_existing_dict=True)
 
 
 @contextlib.contextmanager

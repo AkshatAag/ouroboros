@@ -289,25 +289,22 @@ _FINALIZING_MEMO_MAX = 64
 
 
 def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
-    """One stat-keyed read serves outcome, finalizing, retry and question facts."""
+    """One signature-keyed read serves outcome, finalizing, retry and question facts."""
+    from ouroboros.task_store import read_document, signature
+
     memo_id = (str(pathlib.Path(drive_root).resolve()), task_id)
     try:
-        from ouroboros.task_results import task_results_dir
-
-        path = task_results_dir(pathlib.Path(drive_root), create=False) / f"{task_id}.json"
-        stat = path.stat()
+        key = signature(drive_root, task_id)
     except Exception:
+        key = None
+    if key is None:
         _FINALIZING_MEMO.pop(memo_id, None)
         return {}
-    # Atomic replacement can preserve size and mtime within one timestamp tick.
-    key = (str(path), stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size)
     memo = _FINALIZING_MEMO.get(memo_id)
     if memo is not None and memo[0] == key:
         return memo[1]
     try:
-        from ouroboros.utils import read_json_dict
-
-        data = read_json_dict(path)
+        data = read_document(drive_root, task_id)
         if not isinstance(data, dict):
             return {}
     except Exception:

@@ -422,7 +422,7 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
     """
     from ouroboros.task_results import (
         _TRULY_TERMINAL_STATUSES, require_writable_task_result_schema,
-        stamp_task_result_schema, task_result_path,
+        stamp_task_result_schema,
     )
 
     expected_states = (
@@ -454,7 +454,7 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
         return stamp_task_result_schema({**current, **retained_wait, **notice, "budget_pause": dict(row)})
 
     from ouroboros.obligations import update_result
-    update_result(task_result_path(root, task_id), update, strict_existing_dict=True)
+    update_result(root, task_id, update)
     return dict(row)
 
 

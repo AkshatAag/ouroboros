@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 from ouroboros.gateway.tasks import api_task_events, iter_task_events
 from ouroboros.task_results import write_task_result
+from tests._store_shared import seed_result
 
 OLD_TS = "2026-01-01T00:00:00Z"
 
@@ -485,25 +486,23 @@ def test_sse_survives_mid_stream_rotation_of_events_without_loss_or_duplicates(t
     assert events[-1]["data"]["status"] == "completed"
 
 
-def test_sse_torn_child_result_is_retried_and_discovered_next_tick(tmp_path):
-    """Scandir name-diff seen-set rule (P2 wave-1, GPT#6): a name is committed
-    only after a successful read — a torn/mid-write child file is re-read on the
-    next tick and the child is discovered once the write completes."""
+def test_sse_child_is_discovered_on_the_tick_after_its_row_lands(tmp_path):
+    """Lineage is one store query per tick: a child row that is not in the store yet is
+    not lineage, and the child is discovered on the first tick after its row lands;
+    a non-lineage row never joins the filter."""
     from ouroboros.gateway.tasks import _TaskEventFollower
 
     data = _seed_running_task(tmp_path, task_id="p1")
     follower = _TaskEventFollower(data, "p1")
     follower.full_merge()
 
-    (data / "task_results" / "c1.json").write_text("{torn", encoding="utf-8")
+    seed_result(data, "other", {"_schema_version": 1, "task_id": "other", "status": "running", "delegation_role": "root", "ts": OLD_TS})
     follower.poll()
-    assert "c1" not in follower.task_filter_ids
-    assert "c1.json" not in follower._seen_result_names  # NOT committed
+    assert "c1" not in follower.task_filter_ids and "other" not in follower.task_filter_ids
 
     child_drive = tmp_path / "childdrive"
     child_drive.mkdir()
-    (data / "task_results" / "c1.json").write_text(
-        json.dumps({
+    seed_result(data, "c1", {
             "_schema_version": 1,
             "task_id": "c1",
             "status": "running",
@@ -512,43 +511,12 @@ def test_sse_torn_child_result_is_retried_and_discovered_next_tick(tmp_path):
             "root_task_id": "p1",
             "child_drive_root": str(child_drive),
             "ts": OLD_TS,
-        }),
-        encoding="utf-8",
-    )
+        })
     follower.poll()
 
-    assert "c1" in follower.task_filter_ids
-    assert "c1.json" in follower._seen_result_names
+    assert "c1" in follower.task_filter_ids and "other" not in follower.task_filter_ids
     assert follower.filter_grew  # the stream will run the recovery re-merge
     assert any(str(root) == str(child_drive) for root in follower.roots)
-
-
-def test_sse_nonlineage_result_names_read_once_then_committed(tmp_path, monkeypatch):
-    """Successfully-read NON-lineage names are committed to the seen-set too,
-    so an unrelated busy store is never re-read on every tick."""
-    import ouroboros.gateway.tasks as gateway_tasks
-
-    data = _seed_running_task(tmp_path, task_id="p1")
-    follower = gateway_tasks._TaskEventFollower(data, "p1")
-    follower.full_merge()
-
-    (data / "task_results" / "other.json").write_text(
-        json.dumps({"_schema_version": 1, "task_id": "other", "status": "running", "delegation_role": "root", "ts": OLD_TS}),
-        encoding="utf-8",
-    )
-    reads = []
-    real = gateway_tasks.read_json_dict
-    monkeypatch.setattr(
-        gateway_tasks, "read_json_dict", lambda path: reads.append(str(path)) or real(path)
-    )
-
-    follower.poll()
-    follower.poll()
-    follower.poll()
-
-    other_reads = [path for path in reads if path.endswith("other.json")]
-    assert len(other_reads) == 1  # committed after ONE successful read
-    assert "other" not in follower.task_filter_ids
 
 
 def test_sse_child_discovered_mid_stream_then_reconnect_replays_once(tmp_path):

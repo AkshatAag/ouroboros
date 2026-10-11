@@ -13,6 +13,7 @@ import pytest
 from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
 from ouroboros.utils import atomic_write_json, utc_now_iso
 from tests._shared import write_queue_document
+from tests._store_shared import read_result
 
 
 def _queue_snapshot(root, rows):
@@ -38,11 +39,11 @@ def test_root_focus_persists_and_terminal_race_refuses(tmp_path, monkeypatch):
     refused = _update_focus(ctx, "Investigating the migration seam",
                             {"reader": "journal_read", "project_id": "alpha", "snapshot": "abc"})
     assert "FOCUS_SOURCE_UNRESOLVED" in refused and "JOURNAL_READ_SNAPSHOT_CHANGED" in refused
-    assert "focus" not in json.loads((tmp_path / "task_results" / "root.json").read_text())
+    assert "focus" not in read_result(tmp_path, "root")
     assert events == []
     result = _update_focus(ctx, "Investigating the migration seam", {"reader": "journal_read", "project_id": "alpha"})
     assert result.startswith("OK: focus[root]")
-    stored = json.loads((tmp_path / "task_results" / "root.json").read_text())
+    stored = read_result(tmp_path, "root")
     assert stored["focus"]["text"] == "Investigating the migration seam"
     assert events[0]["type"] == "task_focus_updated"
     # The reader's exact answer is RETAINED beside the focus: the pointer keeps
@@ -88,7 +89,7 @@ def test_root_focus_persists_and_terminal_race_refuses(tmp_path, monkeypatch):
     later = _update_focus(ctx, "Second focus, new page", {"reader": "journal_read", "project_id": "alpha"})
     assert later.startswith("OK: focus[root]")
     current = json.loads(_get_task_result(peer, "root", include_focus_source=True, source_start_char=0, source_end_char=20))["focus_source"]
-    assert current["complete_sha256"] != handle["sha256"] and "later evidence" in (tmp_path / "task_results" / "artifacts" / "root" / json.loads((tmp_path / "task_results" / "root.json").read_text())["focus"]["source_handle"]["path"]).read_text()
+    assert current["complete_sha256"] != handle["sha256"] and "later evidence" in (tmp_path / "task_results" / "artifacts" / "root" / read_result(tmp_path, "root")["focus"]["source_handle"]["path"]).read_text()
     historical = json.loads(_get_task_result(peer, "root", include_focus_source=True, focus_source_sha256=handle["sha256"], source_start_char=0, source_end_char=20))["focus_source"]
     assert historical["complete_sha256"] == handle["sha256"] and historical["historical"] is True and historical["text"] == retained.decode("utf-8")[:20]
     assert json.loads(_get_task_result(peer, "root", include_focus_source=True, focus_source_sha256="0" * 64))["focus_source"]["reason"] == "source_unavailable"
@@ -339,7 +340,7 @@ def test_focus_source_honours_the_task_contract_disabled_tools(tmp_path, monkeyp
     refused = _update_focus(ctx, "Reading what I may not", {"reader": "journal_read", "project_id": "alpha"})
     assert "FOCUS_SOURCE_UNRESOLVED" in refused and "withheld" in refused
     assert not list((tmp_path / "task_results" / "artifacts").glob("**/focus_source_*")) 
-    assert "focus" not in json.loads((tmp_path / "task_results" / "root.json").read_text())
+    assert "focus" not in read_result(tmp_path, "root")
 
 
 def test_schema_default_offset_zero_follows_the_omitted_path():
@@ -363,9 +364,9 @@ def test_replayed_older_queue_focus_never_replaces_a_newer_durable_focus(tmp_pat
     agent = OuroborosAgent.__new__(OuroborosAgent)
     agent.env = types.SimpleNamespace(drive_root=tmp_path, budget_drive_root=str(tmp_path))
     agent._persist_running_record({"id": "root", "description": "d", "focus": older})
-    assert json.loads((tmp_path / "task_results" / "root.json").read_text())["focus"]["text"] == "newer"
+    assert read_result(tmp_path, "root")["focus"]["text"] == "newer"
     agent._persist_running_record({"id": "root", "description": "d", "focus": {**newer, "text": "newest", "authored_at": "2026-01-03T00:00:00+00:00"}})
-    assert json.loads((tmp_path / "task_results" / "root.json").read_text())["focus"]["text"] == "newest"
+    assert read_result(tmp_path, "root")["focus"]["text"] == "newest"
 
 
 def _roster_rows(root):

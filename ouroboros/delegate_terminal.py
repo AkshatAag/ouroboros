@@ -767,30 +767,24 @@ __all__ = [
 
 
 def _ack_current_receipts(root, tid, snapshot):
-    from ouroboros import obligations as o
+    from ouroboros import store
     from ouroboros.delegate_custody_current import _decode
-    from ouroboros.task_results import task_result_path, require_writable_task_result_schema
-    from ouroboros.utils import update_json_locked
-    # Serialize with membership-before-result publication in the same lock order.
-    # Otherwise a new debt can be removed while its result still shows the old row.
+    from ouroboros.task_results import require_writable_task_result_schema
+    # One transaction over the result row and its closing receipts: a new debt cannot be
+    # removed while the result still shows the old row.
     state = (snapshot or {}).get("state", {})
-
-    def acknowledge(row):
+    with store.open_store(root, write=True) as txn:
+        row = txn.load(tid)
         if not row:
             return
         require_writable_task_result_schema(row)
-        with o.locked(root):
-            debts = o._read(root, "delegated_runs", missing_ok=True)
-            facts = debts.get(tid)
-            if facts is None:
-                return
-            held = {rid: raw for rid, raw in facts.get("closed_runs", {}).items()
-                    if rid not in state or vars(_decode(raw)) != vars(state[rid])}
-            if not held and not row.get("delegated_runs_unreconciled"):
-                debts.pop(tid, None)
-            else:
-                debts[tid] = {**facts, "closed_runs": held}
-            o._write(root, "delegated_runs", debts)
-        # None: acknowledge the receipt without rewriting the task result.
-
-    update_json_locked(task_result_path(root, tid, create=False), acknowledge, strict_existing_dict=True)
+        facts = txn.get_row("delegated_runs", tid)
+        if facts is None:
+            return
+        held = {rid: raw for rid, raw in facts.get("closed_runs", {}).items()
+                if rid not in state or vars(_decode(raw)) != vars(state[rid])}
+        if not held and not row.get("delegated_runs_unreconciled"):
+            txn.delete_row("delegated_runs", tid)
+        else:
+            txn.put_row("delegated_runs", tid, {**facts, "closed_runs": held})
+        # The result itself is never rewritten here.

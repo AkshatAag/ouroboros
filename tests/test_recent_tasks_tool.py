@@ -3,6 +3,7 @@ import os
 from types import SimpleNamespace
 
 from ouroboros.tools.recent_tasks import _handle_recent_tasks
+from tests._store_shared import seed_result
 
 
 def _ctx(tmp_path):
@@ -22,7 +23,7 @@ def _write_task(root, name, *, result="done", ts="2026-01-01T00:00:00Z", **extra
         "result": result,
         **extra,
     }
-    path.write_text(json.dumps(data), encoding="utf-8")
+    seed_result(root, name, data)
     return path
 
 

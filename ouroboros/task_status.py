@@ -35,7 +35,7 @@ from ouroboros.post_task_checkpoint import (
     _TERMINAL_ACCOUNTING_SCRUB_FIELDS,
     project_replica_task_result_fields,
 )
-from ouroboros.task_result_facts import selected_task_results
+from ouroboros.task_store import select_lineage
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
     STATUS_CANCELLED,
@@ -51,7 +51,7 @@ from ouroboros.task_results import (
     validate_task_id,
 )
 from ouroboros.queue_observation import load_queue_document, queue_stamp
-from ouroboros.storage_observation import storage_observed, storage_phase
+from ouroboros.storage_observation import storage_count, storage_observed, storage_phase
 from ouroboros.utils import iter_jsonl_objects
 
 log = logging.getLogger(__name__)
@@ -1220,19 +1220,13 @@ def find_child_tasks(
     excluded = str(exclude_task_id or "").strip()
     direct_only = str(scope or "subtree").strip().lower() == "direct"
 
-    def _raw_row_may_match(item: Dict[str, Any]) -> bool:
-        # Retry pointers may change lineage. Lineage-less live rows reappear
-        # through the queue overlay; unrelated bodies need no projection.
-        if str(item.get("superseded_by") or item.get("retry_task_id") or "").strip():
-            return True
-        if str(item.get("delegation_role") or "") != "subagent":
-            return False
-        if parent and str(item.get("parent_task_id") or "") == parent:
-            return True
-        return bool(not direct_only and root and str(item.get("root_task_id") or "") == root)
-
     with storage_phase("select"):
-        selected = selected_task_results(pathlib.Path(drive_root), _raw_row_may_match)
+        # The store's WHERE: every row carrying a retry or supersession pointer (lineage any child
+        # may hang on), plus the ``subagent`` rows naming the parent or the root; ``task_id`` order,
+        # so the retry projection and the last-row-wins fold below are deterministic.
+        # Lineage-less live rows reappear through the queue overlay.
+        selected = select_lineage(pathlib.Path(drive_root), parent, root, direct_only=direct_only)
+        storage_count("selected_rows", len(selected))
     with storage_phase("effective"):
         events_index = _EventsTailIndex(pathlib.Path(drive_root))
         rows: Dict[str, Dict[str, Any]] = {}

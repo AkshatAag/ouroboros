@@ -1,0 +1,190 @@
+"""Task result documents in the current-facts store: the primitives every consumer uses.
+
+The document (what ``write_task_result`` merges, what a patch mutates) is the
+body in ``task_bodies``; its typed facts and obligation flags are the ``tasks``
+row the same transaction writes. Readers ask the row (``task_facts``,
+``select_lineage``, ``list_documents`` with a status prefilter, ``newest_ids``,
+``signature``, ``exists``) and read a body only for the documents they need.
+``patch_document`` is the locked read-modify-write every result patch used to do
+on a file: the mutator sees CURRENT, returns the new document or ``None`` for no
+write, and ``after_write`` runs inside the transaction. Nothing here touches
+``task_results/*.json``: the importer reads those files once, the exporter writes
+them back for an older body.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
+from ouroboros import store
+from ouroboros.store import Txn, open_store
+
+FACT_KEYS = ("task_id", "ts", "updated_at", "delegation_role", "parent_task_id", "project_id", "root_task_id",
+             "child_drive_root", "headless_child_drive_root", "superseded_by", "retry_task_id",
+             "presence_binding_id", "presence_authority_recorded")
+_NEWEST_ORDER = "ORDER BY ts DESC, task_id DESC"  # NULL ts sorts last: a row without one is oldest
+
+
+def read_document(root: Any, task_id: str) -> Optional[Dict[str, Any]]:
+    """The whole current document, ``None`` when the store holds no such task."""
+    with open_store(root, write=False) as txn:
+        return txn.load(str(task_id))
+
+
+def exists(root: Any, task_id: str) -> bool:
+    with open_store(root, write=False) as txn:
+        return txn.row(str(task_id), "task_id") is not None
+
+
+def signature(root: Any, task_id: str) -> Optional[Tuple[int, str]]:
+    """``(write_seq, updated_at)``: changes on every write; ``None`` for an absent task. The key
+    the memos compare that used to compare a result file's stat."""
+    with open_store(root, write=False) as txn:
+        return txn.row(str(task_id), "write_seq", "updated_at")
+
+
+def delete_document(root: Any, task_id: str) -> bool:
+    """Remove one task's row and body (a scheduling refusal undoing its own requested row)."""
+    with open_store(root, write=True) as txn:
+        present = txn.row(str(task_id), "task_id") is not None
+        txn.delete_task(str(task_id))
+        return present
+
+
+def patch_document(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]], *,
+                   strict_existing_dict: bool = False, reject_existing_empty_dict: bool = False,
+                   after_write: Optional[Callable[[Dict[str, Any]], Any]] = None,
+                   riders: Tuple[Callable[[Txn, Dict[str, Any], Dict[str, Any]], None], ...] = ()) -> Dict[str, Any]:
+    """One result patch: the mutator over CURRENT inside the write transaction; ``None`` leaves
+    the store untouched; ``after_write(updated)`` and the riders run inside the same
+    transaction. Returns the document that is current when the transaction ends."""
+    from ouroboros.obligations import pending_drive_rule
+
+    task_id = str(task_id)
+    seen: Dict[str, Any] = {}
+
+    def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        seen["current"] = current
+        return mutator(current)
+
+    def _after(txn: Txn, current: Dict[str, Any], updated: Dict[str, Any]) -> None:
+        if after_write is not None:
+            after_write(updated)
+
+    # Every stored body is a non-empty dict: the file-era guards have nothing left to refuse.
+    del strict_existing_dict, reject_existing_empty_dict
+    updated = store.update_task(root, task_id, _mutate, riders=(_after, *riders), pending_drive=pending_drive_rule)
+    return seen.get("current", {}) if updated is None else {**updated, "task_id": task_id}
+
+
+def _documents(txn: Txn, where: str = "", params: Iterable[Any] = (), order: str = "ORDER BY t.task_id") -> List[Dict[str, Any]]:
+    clause = f"WHERE {where}" if where else ""
+    rows = txn.conn.execute(
+        f"SELECT b.body, t.* FROM tasks AS t JOIN task_bodies AS b ON b.task_id = t.task_id {clause} {order}",
+        tuple(params)).fetchall()
+    documents = []
+    for record in rows:
+        document = json.loads(record["body"])
+        for field in store.ROW_BACKED_FIELDS:
+            document[field] = record[field]
+        documents.append(document)
+    return documents
+
+
+def list_documents(root: Any, *, statuses: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
+    """Every document, or those whose stored status is one of ``statuses`` (the WHERE prefilter;
+    a caller filtering on the EFFECTIVE status still filters the overlaid rows itself)."""
+    wanted = None if statuses is None else sorted({str(status) for status in statuses})
+    with open_store(root, write=False) as txn:
+        if wanted is None:
+            return _documents(txn)
+        if not wanted:
+            return []
+        return _documents(txn, f"t.status IN ({','.join('?' * len(wanted))})", wanted)
+
+
+def lineage_where(parent: str, root_id: str, *, direct_only: bool) -> Tuple[str, Tuple[str, ...]]:
+    """The ``find_child_tasks`` prefilter as SQL: every row carrying a retry or supersession
+    pointer (lineage any child may hang on), plus every ``subagent`` row naming PARENT as its
+    parent or (subtree scope) ROOT_ID as its root."""
+    selects = ["SELECT task_id FROM tasks WHERE superseded_by IS NOT NULL",
+               "SELECT task_id FROM tasks WHERE retry_task_id IS NOT NULL"]
+    params = []
+    if parent:  # a UNION of indexed selects: each term reads its own index, never the table
+        selects.append("SELECT task_id FROM tasks WHERE parent_task_id=? AND delegation_role='subagent'")
+        params.append(parent)
+    if root_id and not direct_only:
+        selects.append("SELECT task_id FROM tasks WHERE root_task_id=? AND delegation_role='subagent'")
+        params.append(root_id)
+    return f"t.task_id IN ({' UNION '.join(selects)})", tuple(params)
+
+
+def select_lineage(root: Any, parent: str, root_id: str, *, direct_only: bool = False) -> List[Dict[str, Any]]:
+    """The child-lookup candidates in ``task_id`` order (``lineage_where``); the Python projection decides the rest."""
+    where, params = lineage_where(str(parent or ""), str(root_id or ""), direct_only=direct_only)
+    with open_store(root, write=False) as txn:
+        return _documents(txn, where, params)
+
+
+def task_facts(root: Any, *, where: str = "", params: Iterable[Any] = ()) -> Dict[str, Dict[str, Any]]:
+    """Typed facts of every task (keyed by task id) without reading a body: the keys
+    ``FACT_KEYS`` as strings (``""`` for no fact), ``presence_authority_recorded`` as a bool."""
+    clause = f"WHERE {where}" if where else ""
+    with open_store(root, write=False) as txn:
+        records = txn.conn.execute(
+            f"SELECT {','.join(FACT_KEYS)} FROM tasks {clause} ORDER BY task_id", tuple(params)).fetchall()
+    facts = {}
+    for record in records:
+        row = {key: str(record[key] or "") for key in FACT_KEYS if key != "presence_authority_recorded"}
+        row["presence_authority_recorded"] = bool(record["presence_authority_recorded"])
+        facts[row["task_id"]] = row
+    return facts
+
+
+def newest_ids(root: Any, limit: Optional[int] = None, *, where: str = "", params: Iterable[Any] = ()) -> List[str]:
+    """Task ids newest first by the stored ``ts`` (a row without one sorts oldest), ties by id."""
+    clause = f"WHERE {where} " if where else ""
+    with open_store(root, write=False) as txn:
+        bound = "" if limit is None else f" LIMIT {int(limit)}"
+        return [record["task_id"] for record in
+                txn.conn.execute(f"SELECT task_id FROM tasks {clause}{_NEWEST_ORDER}{bound}", tuple(params))]
+
+
+ROOT_RESULT_WHERE = "parent_task_id IS NULL AND (delegation_role IS NULL OR delegation_role != 'subagent')"
+
+
+def documents_by_ids(root: Any, task_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    ids = [str(task_id) for task_id in task_ids]
+    if not ids:
+        return {}
+    with open_store(root, write=False) as txn:
+        documents = _documents(txn, f"t.task_id IN ({','.join('?' * len(ids))})", ids)
+    return {str(document.get("task_id")): document for document in documents}
+
+
+def task_ids(root: Any) -> List[str]:
+    with open_store(root, write=False) as txn:
+        return txn.task_ids()
+
+
+def ids_with_fields(root: Any, markers: Iterable[str]) -> List[str]:
+    """Task ids whose body names any of the top-level ``markers`` (the settlement sweep's
+    candidates, found with one body scan inside the store instead of a directory read)."""
+    patterns = [f'%"{marker}":%' for marker in markers]
+    if not patterns:
+        return []
+    with open_store(root, write=False) as txn:
+        where = " OR ".join("body LIKE ?" for _ in patterns)
+        return [record["task_id"] for record in
+                txn.conn.execute(f"SELECT task_id FROM task_bodies WHERE {where} ORDER BY task_id", patterns)]
+
+
+def inventory(root: Any) -> List[Dict[str, Any]]:
+    """Every task's paging identity, newest write first: ``name`` (the task id), ``write_seq``
+    (changes with every write, the role the file size and mtime played) and ``updated_at``."""
+    with open_store(root, write=False) as txn:
+        records = txn.conn.execute("SELECT task_id, write_seq, updated_at FROM tasks "
+                                   "ORDER BY updated_at DESC, task_id DESC").fetchall()
+    return [{"name": record["task_id"], "write_seq": int(record["write_seq"] or 0),
+             "updated_at": str(record["updated_at"] or "")} for record in records]

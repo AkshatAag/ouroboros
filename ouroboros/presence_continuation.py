@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from ouroboros.utils import utc_now_iso
+from ouroboros.task_store import patch_document
 
 log = logging.getLogger(__name__)
 
@@ -307,9 +308,8 @@ def _persist(binding: ReviewWaitBinding, output: dict, work_ref: str, review_bin
     """Initial envelope, current child and appended outputs, read back before anything is lent."""
     from ouroboros.task_results import (
         STATUS_RUNNING, load_task_result, require_writable_task_result_schema,
-        stamp_task_result_schema, task_result_path,
+        stamp_task_result_schema,
     )
-    from ouroboros.utils import update_json_locked
     from ouroboros.review_operation import controller_identity
 
     event = binding.event
@@ -344,7 +344,7 @@ def _persist(binding: ReviewWaitBinding, output: dict, work_ref: str, review_bin
         }
         return stamp_task_result_schema({**current, "presence_continuation": record})
 
-    committed = update_json_locked(task_result_path(binding.drive_root, binding.task_id), update,
+    committed = patch_document(binding.drive_root, binding.task_id, update,
                                    strict_existing_dict=True)["presence_continuation"]
     stored = (load_task_result(binding.drive_root, binding.task_id, strict=True) or {}).get("presence_continuation")
     if (not isinstance(stored, dict) or stored.get("lent_at") != now or stored.get("event_identity") != binding.identity

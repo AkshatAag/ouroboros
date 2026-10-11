@@ -30,6 +30,8 @@ from ouroboros.task_results import (
     task_result_schema_refusal,
     write_task_result,
 )
+from ouroboros.task_store import patch_document
+from tests._store_shared import read_result, result_signature
 
 
 def _results_dir(root: pathlib.Path) -> pathlib.Path:
@@ -64,17 +66,18 @@ def _quarantine_events(root: pathlib.Path):
 
 def test_write_task_result_stamps_the_schema_version(tmp_path):
     write_task_result(tmp_path, "t1", "completed", result="done")
-    raw = json.loads((_results_dir(tmp_path) / "t1.json").read_text(encoding="utf-8"))
+    raw = read_result(tmp_path, "t1")
     assert raw[SCHEMA_VERSION_KEY] == TASK_RESULT_SCHEMA_VERSION
     assert load_task_result(tmp_path, "t1")["result"] == "done"
 
 
 def test_lifecycle_write_stamps_a_live_unstamped_row(tmp_path):
-    """The N−1 transition path is stamp-on-write, NOT a converter: a live
-    pre-upgrade task's next lifecycle write stamps the merged row in place."""
-    _write_raw(tmp_path, "t1", {"task_id": "t1", "status": "running", "note": "old"})
+    """The N−1 transition path is stamp-on-write, NOT a converter: a live pre-upgrade task's
+    next lifecycle write stamps the merged row in place (the import admits the live latch
+    rows unstamped; every other unstamped file it quarantines at the door)."""
+    patch_document(tmp_path, "t1", lambda current: {"task_id": "t1", "status": "running", "note": "old"})
     write_task_result(tmp_path, "t1", "completed", result="done")
-    raw = json.loads((_results_dir(tmp_path) / "t1.json").read_text(encoding="utf-8"))
+    raw = read_result(tmp_path, "t1")
     assert raw[SCHEMA_VERSION_KEY] == TASK_RESULT_SCHEMA_VERSION
     assert raw["note"] == "old" and raw["status"] == "completed"
     assert not _quarantine_files(tmp_path)
@@ -84,7 +87,7 @@ def test_plan_review_writer_stamps_the_row(tmp_path):
     from ouroboros.task_results import PLAN_REVIEW_STATE_KEY, _update_plan_review_state
 
     _update_plan_review_state(tmp_path, "t2", lambda state: state)
-    raw = json.loads((_results_dir(tmp_path) / "t2.json").read_text(encoding="utf-8"))
+    raw = read_result(tmp_path, "t2")
     assert raw[SCHEMA_VERSION_KEY] == TASK_RESULT_SCHEMA_VERSION
     assert PLAN_REVIEW_STATE_KEY in raw
 
@@ -93,82 +96,23 @@ def test_owner_hurry_writer_stamps_the_row(tmp_path):
     from ouroboros.owner_hurry import record_requested
 
     record_requested(tmp_path, "t3", request_id="r1", attempt=1)
-    raw = json.loads((_results_dir(tmp_path) / "t3.json").read_text(encoding="utf-8"))
+    raw = read_result(tmp_path, "t3")
     assert raw[SCHEMA_VERSION_KEY] == TASK_RESULT_SCHEMA_VERSION
 
 
 def test_writer_refuses_a_row_owned_by_a_newer_schema(tmp_path):
-    """Future-refusal on the WRITE side: after a binary rollback, fields of
-    schema 1 must never be merged over (and silently downgrade) a row a newer
-    release stamped."""
-    path = _write_raw(tmp_path, "t4", {
-        SCHEMA_VERSION_KEY: TASK_RESULT_SCHEMA_VERSION + 1,
-        "task_id": "t4", "status": "running",
-    })
-    before = path.read_bytes()
+    """Future-refusal on the WRITE side: after a binary rollback onto the same store, fields
+    of schema 1 must never be merged over (and silently downgrade) a row a newer release
+    stamped."""
+    patch_document(tmp_path, "t4", lambda current: {
+        SCHEMA_VERSION_KEY: TASK_RESULT_SCHEMA_VERSION + 1, "task_id": "t4", "status": "running"})
+    before = result_signature(tmp_path, "t4")
     with pytest.raises(ValueError, match="TASK_RESULT_SCHEMA_REFUSED"):
         write_task_result(tmp_path, "t4", "completed", result="late")
-    assert path.read_bytes() == before
+    assert result_signature(tmp_path, "t4") == before
 
 
 # -------------------------------------------------------------------- readers
-
-
-@pytest.mark.parametrize("strict", [False, True])
-def test_missing_read_is_not_reclassified_when_a_result_appears(tmp_path, monkeypatch, strict):
-    """A FileNotFound observation and a later publication are different snapshots."""
-    write_task_result(tmp_path, "race", "scheduled")
-    path = _results_dir(tmp_path) / "race.json"
-    read_text = pathlib.Path.read_text
-    missed = False
-
-    def publish_after_missing_open(selected, *args, **kwargs):
-        nonlocal missed
-        if selected == path and not missed:
-            missed = True
-            write_task_result(tmp_path, "race", "completed", result="published concurrently")
-            raise FileNotFoundError(str(path))
-        return read_text(selected, *args, **kwargs)
-
-    monkeypatch.setattr(pathlib.Path, "read_text", publish_after_missing_open)
-    assert load_task_result(tmp_path, "race", strict=strict) is None
-    assert missed
-    assert load_task_result(tmp_path, "race", strict=True)["result"] == "published concurrently"
-    assert not _quarantine_files(tmp_path)
-    assert not _quarantine_events(tmp_path)
-
-
-@pytest.mark.parametrize("strict,denials", [(False, 1), (True, 1), (True, None)])
-def test_a_read_denied_by_a_concurrent_replace_is_not_unreadable_authority(tmp_path, monkeypatch, strict, denials):
-    """Windows denies an open that meets a writer's atomic replace; that instant is
-    retried within the writer's own bound. A denial that outlasts it stays the
-    strict fail-closed refusal, and neither case moves the intact row."""
-    from ouroboros import utils
-
-    write_task_result(tmp_path, "shared", "completed", result="intact")
-    path = _results_dir(tmp_path) / "shared.json"
-    before = path.read_bytes()
-    read_text = pathlib.Path.read_text
-    denied = []
-
-    def denied_open(selected, *args, **kwargs):
-        if selected == path and (denials is None or len(denied) < denials):
-            denied.append(selected)
-            raise PermissionError(13, "The process cannot access the file", str(path))
-        return read_text(selected, *args, **kwargs)
-
-    monkeypatch.setattr(pathlib.Path, "read_text", denied_open)
-    monkeypatch.setattr(utils.time, "sleep", lambda _s: None)
-    if denials is None:
-        with pytest.raises(ValueError, match="unreadable or invalid"):
-            load_task_result(tmp_path, "shared", strict=strict)
-        assert len(denied) == utils._REPLACE_RETRY_ATTEMPTS
-    else:
-        assert load_task_result(tmp_path, "shared", strict=strict)["result"] == "intact"
-        assert len(denied) == denials
-    assert path.read_bytes() == before
-    assert not _quarantine_files(tmp_path)
-    assert not _quarantine_events(tmp_path)
 
 
 def test_unstamped_history_is_quarantined_not_converted(tmp_path):
@@ -253,16 +197,17 @@ def test_list_scan_quarantines_the_whole_batch_as_one_event(tmp_path):
     assert len(_quarantine_events(tmp_path)) == 1
 
 
-def test_strict_read_raises_and_never_mutates_storage(tmp_path):
+def test_the_import_quarantines_an_unstamped_file_once_whatever_the_first_reader_is(tmp_path):
+    """The door is the import, not the reader: the first touch of the root (a strict read
+    here) moves the inadmissible file byte-unchanged and reports it once; the strict read
+    then answers absence and no later read repeats the move."""
     path = _write_raw(tmp_path, "t9", {"task_id": "t9", "status": "completed"})
     before = path.read_bytes()
-    with pytest.raises(ValueError, match="quarantined_schema: unstamped_pre_7_0"):
-        load_task_result(tmp_path, "t9", strict=True)
-    with pytest.raises(ValueError, match="quarantined_schema"):
-        list_task_results(tmp_path, strict=True)
-    assert path.read_bytes() == before
-    assert not _quarantine_files(tmp_path)
-    assert not _quarantine_events(tmp_path)
+    assert load_task_result(tmp_path, "t9", strict=True) is None
+    assert list_task_results(tmp_path, strict=True) == []
+    [moved] = _quarantine_files(tmp_path)
+    assert moved.read_bytes() == before and not path.exists()
+    assert len(_quarantine_events(tmp_path)) == 1
 
 
 def test_plain_absence_has_no_side_effects(tmp_path):
@@ -275,7 +220,7 @@ def test_rollback_a_stamped_row_reads_unchanged_under_an_n_minus_1_reader(tmp_pa
     """Rollback direction of F12: the stamp is ONE additive key, so the N−1
     reader (plain JSON, no admission gate) sees the full row unchanged."""
     write_task_result(tmp_path, "t10", "completed", result="done")
-    raw = json.loads((_results_dir(tmp_path) / "t10.json").read_text(encoding="utf-8"))
+    raw = read_result(tmp_path, "t10")
     unstamped = {key: value for key, value in raw.items() if key != SCHEMA_VERSION_KEY}
     assert set(raw) - set(unstamped) == {SCHEMA_VERSION_KEY}
     assert unstamped["task_id"] == "t10" and unstamped["status"] == "completed"

@@ -987,7 +987,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     except Exception:
         log.warning("Failed to persist requested task status for %s", tid, exc_info=True)
         try:
-            (status_drive_root / "task_results" / f"{tid}.json").unlink(missing_ok=True)
+            from ouroboros.task_store import delete_document
+            delete_document(status_drive_root, tid)
         except Exception:
             pass
         if child_drive is not None:

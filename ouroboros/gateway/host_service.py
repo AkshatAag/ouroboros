@@ -41,6 +41,7 @@ from ouroboros.skill_loader import (
     load_enabled,
 )
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
+from ouroboros.store import StoreError
 
 log = logging.getLogger(__name__)
 _json_error = lambda message, status=500: JSONResponse({"ok": False, "error": message}, status_code=status)
@@ -1291,7 +1292,7 @@ def _operation_state(ctx: HostServiceContext, rows: list, inbound: Dict[str, Any
             continue
         try:
             raw = queued.get(target) or load_task_result(ctx.data_dir, target, strict=True) or {}
-        except ValueError:
+        except (ValueError, StoreError):
             continue  # An unreadable/disallowed discovery hint carries no authority.
         if not owns(raw):
             continue

@@ -59,12 +59,3 @@ def storage_observed(function):
             except Exception:
                 logging.getLogger(__name__).debug("Storage timing unavailable", exc_info=True)
     return observed
-
-
-def counted_result_paths(paths):
-    paths = sorted(paths)
-    storage_count("directory_scans")
-    storage_count("entries", len(paths))
-    for path in paths:
-        storage_count("decode_attempts")
-        yield path

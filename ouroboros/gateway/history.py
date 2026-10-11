@@ -376,16 +376,14 @@ def _load_terminal_result(
     if result:
         cache[task_id] = result
     else:
-        # Empty effective read is not proof of absence: malformed/unreadable
-        # canonical files retain uncertainty. The existing schema owner may
-        # already have moved an obsolete result to quarantine.
-        from ouroboros.task_results import task_results_dir
+        # Empty effective read is not proof of absence: an unavailable store retains
+        # uncertainty; only a store that answers "no row" proves the result absent.
+        from ouroboros.task_store import exists
         cache[task_id] = {}
         try:
-            (task_results_dir(data_dir, create=False) / f"{task_id}.json").stat()
-        except FileNotFoundError:
-            cache[task_id] = {"_history_result_absent": True}
-        except OSError:
+            if not exists(data_dir, task_id):
+                cache[task_id] = {"_history_result_absent": True}
+        except Exception:
             pass
     return cache[task_id]
 
@@ -726,10 +724,9 @@ def _collect_chat_rows(
 
     def _quiz_source(task_id):
         if task_id not in quiz_projection_cache:
-            from ouroboros.task_results import task_result_path
-            from ouroboros.utils import read_json_dict
+            from ouroboros.task_results import load_task_result
 
-            data = read_json_dict(task_result_path(chat_path.parent.parent, task_id, create=False)) or {}
+            data = load_task_result(chat_path.parent.parent, task_id) or {}
             quiz_projection_cache[task_id] = {
                 "quizzes": data.get("owner_quiz") if isinstance(data.get("owner_quiz"), dict) else {},
                 "wait": data.get("owner_wait") if isinstance(data.get("owner_wait"), dict) else {},

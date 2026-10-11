@@ -63,17 +63,11 @@ from ouroboros.contracts.task_contract import (
 )
 from ouroboros.outcomes import public_task_result
 from ouroboros import artifacts as artifact_store
-from ouroboros.task_result_schema import (
-    emit_quarantine_event,
-    quarantine_task_result,
-    task_result_schema_refusal,
-)
+from ouroboros.store import StoreError
 from ouroboros.task_results import (
     STATUS_FAILED,
     STATUS_SCHEDULED,
-    list_task_results,
     load_task_result,
-    task_results_dir,
     validate_task_id,
     write_task_result,
 )
@@ -83,7 +77,7 @@ from ouroboros.task_status import (
     load_effective_task_result,
     observe_cancellation_target,
 )
-from ouroboros.utils import read_json_dict, utc_now_iso
+from ouroboros.utils import utc_now_iso
 from ouroboros.tool_access import path_is_relative_to, paths_overlap_casefold
 from ouroboros.workspace_preflight import (
     collect_workspace_preflight,
@@ -415,11 +409,11 @@ def _task_identity_occupied(drive_root: pathlib.Path, task_id: str) -> bool:
     stored row as a side effect of this check and then report "no result",
     letting the endpoint reuse that row's task id; strict raises WITHOUT
     moving anything, and any stored row — admissible or not — keeps its
-    identity occupied.
+    identity occupied. A store that cannot answer is the same unknown.
     """
     try:
         return load_task_result(drive_root, task_id, strict=True) is not None
-    except ValueError:
+    except (ValueError, StoreError):
         return True
 
 
@@ -783,15 +777,6 @@ _LIST_ROW_OMITTED_FIELDS = frozenset({
     "subagent_envelope",
 })
 
-# The raw creation-ts sort scan and the ABI-2 malformed-candidate admission
-# live in ouroboros/task_result_facts.py (module-size split); imported
-# here so this module keeps the endpoint wiring surface.
-from ouroboros.task_result_facts import (  # noqa: E402
-    _quarantine_malformed_candidates,
-    _raw_sorted_result_names,
-)
-
-
 def _compact_list_row(row: Dict[str, Any]) -> Dict[str, Any]:
     """Compact LIST projection: drop the five bulk evidence fields, keep the
     summary contract (task_id, status, ts/updated_at, result, description/
@@ -835,55 +820,38 @@ def _tasks_list_payload(
     # List view is a status/cost projection: never materialize artifacts (no child
     # rebase copies, no artifact-dir scans, no disposition/sha claims) on a GET list.
     if wanted:
+        # The stored status is the WHERE prefilter; the filter below runs on the EFFECTIVE status
+        # (the overlay may rename a stored status), so the prefilter admits every row whose stored
+        # status could project into a wanted one: the wanted ones themselves plus the live rows.
+        from ouroboros.task_store import list_documents
+        stored = list_documents(drive_root, statuses=wanted | _OVERLAY_SOURCE_STATUSES)
         rows = [
             _compact_list_row(public_task_result(effective_task_result(
                 drive_root, row, materialize_artifacts=False, _events_index=events_index,
             )))
-            for row in list_task_results(drive_root)
+            for row in stored
         ]
         rows = [row for row in rows if str(row.get("status") or "").lower() in wanted]
         rows.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
         if limit is not None:
             rows = rows[:limit]
         return {"tasks": rows, "queue": _queue_snapshot(drive_root)}
-    results_dir = task_results_dir(drive_root, create=False)
-    names, malformed_names = _raw_sorted_result_names(results_dir)
-    if limit is not None:
-        names = names[:limit]
-    rows = []
-    quarantined: List[Dict[str, str]] = []
-    for name in names:
-        path = results_dir / name
-        raw = read_json_dict(path)
-        if raw is None and not path.is_file():
-            continue  # vanished/torn between the scandir and this read
-        # ABI-2: the sliced fast path is admission-aware like every other
-        # reader — an inadmissible row is quarantined and never projected,
-        # with ONE batched durable event for the whole scan (6.3=B), the
-        # same semantics as the list_task_results fail-soft scan.
-        refusal = task_result_schema_refusal(raw)
-        if refusal:
-            outcome = quarantine_task_result(path, refusal)
-            if outcome == "kept_admissible":
-                raw = read_json_dict(path)
-                if raw is None or task_result_schema_refusal(raw):
-                    continue
-            else:
-                if outcome == "moved":
-                    quarantined.append({"task_id": path.stem, "reason": refusal})
-                continue
-        rows.append(_compact_list_row(public_task_result(effective_task_result(
-            drive_root, raw, materialize_artifacts=False, _events_index=events_index,
-        ))))
-    # ABI-2: a candidate whose bytes failed to parse is NOT silently dropped —
-    # it reaches the same admission reader (quarantine + the batched event)
-    # even beyond the slice window (see task_result_facts).
-    quarantined.extend(_quarantine_malformed_candidates(results_dir, malformed_names))
-    emit_quarantine_event(drive_root, quarantined)
+    from ouroboros.task_store import documents_by_ids, newest_ids
+    # The unfiltered list keeps the raw-``ts`` slice: the newest ``limit`` stored rows, read whole.
+    ids = newest_ids(drive_root, limit)
+    stored = documents_by_ids(drive_root, ids)
+    rows = [_compact_list_row(public_task_result(effective_task_result(
+        drive_root, stored[task_id], materialize_artifacts=False, _events_index=events_index,
+    ))) for task_id in ids if task_id in stored]
     # Re-sort the slice by effective ts: the child-drive merge may have replaced
     # ts, and the response order is the displayed order.
     rows.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
     return {"tasks": rows, "queue": _queue_snapshot(drive_root)}
+
+
+# Stored statuses the effective overlay can still project into another status (a live or
+# interrupted row may read as scheduled/running/failed): a filtered list prefilters them in too.
+_OVERLAY_SOURCE_STATUSES = frozenset({"running", "interrupted", "scheduled", "requested", "cancel_requested"})
 
 
 async def api_tasks_list(request: Request) -> JSONResponse:
@@ -919,14 +887,15 @@ def _task_get_response(request: Request) -> JSONResponse:
     except ValueError as exc:
         return json_error(str(exc), 400)
     drive_root = request_drive_root(request)
-    data = load_effective_task_result(drive_root, task_id)
+    try:
+        data = load_effective_task_result(drive_root, task_id)
+        if not data:
+            from ouroboros.task_store import exists
+            if not exists(drive_root, task_id):
+                return json_error("task not found", 404)
+    except StoreError:
+        data = None  # the store cannot answer for this id: unavailable, not absent
     if not data:
-        try:
-            (task_results_dir(drive_root, create=False) / f"{task_id}.json").stat()
-        except FileNotFoundError:
-            return json_error("task not found", 404)
-        except OSError:
-            pass
         return json_error("task result is unavailable", 503)
     payload = public_task_result(data)
     from ouroboros.owner_continue import continuation_offer  # Batch4: a Continue, or its accepted successor

@@ -7,14 +7,15 @@ import itertools
 import json
 
 from ouroboros import delegate_custody as custody
+from tests._store_shared import seed_result
 
 
 
 def _finished_owner(root, task_id):
     path = root / 'task_results' / f'{task_id}.json'
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({'_schema_version': 1, 'task_id': task_id,
-                               'status': 'completed'}), encoding='utf-8')
+    seed_result(root, task_id, {'_schema_version': 1, 'task_id': task_id,
+                               'status': 'completed'})
 
 def test_last_shared_project_sibling_retires_once_in_every_settlement_order(tmp_path):
     class _Gateway:

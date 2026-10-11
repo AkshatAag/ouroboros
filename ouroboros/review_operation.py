@@ -48,6 +48,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros.model_wait import TaskModelWait
 from ouroboros.utils import utc_now_iso
+from ouroboros.store import StoreError
 
 log = logging.getLogger(__name__)
 
@@ -163,13 +164,14 @@ class _OperationWait(TaskModelWait):
     consumes_pending_action = True
 
     def _drain_controls(self) -> None:
-        from ouroboros.task_results import task_result_path
+        from ouroboros.task_store import signature
 
         try:
-            stat = task_result_path(pathlib.Path(self.canonical_root), self.task_id).stat()
-        except OSError:
+            stamp = signature(pathlib.Path(self.canonical_root), self.task_id)
+        except Exception:
             return
-        stamp = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        if stamp is None:
+            return
         with self.lock:
             if stamp == self.mailbox_stamp:
                 return
@@ -1328,28 +1330,27 @@ def recover_orphaned_acceptance_operations(drive_root: Any, *, stop: Optional[Ca
     still in flight is reported and retried — never marked unavailable.
     """
     from ouroboros.acceptance_settlement import acceptance_actor_ended, settle_acceptance_operation
-    from ouroboros.task_results import load_task_result, task_results_dir
+    from ouroboros.store import StoreError
+    from ouroboros.task_results import load_task_result
+    from ouroboros.task_store import ids_with_fields
 
     root = pathlib.Path(drive_root)
     report: Dict[str, Any] = {"settled": [], "pending": [], "deferred": [], "errors": []}
     try:
-        paths = sorted(task_results_dir(root, create=False).glob("*.json"))
-    except OSError:
+        candidates = ids_with_fields(root, (OPERATIONS_FIELD, "review_projection"))
+    except StoreError:
         return report
-    marker = f'"{OPERATIONS_FIELD}"'
-    for path in paths:
+    for task_id in candidates:
         if stop is not None and stop():
             break
         try:
-            text = path.read_text(encoding="utf-8")
-            if marker not in text and '"review_projection"' not in text:
-                continue
-            row = load_task_result(root, path.stem) or {}
-        except (OSError, ValueError):
+            row = load_task_result(root, task_id) or {}
+        except (OSError, ValueError, StoreError):
             continue
-        ctx = SimpleNamespace(task_id=path.stem, task_attempt=None, drive_root=root,
+        path = SimpleNamespace(stem=task_id)  # the settlement rows below name the task by its id
+        ctx = SimpleNamespace(task_id=task_id, task_attempt=None, drive_root=root,
                               budget_drive_root=root, task_metadata={}, event_queue=None)
-        if not acceptance_actor_ended(ctx, path.stem, row):
+        if not acceptance_actor_ended(ctx, task_id, row):
             continue
         for owner_id, entry in list((row.get(OPERATIONS_FIELD) or {}).items()):
             state = entry.get("state") if isinstance(entry, dict) else None
@@ -1465,7 +1466,7 @@ def _recover_legacy_acceptance_panels(root: pathlib.Path, task_id: str, row: dic
                     _remember_legacy_notice(root, task_id, f"acceptance-late:{retry_key}", published)
             report["settled" if status in {"announced", "published", "settled"} else "pending"].append(
                 {**fact, "status": status})
-        except (OSError, ValueError, TypeError, KeyError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, StoreError) as exc:
             report["errors"].append({**fact, "error": f"{type(exc).__name__}: {exc}"})
 
 

@@ -17,6 +17,7 @@ import pytest
 import ouroboros.config as config
 from ouroboros import fallback_cooldown as fcd
 from ouroboros import subagents
+from tests._store_shared import read_result
 
 
 @pytest.fixture(autouse=True)
@@ -1101,8 +1102,7 @@ def test_blocked_configured_session_terminals_unrun_without_a_model_round(tmp_pa
     )
 
     # The durable record keeps the selected session intent and typed failure.
-    result_path = drive / "task_results" / "pinned1.json"
-    record = json.loads(result_path.read_text(encoding="utf-8"))
+    record = read_result(drive, "pinned1")
     assert record["effective_executor"] == "blocked"
     assert record["model"] == "provider::parent"
     assert record["configured_subagent"]["selected_subagent_id"] == "session-actor"

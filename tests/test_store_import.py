@@ -15,7 +15,7 @@ import pytest
 from ouroboros import obligations as o
 from ouroboros import store, store_import
 from ouroboros.store import GENERATION, GENERATION_KEY, StoreLost
-from ouroboros.store_import import ensure_current_store, export_facts
+from ouroboros.store_import import ensure_current_store, export_facts, set_file_path
 from ouroboros.task_results import task_result_path
 from ouroboros.utils import atomic_write_json
 
@@ -31,6 +31,14 @@ def write_result(root: pathlib.Path, row: dict) -> pathlib.Path:
     return path
 
 
+def add_set_member(root: pathlib.Path, name: str, identity: str, facts: dict) -> None:
+    """A pre-store root's set FILE (``state/obligations/<name>.json``): importer input only."""
+    path = set_file_path(root, name)
+    rows = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    rows[identity] = facts
+    atomic_write_json(path, rows)
+
+
 def fixture_root(tmp_path: pathlib.Path) -> pathlib.Path:
     """Three results (one running with a child drive holding a retry row, whose own child
     drive holds a grandchild row), two set files, one unstamped file (quarantined at
@@ -42,14 +50,14 @@ def fixture_root(tmp_path: pathlib.Path) -> pathlib.Path:
     write_result(root, result("done1", "failed", superseded_by="done1-retry"))
     atomic_write_json(task_result_path(root, "legacy"), {"task_id": "legacy", "status": "completed"})  # unstamped
     atomic_write_json(task_result_path(root, "mismatch"), result("other"))
-    o.add(root, "nonterminal", "root1", {"task_id": "root1"})
-    o.add(root, "pending_drives", "root1", {"task_id": "root1"})
-    o.add(root, "custody_open", "run:r1", {"task_id": "root1", "custody": "{}"})
-    o.add(root, "custody_open", "invocation:i1", {"task_id": "root1", "request": {"x": 1}})
-    o.add(root, "pause_notices", "child1", {"task_id": "child1"})
-    for name in o.BOOT_SETS:  # every boot classification leaves every set file behind
-        if not o.path(root, name).exists():
-            atomic_write_json(o.path(root, name), {})
+    add_set_member(root, "nonterminal", "root1", {"task_id": "root1"})
+    add_set_member(root, "pending_drives", "root1", {"task_id": "root1"})
+    add_set_member(root, "custody_open", "run:r1", {"task_id": "root1", "custody": "{}"})
+    add_set_member(root, "custody_open", "invocation:i1", {"task_id": "root1", "request": {"x": 1}})
+    add_set_member(root, "pause_notices", "child1", {"task_id": "child1"})
+    for name in o.BOOT_SETS:  # every file-era boot classification left every set file behind
+        if not set_file_path(root, name).exists():
+            atomic_write_json(set_file_path(root, name), {})
     drive = root / "state" / "headless_tasks" / "root1" / "data"
     write_result(drive, result("root1", "completed", retry_task_id="root1-r2"))
     write_result(drive, result("root1-r2", "running"))
@@ -415,7 +423,7 @@ def test_a_row_changed_on_both_sides_lets_the_file_win_and_keeps_the_db_version(
 def test_set_file_edits_alone_are_not_detected_but_follow_a_result_change(tmp_path):
     root = fixture_root(tmp_path)
     ensure_current_store(root, with_children=False)
-    o.add(root, "custody_open", "run:r2", {"task_id": "done1"})
+    add_set_member(root, "custody_open", "run:r2", {"task_id": "done1"})
     assert ensure_current_store(root, with_children=False)["status"] == "unchanged"  # the named limit
     with store.open_store(root, write=False) as txn:
         assert "run:r2" not in txn.set_rows("custody_open")

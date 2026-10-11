@@ -1,18 +1,19 @@
 """The current-facts store ``state/current.sqlite`` and the SQLite core it shares with money.
 
-Dormant until the cutover activates it: nothing in production reads, writes or
-switches through this module yet (``task_results/*.json`` and the obligation set
-files stay the authority). Here already: the connection, lock-tier, identity,
-commit and transaction core ``usage_store`` imports back (one protocol for both
-files: rollback journal, ``synchronous=FULL``, no WAL, one connection per
+The authority for task result documents and the obligation sets (the former
+``task_results/*.json`` files and ``state/obligations/*.json`` exist only as the
+importer's input and the exporter's output). Here: the connection, lock-tier,
+identity, commit and transaction core ``usage_store`` imports back (one protocol
+for both files: rollback journal, ``synchronous=FULL``, no WAL, one connection per
 transaction, ``BEGIN IMMEDIATE`` for writes, every name-tier access inside one
 name lock, nothing above SQLite 3.24 so the bundled engine's file opens on a
 3.37 system engine); the schema (``tasks`` typed facts and obligation flags,
 ``task_bodies`` the original document joined only by ``load``, ``obligations``
-owner-held sets, ``task_handoffs``/``custody_runs``/``custody_outbox`` filled by
-the cutover, ``meta``); the tri-state open (``probe``/``open_store``); ``update_task``
-(the phase read inside the transaction); ``load`` (body plus the row-backed fields
-``ROW_BACKED_FIELDS`` names once the cutover decides them).
+owner-held sets, ``task_handoffs``/``custody_runs``/``custody_outbox``, ``meta``);
+the tri-state open (``probe``/``open_store``: an absent, never-imported store is
+imported on first touch unless this process's lifespan is importing it, which
+reads as ``StoreMigrating``); ``update_task`` (the phase read inside the
+transaction); ``load`` (body plus the row-backed fields ``ROW_BACKED_FIELDS``).
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ PUBLISHED, EXPORTING, RETIRED = "published", "exporting", "retired"
 _APPLICATION_ID = {TIER_ENFORCED: 0x4F554345, TIER_NAME: 0x4F55434E}
 TYPED_COLUMNS = ("status", "parent_task_id", "root_task_id", "delegation_role", "superseded_by",
                  "retry_task_id", "project_id", "ts", "updated_at", "child_drive_root",
-                 "headless_child_drive_root", "presence_binding_id")
+                 "headless_child_drive_root", "drive_root", "presence_binding_id")
 # set name -> flag column; the writer decides ``pending_drive`` (nonterminal, or terminal files not ready)
 FLAG_COLUMNS = {"synthesis": "owes_synthesis", "terminal_projection": "owes_terminal_projection",
                 "promotions": "has_pending_promotion", "pause_notices": "has_pause_notices",
@@ -51,14 +52,16 @@ _SCHEMA = """
 CREATE TABLE tasks (
   task_id TEXT PRIMARY KEY, status TEXT, parent_task_id TEXT, root_task_id TEXT, delegation_role TEXT,
   superseded_by TEXT, retry_task_id TEXT, project_id TEXT, ts TEXT, updated_at TEXT,
-  child_drive_root TEXT, headless_child_drive_root TEXT, presence_binding_id TEXT,
-  presence_authority_recorded INTEGER NOT NULL DEFAULT 0,
+  child_drive_root TEXT, headless_child_drive_root TEXT, drive_root TEXT, presence_binding_id TEXT,
+  presence_authority_recorded INTEGER NOT NULL DEFAULT 0, write_seq INTEGER NOT NULL DEFAULT 0,
   owes_synthesis INTEGER NOT NULL DEFAULT 0, owes_terminal_projection INTEGER NOT NULL DEFAULT 0,
   has_pending_promotion INTEGER NOT NULL DEFAULT 0, has_pause_notices INTEGER NOT NULL DEFAULT 0,
   delegated_runs_unreconciled INTEGER NOT NULL DEFAULT 0, pending_drive INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX tasks_parent ON tasks(parent_task_id); CREATE INDEX tasks_root ON tasks(root_task_id);
-CREATE INDEX tasks_status ON tasks(status);
-CREATE INDEX tasks_lineage ON tasks(task_id) WHERE superseded_by IS NOT NULL OR retry_task_id IS NOT NULL;
+CREATE INDEX tasks_status ON tasks(status); CREATE INDEX tasks_project ON tasks(project_id);
+CREATE INDEX tasks_ts ON tasks(ts, task_id); CREATE INDEX tasks_updated ON tasks(updated_at, task_id);
+CREATE INDEX tasks_superseded ON tasks(superseded_by) WHERE superseded_by IS NOT NULL;
+CREATE INDEX tasks_retry ON tasks(retry_task_id) WHERE retry_task_id IS NOT NULL;
 CREATE TABLE task_bodies (task_id TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE obligations (set_name TEXT NOT NULL, id TEXT NOT NULL, facts TEXT NOT NULL, PRIMARY KEY (set_name, id));
 CREATE TABLE task_handoffs (task_id TEXT NOT NULL, op_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT,
@@ -67,7 +70,7 @@ CREATE TABLE custody_runs (run_id TEXT PRIMARY KEY, task_id TEXT, state TEXT, fa
 CREATE INDEX custody_task ON custody_runs(task_id); CREATE INDEX custody_state ON custody_runs(state);
 CREATE TABLE custody_outbox (event_id TEXT PRIMARY KEY, run_id TEXT, task_id TEXT, event TEXT NOT NULL, created_at TEXT);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-""" + "".join(f"CREATE INDEX tasks_{column} ON tasks(task_id) WHERE {column}=1;\n"
+""" + "".join(f"CREATE INDEX tasks_{column} ON tasks({column}) WHERE {column}=1;\n"
               for column in FLAG_COLUMNS.values())
 
 
@@ -130,7 +133,7 @@ def connect(path: pathlib.Path, tier: str, *, create: bool = False, wait_sec: fl
     query = "mode=rwc" if create else "mode=rw"
     if tier == TIER_NAME:
         query += "&vfs=" + ("win32-none" if os.name == "nt" else "unix-none")
-    conn = sqlite3.connect(f"{path.as_uri()}?{query}", uri=True, isolation_level=None,
+    conn = sqlite3.connect(f"{path.absolute().as_uri()}?{query}", uri=True, isolation_level=None,
                            timeout=max(0.0, wait_sec) if tier == TIER_ENFORCED else 0.0)
     conn.row_factory = sqlite3.Row
     return conn
@@ -256,20 +259,87 @@ def name_lock(root: Any, filename: str, *, timeout_sec: float, stale_sec: float 
         release_exclusive_file_lock(path, fd)
 
 
+_IMPORTING: set = set()  # roots this process's lifespan is importing: their readers see ``StoreMigrating``
+_IMPORTING_GUARD = threading.Lock()
+_FIRST_TOUCH = threading.local()  # roots THIS thread is importing on first touch: a nested open answers typed
+
+
+@contextlib.contextmanager
+def importing(root: Any) -> Iterator[None]:
+    """The lifespan's import window for ROOT: every other reader or writer of that root
+    answers ``StoreMigrating`` instead of importing on first touch."""
+    key = str(pathlib.Path(root))
+    with _IMPORTING_GUARD:
+        _IMPORTING.add(key)
+    try:
+        yield
+    finally:
+        with _IMPORTING_GUARD:
+            _IMPORTING.discard(key)
+
+
+def store_ready(root: Any) -> bool:
+    """Whether a write door may proceed: the store is published and no import of it runs here."""
+    with _IMPORTING_GUARD:
+        if str(pathlib.Path(root)) in _IMPORTING:
+            return False
+    try:
+        return probe(root)[0] == "present"
+    except StoreError:
+        return False
+
+
+def _absent(root: pathlib.Path) -> None:
+    """The typed answer for an absent store, or a first-touch import when nothing forbids one."""
+    if generation_stamped(root):
+        raise StoreLost(f"current store missing beside its completed stamp: {store_path(root)}")
+    retired = retired_sibling(root)
+    if retired is not None:
+        raise StoreRetired(f"current store retired by an export as {retired.name}: the files are the authority")
+    with _IMPORTING_GUARD:
+        window = str(root) in _IMPORTING
+    entered = getattr(_FIRST_TOUCH, "roots", None) or set()
+    if window or str(root) in entered:
+        raise StoreMigrating(f"current store not published yet: {store_path(root)}")
+    from ouroboros.store_import import ensure_current_store
+
+    # Another thread importing the same root is waited for inside ``ensure_current_store`` (its
+    # name lock); only THIS thread's nested open of the root answers typed instead of re-entering.
+    _FIRST_TOUCH.roots = entered | {str(root)}
+    try:
+        ensure_current_store(root, with_children=False)
+    except StoreError:
+        raise
+    except Exception as exc:  # the files the import reads are unavailable: the store cannot answer
+        raise StoreMigrating(f"current store not published: the first-touch import failed: {exc}") from exc
+    finally:
+        _FIRST_TOUCH.roots = entered
+
+
 @contextlib.contextmanager
 def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC) -> Iterator["Txn"]:
-    """One transaction on the published store: ``StoreMigrating`` before publication, ``StoreLost`` for a
-    missing store beside its completed stamp, ``StoreRetired`` for one an export set aside (the files are
-    the authority until the next import), ``StoreBusy`` on contention; ``mode=rw``, never creating."""
+    """One transaction on the published store: ``StoreMigrating`` while the lifespan imports, a
+    first-touch import for a never-imported root, ``StoreLost`` for a missing store beside its
+    completed stamp, ``StoreRetired`` for one an export set aside (the files are the authority
+    until the next import), ``StoreBusy`` on contention; ``mode=rw``, never creating here."""
     root = pathlib.Path(root)
     state, tier = probe(root)
+    if state == "absent" and not write and not root.is_dir():
+        # A root that does not exist holds nothing: a read answers empty and creates nothing.
+        conn = sqlite3.connect(":memory:", isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA)
+        try:
+            with transaction(conn, write=False):
+                yield Txn(conn, root)
+        finally:
+            conn.close()
+        return
     if state == "absent":
-        if generation_stamped(root):
-            raise StoreLost(f"current store missing beside its completed stamp: {store_path(root)}")
-        retired = retired_sibling(root)
-        if retired is not None:
-            raise StoreRetired(f"current store retired by an export as {retired.name}: the files are the authority")
-        raise StoreMigrating(f"current store not published yet: {store_path(root)}")
+        _absent(root)
+        state, tier = probe(root)
+        if state == "absent":
+            raise StoreMigrating(f"current store not published yet: {store_path(root)}")
     with contextlib.ExitStack() as stack:
         if tier == TIER_NAME:
             stack.enter_context(name_lock(root, LOCK_NAME, timeout_sec=wait_sec))
@@ -280,7 +350,7 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC) -> I
         stack.callback(conn.close)
         try:
             with transaction(conn, write=write, commit_wait_sec=wait_sec if tier == TIER_ENFORCED else None):
-                yield Txn(conn)
+                yield Txn(conn, root)
         except sqlite3.Error as exc:
             raise _typed(exc) from exc
 
@@ -297,16 +367,25 @@ def encode_document(document: Dict[str, Any]) -> str:
 
 
 def typed_columns(document: Dict[str, Any], *, pending_drive: Optional[bool] = None) -> Dict[str, Any]:
-    """The ``tasks`` columns of a document: top-level typed facts and the obligation
-    flags from the existing membership predicates."""
+    """The ``tasks`` columns of a document: top-level typed facts, the two Presence facts
+    derived from their carriers, and the obligation flags from the existing predicates."""
+    from ouroboros.dialogue_provenance import presence_metadata_binding, presence_record_binding
     from ouroboros.obligations import result_memberships
 
     names = result_memberships(document)
     columns: Dict[str, Any] = {}
     for column in TYPED_COLUMNS:
         value = document.get(column)
-        columns[column] = None if value is None else str(value)
-    columns["presence_authority_recorded"] = int(bool(document.get("presence_authority_recorded")))
+        text = "" if value is None else str(value).strip()
+        columns[column] = text or None  # NULL is "no fact": the lineage prefilter and its index test IS NOT NULL
+    # One derived scalar selects a Presence binding's own work without a body read; an empty
+    # scalar is not proof of absent provenance (a malformed carrier, or a ceiling whose
+    # carrier was lost, must never inherit a queue claim), hence the second fact.
+    columns["presence_binding_id"] = presence_record_binding(document) or None
+    contract = document.get("task_contract")
+    columns["presence_authority_recorded"] = int(
+        presence_metadata_binding(document.get("metadata")) is not None
+        or (isinstance(contract, dict) and "capability_ceiling" in contract))
     for name, column in FLAG_COLUMNS.items():
         columns[column] = int(name in names)
     columns["pending_drive"] = int("nonterminal" in names if pending_drive is None else pending_drive)
@@ -317,8 +396,9 @@ class Txn:
     """One store transaction: documents, obligation rows, meta; riders of the cutover
     (handoffs, custody, outbox) share the same connection."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, root: Any = None) -> None:
         self.conn = conn
+        self.root = pathlib.Path(root) if root is not None else None
 
     def meta(self, key: str) -> Any:
         record = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -350,14 +430,23 @@ class Txn:
         return document
 
     def store_task(self, document: Dict[str, Any], *, pending_drive: Optional[bool] = None) -> None:
-        """Upsert the body and the typed columns of one document."""
+        """Upsert the body and the typed columns of one document; ``write_seq`` counts the writes
+        (the row signature the memos that used to key on a file's stat compare)."""
         task_id = str(document["task_id"])
         columns = typed_columns(document, pending_drive=pending_drive)
+        columns["write_seq"] = (self.row(task_id, "write_seq") or 0) + 1
         self.conn.execute("INSERT OR REPLACE INTO task_bodies (task_id, body) VALUES (?, ?)",
                           (task_id, encode_document(document)))
         names = ("task_id", *columns)
         self.conn.execute(f"INSERT OR REPLACE INTO tasks ({','.join(names)}) VALUES ({','.join('?' * len(names))})",
                           (task_id, *columns.values()))
+
+    def row(self, task_id: str, *columns: str) -> Any:
+        """One task's typed columns (one value for one column, a tuple for several; ``None`` when absent)."""
+        record = self.conn.execute(f"SELECT {','.join(columns)} FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        if record is None:
+            return None
+        return record[0] if len(columns) == 1 else tuple(record)
 
     def delete_task(self, task_id: str) -> None:
         self.conn.execute("DELETE FROM task_bodies WHERE task_id=?", (task_id,))
@@ -377,6 +466,24 @@ class Txn:
         self.conn.executemany("INSERT INTO obligations (set_name, id, facts) VALUES (?, ?, ?)",
                               [(set_name, str(identity), machine_json(facts)) for identity, facts in rows.items()])
 
+    def put_row(self, set_name: str, identity: str, facts: Dict[str, Any]) -> None:
+        """One owner-held obligation row (an existing row keeps its place; only changed facts write)."""
+        current = self.conn.execute("SELECT facts FROM obligations WHERE set_name=? AND id=?",
+                                    (set_name, identity)).fetchone()
+        text = machine_json(facts)
+        if current is None:
+            self.conn.execute("INSERT INTO obligations (set_name, id, facts) VALUES (?, ?, ?)", (set_name, identity, text))
+        elif current["facts"] != text:
+            self.conn.execute("UPDATE obligations SET facts=? WHERE set_name=? AND id=?", (text, set_name, identity))
+
+    def delete_row(self, set_name: str, identity: str) -> None:
+        self.conn.execute("DELETE FROM obligations WHERE set_name=? AND id=?", (set_name, identity))
+
+    def get_row(self, set_name: str, identity: str) -> Optional[Dict[str, Any]]:
+        record = self.conn.execute("SELECT facts FROM obligations WHERE set_name=? AND id=?",
+                                   (set_name, identity)).fetchone()
+        return None if record is None else json.loads(record["facts"])
+
     def flagged(self, set_name: str) -> List[str]:
         """Task ids whose flag column says they belong to a derived set."""
         column = FLAG_COLUMNS[set_name]
@@ -386,11 +493,12 @@ class Txn:
 
 def update_task(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]], *,
                 riders: Tuple[Callable[[Txn, Dict[str, Any], Dict[str, Any]], None], ...] = (),
-                pending_drive: Optional[bool] = None) -> Optional[Dict[str, Any]]:
+                pending_drive: Any = None) -> Optional[Dict[str, Any]]:
     """The write seam: ``BEGIN IMMEDIATE``; the phase read inside (``StoreRetired`` once an export
     began, which a straggler's older connection sees in the retired inode); the mutator over the
     current document (``None`` = no write: the read-only transaction commits empty); the
-    cutover's riders on the same connection; COMMIT."""
+    cutover's riders on the same connection; COMMIT. ``pending_drive`` is a value, or a callable
+    ``(txn, current, updated) -> Optional[bool]`` deciding it from the written document."""
     with open_store(root, write=True) as txn:
         phase = txn.phase()
         if phase != PUBLISHED:
@@ -399,7 +507,8 @@ def update_task(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Opt
         updated = mutator(json.loads(json.dumps(current)))
         if updated is None:
             return None
-        txn.store_task({**updated, "task_id": task_id}, pending_drive=pending_drive)
+        flag = pending_drive(txn, current, updated) if callable(pending_drive) else pending_drive
+        txn.store_task({**updated, "task_id": task_id}, pending_drive=flag)
         for rider in riders:
             rider(txn, current, updated)
         return updated

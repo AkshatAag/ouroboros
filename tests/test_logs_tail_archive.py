@@ -9,6 +9,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros.gateway.logs import api_logs_tail
+from tests._store_shared import seed_result
 
 
 def _app(data):
@@ -160,10 +161,7 @@ def test_logs_tail_task_filter_counts_toward_backfill_quota(tmp_path):
         encoding="utf-8",
     )
     (data / "task_results").mkdir()
-    (data / "task_results" / "target.json").write_text(
-        json.dumps({"task_id": "target", "status": "completed", "result": "done"}),
-        encoding="utf-8",
-    )
+    seed_result(data, "target", {"task_id": "target", "status": "completed", "result": "done"})
     (data / "state").mkdir()
     (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
 
@@ -225,10 +223,7 @@ def test_logs_tail_task_discovery_does_zero_artifact_work(tmp_path, monkeypatch)
         encoding="utf-8",
     )
     (data / "task_results").mkdir()
-    (data / "task_results" / "target.json").write_text(
-        json.dumps({"task_id": "target", "status": "completed", "result": "done"}),
-        encoding="utf-8",
-    )
+    seed_result(data, "target", {"task_id": "target", "status": "completed", "result": "done"})
     (data / "state").mkdir()
     (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
     calls = []

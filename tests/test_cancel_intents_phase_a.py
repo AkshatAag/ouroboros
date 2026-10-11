@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import pytest
 from ouroboros import cancel_intents as ci
+from ouroboros import store_import
 from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
@@ -302,7 +303,9 @@ def test_boot_migration_admits_the_unstamped_latch_and_quarantines_the_rest(tmp_
     _write_pre_7_0_row(tmp_path, "latched", STATUS_CANCEL_REQUESTED, note="pre-7.0")
     _write_pre_7_0_row(tmp_path, "finished", STATUS_COMPLETED, result="pre-7.0")
 
-    assert ci.migrate_legacy_cancel_latches(tmp_path) == ["latched"]
+    # Boot's import admits the latch (stamped) and runs the migration itself; a later scan finds nothing new.
+    assert store_import.ensure_current_store(tmp_path)["results"] == 1
+    assert ci.migrate_legacy_cancel_latches(tmp_path) == []
 
     stored = load_task_result(tmp_path, "latched")
     assert stored["status"] == STATUS_CANCEL_REQUESTED and stored["note"] == "pre-7.0"
@@ -362,8 +365,9 @@ def test_the_admitted_latch_reaches_the_cancelled_terminal(tmp_path, monkeypatch
     monkeypatch.setattr(task_lifecycle, "CANCELLED_ROOT_FENCES", {}, raising=False)
     monkeypatch.setattr(task_lifecycle, "_ACTIVE_CASCADE_FENCES", {}, raising=False)
 
-    assert ci.migrate_legacy_cancel_latches(tmp_path) == ["wedged"]
+    assert store_import.ensure_current_store(tmp_path)["results"] == 1  # the import migrates the latch
     intent = ci.active_intent(tmp_path, "wedged")
+    assert intent["source"] == "boot_migration"
 
     outcome = cancel_publication._finalize_cancel_intent_on_miss(q, "wedged", intent=intent)
 

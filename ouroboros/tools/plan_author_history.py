@@ -75,6 +75,32 @@ def retain_previous_selection(drive_root: Any, task_id: str, state: dict) -> Non
             state["author_history_head"] = _persist(drive_root, task_id, value)
 
 
+def prepared_retention(drive_root: Any, task_id: str):
+    """The retention I/O of ``retain_previous_selection`` run BEFORE the store transaction, over the
+    CURRENT state; the returned closure applies that outcome inside the mutator while the current
+    attempt is still the one it prepared for, and redoes the retention inline otherwise."""
+    from ouroboros import task_results as results
+    from ouroboros.task_store import read_document
+
+    document = read_document(drive_root, task_id) or {}
+    before = results._validated_plan_review_state(document.get(results.PLAN_REVIEW_STATE_KEY))
+    attempt_before = copy.deepcopy(before.get("current_attempt") or {})
+    prepared = copy.deepcopy(before)
+    retain_previous_selection(drive_root, task_id, prepared)
+
+    def apply(state: dict) -> None:
+        if (state.get("current_attempt") or {}) != attempt_before:
+            retain_previous_selection(drive_root, task_id, state)
+            return
+        subject = (prepared.get("current_attempt") or {}).get("author_subject")
+        if subject is not None and state.get("current_attempt"):
+            state["current_attempt"]["author_subject"] = copy.deepcopy(subject)
+        if "author_history_head" in prepared:
+            state["author_history_head"] = copy.deepcopy(prepared["author_history_head"])
+
+    return apply
+
+
 def record_attempt(drive_root: Any, task_id: str, *, fingerprint: str, status: str, reason: str,
                    author_subject: dict | None, submitted_subject: dict | None = None) -> dict:
     """The existing locked attempt producer, with author-source retention first."""
@@ -96,10 +122,12 @@ def record_attempt(drive_root: Any, task_id: str, *, fingerprint: str, status: s
                            reason="submitted_source_unavailable", author_subject=None)
             raise
 
+    retain = prepared_retention(drive_root, task_id)
+
     def record(state: dict) -> dict:
         previous = state.get("current_attempt") or {}
         retained = submitted or (previous.get("submitted_subject") if previous.get("fingerprint") == fingerprint else None)
-        retain_previous_selection(drive_root, task_id, state)
+        retain(state)
         selected = retain_author_selection(drive_root, task_id, state, author_subject, fingerprint) if author_subject is not None else None
         state["current_attempt"] = {"fingerprint": fingerprint, "status": status,
                                     "reason": str(reason or "")[:results._PLAN_REVIEW_REASON_MAX_CHARS]}

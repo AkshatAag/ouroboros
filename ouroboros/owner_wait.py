@@ -35,6 +35,7 @@ from ouroboros.observability import without_finalization_timing
 from ouroboros.owner_mailbox import OwnerMailboxPeek
 from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
 from ouroboros.utils import utc_now_iso
+from ouroboros.task_store import patch_document
 
 log = logging.getLogger(__name__)
 
@@ -105,9 +106,8 @@ def set_owner_wait(root: Any, task_id: str, wait: dict,
     """Update only the existing continuation projection, preserving siblings."""
     from ouroboros.task_results import (
         require_writable_task_result_schema,
-        stamp_task_result_schema, task_result_path,
+        stamp_task_result_schema,
     )
-    from ouroboros.utils import update_json_locked
 
     def update(current: dict) -> dict:
         require_writable_task_result_schema(current)
@@ -122,7 +122,7 @@ def set_owner_wait(root: Any, task_id: str, wait: dict,
             raise OwnerWaitSuperseded("owner wait state changed")
         return stamp_task_result_schema({**current, "owner_wait": dict(wait)})
 
-    update_json_locked(task_result_path(root, task_id), update, strict_existing_dict=True)
+    patch_document(root, task_id, update, strict_existing_dict=True)
     return dict(wait)
 
 

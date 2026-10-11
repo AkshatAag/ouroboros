@@ -45,6 +45,7 @@ from ouroboros.task_results import (
     write_task_result,
 )
 from tests._shared import write_queue_document
+from tests._store_shared import result_signature
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -121,7 +122,6 @@ def test_gr6_1_cancel_kills_a_settled_tasks_live_worker_and_keeps_the_result(
     the shared-drive shape — so the settled row is exposed to the kill path's
     child-copy/finalize mutations and the byte-identity assertion actually
     catches them (a drive-less row made the mutating block a silent no-op)."""
-    from ouroboros.task_results import task_result_path
     from supervisor import workers
 
     task_id = "burn1"
@@ -138,7 +138,7 @@ def test_gr6_1_cancel_kills_a_settled_tasks_live_worker_and_keeps_the_result(
     }
     write_task_result(qenv.drive, task_id, STATUS_COMPLETED, chat_id=6,
                       result="the finished answer")
-    row_bytes_before = task_result_path(qenv.drive, task_id).read_bytes()
+    row_bytes_before = result_signature(qenv.drive, task_id)
 
     assert qenv.tl.task_has_live_ownership(task_id) is True
     minted = ci.request_cancel(qenv.drive, task_id, reason="stop spending",
@@ -152,7 +152,7 @@ def test_gr6_1_cancel_kills_a_settled_tasks_live_worker_and_keeps_the_result(
     stored = load_task_result(qenv.drive, task_id)
     assert stored["status"] == STATUS_COMPLETED, "completion wins: no overwrite"
     assert stored["result"] == "the finished answer"
-    assert task_result_path(qenv.drive, task_id).read_bytes() == row_bytes_before, (
+    assert result_signature(qenv.drive, task_id) == row_bytes_before, (
         "GR7-2: the settled terminal row survives the kill BYTE-IDENTICAL"
     )
     assert task_id not in qenv.q.RUNNING

@@ -17,6 +17,7 @@ from ouroboros.task_results import (
     load_task_result,
     write_task_result,
 )
+from tests._store_shared import result_exists, result_signature
 
 
 def _stale_terminal_result(tmp_path: pathlib.Path, task_id: str, **extra) -> None:
@@ -157,8 +158,8 @@ def test_truncated_custody_disclosure_names_both_retry_lineage_rows(tmp_path):
     custody = summary["delegated_custody"]
     assert custody["unreconciled_omitted"] == 2
     assert custody["full_source"] == [
-        "read_file(root='runtime_data', path='task_results/t-retry.json')",
-        "read_file(root='runtime_data', path='task_results/t-orig.json')",
+        "get_task_result(task_id='t-retry')",
+        "get_task_result(task_id='t-orig')",
     ]
 
 
@@ -231,14 +232,13 @@ def test_second_boot_is_a_byte_level_noop_for_a_permanently_stale_row(tmp_path):
                            delegated_runs_unreconciled=["run-2"])
     assert delegate_terminal.backfill_terminal_reconciliations(tmp_path) == ["t-incident"]
 
-    row_path = tmp_path / "task_results" / "t-incident.json"
     events_path = tmp_path / "logs" / "events.jsonl"
-    row_before = row_path.read_bytes()
+    row_before = result_signature(tmp_path, "t-incident")
     events_before = events_path.read_bytes()
 
     assert delegate_terminal.backfill_terminal_reconciliations(tmp_path) == []
 
-    assert row_path.read_bytes() == row_before
+    assert result_signature(tmp_path, "t-incident") == row_before
     assert events_path.read_bytes() == events_before
 
 
@@ -259,11 +259,10 @@ def test_boot_backfill_adds_the_envelope_to_a_flat_only_kill_row(tmp_path):
     assert envelope["trigger"] == "boot_backfill"
     assert envelope["open_run_ids"] == ["run-6"]
 
-    row_path = tmp_path / "task_results" / "t-flat.json"
     events_path = tmp_path / "logs" / "events.jsonl"
-    row_before, events_before = row_path.read_bytes(), events_path.read_bytes()
+    row_before, events_before = result_signature(tmp_path, "t-flat"), events_path.read_bytes()
     assert delegate_terminal.backfill_terminal_reconciliations(tmp_path) == []
-    assert row_path.read_bytes() == row_before
+    assert result_signature(tmp_path, "t-flat") == row_before
     assert events_path.read_bytes() == events_before
 
 
@@ -283,7 +282,7 @@ def test_lock_timeout_refresh_is_false_and_emits_no_evidence(tmp_path, monkeypat
     def _timeout(*_args, **_kwargs):
         raise TimeoutError("lock held elsewhere")
 
-    monkeypatch.setattr(task_results_mod, "update_json_locked", _timeout)
+    monkeypatch.setattr(task_results_mod, "patch_document", _timeout)
     assert delegate_terminal.refresh_terminal_reconciliation(tmp_path, "t-lock2") is False
     assert events_path.read_bytes() == events_before
     assert load_task_result(tmp_path, "t-lock2")["delegated_runs_unreconciled"] == ["run-7"]
@@ -325,7 +324,7 @@ def test_backfill_lock_timeout_is_fail_soft_and_heals_on_the_next_boot(tmp_path,
     def _timeout(*_args, **_kwargs):
         raise TimeoutError("lock held elsewhere")
 
-    monkeypatch.setattr(task_results_mod, "update_json_locked", _timeout)
+    monkeypatch.setattr(task_results_mod, "patch_document", _timeout)
     delegate_terminal.backfill_terminal_reconciliations(tmp_path)  # must not raise
     assert load_task_result(tmp_path, "t-locked")["delegated_runs_unreconciled"] == ["run-4"]
 
@@ -379,7 +378,7 @@ def test_recorder_and_refresh_never_mint_a_row_for_an_absent_task(tmp_path):
     delegate_terminal.record_terminal_reconciliation(tmp_path, "t-none", clean)
     assert delegate_terminal.refresh_terminal_reconciliation(
         tmp_path, "t-none", trigger="kill_path_clear") is False
-    assert not (tmp_path / "task_results" / "t-none.json").exists()
+    assert not result_exists(tmp_path, "t-none")
 
 
 def _kill_env(tmp_path, monkeypatch):
@@ -431,8 +430,7 @@ def test_kill_fast_lane_adds_no_write_when_nothing_is_stale(tmp_path, monkeypatc
     env = _kill_env(tmp_path, monkeypatch)
     write_task_result(env.drive, "t-clean-kill", STATUS_FAILED, result="settled")
     ci.request_cancel(env.drive, "t-clean-kill")
-    row_path = tmp_path / "task_results" / "t-clean-kill.json"
-    row_before = row_path.read_bytes()
+    row_before = result_signature(tmp_path, "t-clean-kill")
 
     writes: list = []
     real_write = task_results_mod.write_task_result
@@ -443,7 +441,7 @@ def test_kill_fast_lane_adds_no_write_when_nothing_is_stale(tmp_path, monkeypatc
     assert env.tl.cancel_task_custody(
         "t-clean-kill", deliver=False) == env.tl.CANCEL_ALREADY_SETTLED
     assert writes == []
-    assert row_path.read_bytes() == row_before
+    assert result_signature(tmp_path, "t-clean-kill") == row_before
 
 
 def test_miss_lane_already_settled_clears_stale_disclosure(tmp_path, monkeypatch):
@@ -475,8 +473,7 @@ def test_miss_lane_already_settled_clears_stale_disclosure(tmp_path, monkeypatch
     import ouroboros.task_results as task_results_mod
 
     write_task_result(env.drive, "t-miss-clean", STATUS_FAILED, result="settled")
-    row_path = tmp_path / "task_results" / "t-miss-clean.json"
-    row_before = row_path.read_bytes()
+    row_before = result_signature(tmp_path, "t-miss-clean")
     writes: list = []
     real_write = task_results_mod.write_task_result
     monkeypatch.setattr(
@@ -488,7 +485,7 @@ def test_miss_lane_already_settled_clears_stale_disclosure(tmp_path, monkeypatch
         intent={"task_id": "t-miss-clean", "request_id": "r2", "generation": 1},
     ) == cp.CANCEL_ALREADY_SETTLED
     assert writes == []
-    assert row_path.read_bytes() == row_before
+    assert result_signature(tmp_path, "t-miss-clean") == row_before
 
 
 def test_reaper_self_finalized_branch_clears_stale_disclosure(tmp_path, monkeypatch):
@@ -528,8 +525,7 @@ def test_reaper_self_finalized_branch_clears_stale_disclosure(tmp_path, monkeypa
     import ouroboros.task_results as task_results_mod
 
     write_task_result(env.drive, "t-self-clean", STATUS_FAILED, result="self-finalized")
-    row_path = tmp_path / "task_results" / "t-self-clean.json"
-    row_before = row_path.read_bytes()
+    row_before = result_signature(tmp_path, "t-self-clean")
     writes: list = []
     real_write = task_results_mod.write_task_result
     monkeypatch.setattr(
@@ -538,7 +534,7 @@ def test_reaper_self_finalized_branch_clears_stale_disclosure(tmp_path, monkeypa
     )
     _reap("t-self-clean")
     assert writes == []
-    assert row_path.read_bytes() == row_before
+    assert result_signature(tmp_path, "t-self-clean") == row_before
 
 
 def test_retry_lineage_stops_resurrecting_cleared_run(tmp_path):

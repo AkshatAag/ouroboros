@@ -38,12 +38,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from ouroboros import obligations as o
 from ouroboros import store
 from ouroboros.store import (
-    FLAG_COLUMNS, GENERATION, GENERATION_KEY, IMPORT_LOCK_NAME, LOCK_NAME, PUBLISHED, TIER_ENFORCED, TIER_NAME,
+    GENERATION, GENERATION_KEY, IMPORT_LOCK_NAME, LOCK_NAME, PUBLISHED, TIER_ENFORCED, TIER_NAME,
     StoreLost, Txn, document_text, encode_document,
 )
 from ouroboros.task_custody import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR, own_child_drives
 from ouroboros.task_result_schema import (
-    TASK_RESULT_QUARANTINE_DIR, emit_quarantine_event, quarantine_task_result, task_result_schema_refusal,
+    TASK_RESULT_QUARANTINE_DIR, emit_quarantine_event, quarantine_task_result, stamp_task_result_schema,
+    task_result_schema_refusal,
 )
 from ouroboros.task_results import task_result_path, task_results_dir
 from ouroboros.utils import append_jsonl, atomic_write_json, machine_json, utc_now_iso, write_text_atomic
@@ -137,6 +138,7 @@ def _ensure(root: pathlib.Path, path: pathlib.Path) -> Tuple[Dict[str, Any], lis
         if phase == PUBLISHED:
             if not store.generation_stamped(root):
                 stamp(root, **{GENERATION_KEY: GENERATION})  # the stamp a crash after publication never wrote
+            _latches_into_intents(root, report.pop("latched", []))
             return {**report, "lock_tier": tier, **retiered}, quarantined
         if export.get("status") != "completed":
             return {"status": "switch_pending", "phase": phase, "lock_tier": tier, **retiered}, []  # the seam resumes it
@@ -148,11 +150,15 @@ def _ensure(root: pathlib.Path, path: pathlib.Path) -> Tuple[Dict[str, Any], lis
 
 
 def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tuple[Dict[str, Any], list]:
-    from ouroboros.startup_migrations import migrate_cancel_latches, stamp
+    from ouroboros.startup_migrations import boot_admissions, migrate_cancel_latches, stamp
 
-    migrate_cancel_latches(root)  # the first pass: the admissible latch rows are stamped before they are read
     records, baseline, quarantined, refused = _read_results(root)
     sets = _read_sets(root)
+    for name, rows in boot_admissions(root).items():  # under the set files: an interrupted publication stays a candidate
+        sets[name] = {**rows, **sets.get(name, {})}
+    custody = _custody_rows(root, records)
+    for name, rows in custody.items():
+        sets[name] = {**sets.get(name, {}), **rows} if name == "custody_open" else _merge_receipts(sets.get(name, {}), rows)
     provenance = {"status": "completed", "imported_at": utc_now_iso(), "lock_tier": tier,
                   "results": len(records), "quarantined": len(quarantined), "refused": refused,
                   "sets": {name: len(rows) for name, rows in sets.items()}}
@@ -165,8 +171,58 @@ def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tup
             tmp.unlink()
     store.fsync_directory(path.parent)
     stamp(root, **{GENERATION_KEY: GENERATION})  # after publication: a published, unstamped store is still ours
+    _latches_into_intents(root, [task_id for task_id, entry in baseline.items() if entry.get("latch_stamped")])
+    migrate_cancel_latches(root, records=[(task_id, document, "") for task_id, document in records])
     return {"status": "completed", "lock_tier": tier, "results": len(records), "quarantined": len(quarantined),
             "refused": len(refused), "sets": len(sets)}, quarantined
+
+
+def _latches_into_intents(root: pathlib.Path, latched: List[str]) -> None:
+    """The legacy latch rows this import stamped: one typed events row per import, and each
+    becomes a cancel intent (the generation watermark does not gate rows an old body wrote later)."""
+    if not latched:
+        return
+    from ouroboros.cancel_intents import migrate_legacy_cancel_latches
+
+    append_jsonl(root / "logs/events.jsonl", {"ts": utc_now_iso(), "type": "task_result_cancel_latch_admitted",
+                                              "count": len(latched), "task_ids": latched, "reason": "unstamped_pre_7_0"})
+    with store.open_store(root, write=False) as txn:
+        records = [(task_id, txn.load(task_id), "") for task_id in latched]
+    migrate_legacy_cancel_latches(root, records=[record for record in records if record[1]])
+
+
+def _custody_rows(root: pathlib.Path, records: List[Record]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """The custody half of the owner-held sets, folded ONCE from the retained event chain: the
+    open runs and pending invocations (``custody_open``) and the closing receipts still owed to a
+    result's terminal refresh (``delegated_runs``). An unreadable chain imports no custody row:
+    the sweep's own readers answer UNKNOWN for it."""
+    from ouroboros import delegate_custody as c
+    from ouroboros.delegate_custody_current import _held
+
+    try:
+        if c.custody_chain_unreadable(root):
+            return {}
+        rows = tuple(c._iter_rows(c.event_log_path(root)))
+    except Exception:
+        return {}
+    runs = c._fold_rows(rows)
+    open_rows = {f"run:{rid}": {"custody": vars(entry)} for rid, entry in runs.items() if _held(entry)}
+    for entry in c.pending_invocations(root, rows=rows):
+        open_rows[f"invocation:{entry['invocation_id']}"] = {"request": {"type": c.START_REQUESTED, **entry}}
+    owed = {task_id for task_id, document in records if document.get("delegated_runs_unreconciled")}
+    receipts: Dict[str, Dict[str, Any]] = {}
+    for rid, entry in runs.items():
+        if entry.settled and entry.task_id and entry.task_id in owed:
+            receipts.setdefault(entry.task_id, {"task_id": entry.task_id, "closed_runs": {}})["closed_runs"][rid] = vars(entry)
+    return {"custody_open": open_rows, "delegated_runs": receipts}
+
+
+def _merge_receipts(held: Dict[str, Dict[str, Any]], folded: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    merged = {task_id: dict(facts) for task_id, facts in held.items()}
+    for task_id, facts in folded.items():
+        entry = merged.setdefault(task_id, {"task_id": task_id})
+        entry["closed_runs"] = {**facts.get("closed_runs", {}), **entry.get("closed_runs", {})}
+    return merged
 
 
 def _admit(path: pathlib.Path, raw: bytes) -> Tuple[Optional[Dict[str, Any]], str, str]:
@@ -178,6 +234,11 @@ def _admit(path: pathlib.Path, raw: bytes) -> Tuple[Optional[Dict[str, Any]], st
     except ValueError:
         data = None
     refusal = task_result_schema_refusal(data)
+    if (refusal == "unstamped_pre_7_0" and isinstance(data, dict) and data.get("status") == "cancel_requested"
+            and data.get("task_id") == path.stem):
+        # The one legacy carve-out: an admissible pre-7 cancel latch is stamped on import (same
+        # status, same fields) so custody can drive it to its terminal; every other unstamped row quarantines.
+        return stamp_task_result_schema(data), "latch_stamped", "admitted"
     if refusal:  # writers are quiescent: a row the quarantine finds admissible again stays refused here
         return None, refusal, "quarantined" if quarantine_task_result(path, refusal) == "moved" else "refused"
     if str(data.get("task_id") or "") != path.stem:
@@ -190,6 +251,8 @@ def _baseline_entry(path: pathlib.Path, raw: bytes, document: Optional[Dict[str,
     entry = {"size": info.st_size, "mtime_ns": info.st_mtime_ns, "sha256": sha256_hex(raw)}
     if document is None:
         return {**entry, "refused": reason}  # remembered, so an untouched refused file stays untouched
+    if reason == "latch_stamped":
+        entry["latch_stamped"] = True
     return {**entry, "body_sha256": sha256_hex(encode_document(document).encode("utf-8"))}
 
 
@@ -242,14 +305,25 @@ def _read_results(root: pathlib.Path):
     return records, baseline, quarantined, refused
 
 
+def set_file_path(root: pathlib.Path, name: str) -> pathlib.Path:
+    """The old body's set file ``state/obligations/<name>.json``: the importer's input, the exporter's output."""
+    return pathlib.Path(root) / "state" / "obligations" / f"{name}.json"
+
+
 def _read_sets(root: pathlib.Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """Every readable obligation set file, as the old body or the exporter left it."""
-    directory = o.path(root, "nonterminal").parent
     sets: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    with o.locked(root):
-        for path in sorted(directory.glob("*.json")):
-            with contextlib.suppress(o.ObligationsUnavailable):
-                sets[path.stem] = o._read(root, path.stem)
+    try:
+        paths = sorted(set_file_path(root, "nonterminal").parent.glob("*.json"))
+    except OSError:
+        return sets
+    for path in paths:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue  # an unreadable set file imports nothing: the derived half comes from the documents
+        if isinstance(value, dict) and all(isinstance(row, dict) for row in value.values()):
+            sets[path.stem] = value
     return sets
 
 
@@ -277,7 +351,7 @@ def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Recor
         conn.executescript(store._SCHEMA)
         conn.execute(f"PRAGMA application_id = {store._APPLICATION_ID[tier]}")
         conn.execute("BEGIN IMMEDIATE")
-        txn = Txn(conn)
+        txn = Txn(conn, root)
         for task_id, document in records:
             txn.store_task(document, pending_drive=_pending_drive(root, task_id, document))
         for name, rows in sets.items():
@@ -336,6 +410,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
     now = utc_now_iso()
     quarantined: List[Dict[str, str]] = []
     refused: Dict[str, str] = {}
+    latched: List[str] = []
     conflicts: Dict[str, Any] = txn.meta("conflicts") or {}
     for task_id in changed + fresh:  # the old body was the authority while it ran: its files win
         path, raw = present[task_id]
@@ -349,11 +424,13 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
             refused[task_id] = reason
             baseline[task_id] = _baseline_entry(path, raw, None, reason)
             continue
+        if reason == "latch_stamped":
+            latched.append(task_id)
         body = txn.body_text(task_id)
         if body is not None and sha256_hex(body.encode("utf-8")) != baseline.get(task_id, {}).get("body_sha256"):
             conflicts[task_id] = {"at": now, "db_body": body, "file_sha256": sha256_hex(raw)}
         txn.store_task(document, pending_drive=_pending_drive(root, task_id, document))
-        baseline[task_id] = _baseline_entry(path, raw, document)
+        baseline[task_id] = _baseline_entry(path, raw, document, reason)
     for task_id in deleted:
         body = txn.body_text(task_id)
         if body is not None:
@@ -369,23 +446,13 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
                                        "refused": refused, "conflicts": len(conflicts)})):
         txn.set_meta(key, value)
     return {"status": "reconciled", **counts, "quarantined": len(quarantined), "refused": len(refused),
-            "conflicts": len(conflicts)}, quarantined
+            "conflicts": len(conflicts), "latched": latched}, quarantined
 
 
 def _set_rows_in_full(txn: Txn, name: str) -> Dict[str, Any]:
     """An obligation set file's content: the stored rows plus the members the flag and
     status columns derive (owner-held sets are rows only)."""
-    rows = dict(txn.set_rows(name))
-    if name in FLAG_COLUMNS:
-        derived = txn.flagged(name)
-    elif name == "nonterminal":
-        derived = [record["task_id"] for record in txn.conn.execute(
-            "SELECT task_id FROM tasks WHERE status IN ('running', 'interrupted') ORDER BY task_id")]
-    else:
-        derived = []
-    for task_id in derived:
-        rows.setdefault(task_id, o.result_facts(txn.load(task_id)))
-    return rows
+    return o.members_in(txn, name)
 
 
 def _identity(text: str) -> Dict[str, Any]:
@@ -432,12 +499,12 @@ def export_facts(root: Any) -> Dict[str, Any]:
             total += len(data)
             entries[task_id] = _baseline_entry(path, data, document)
         for name in names:
-            atomic_write_json(o.path(root, name), _set_rows_in_full(txn, name), fsync=True)
+            atomic_write_json(set_file_path(root, name), _set_rows_in_full(txn, name), fsync=True)
     for task_id in stale:
         with contextlib.suppress(FileNotFoundError):
             task_result_path(root, task_id).unlink()
     store.fsync_directory(task_results_dir(root, create=False))
-    store.fsync_directory(o.path(root, "nonterminal").parent)
+    store.fsync_directory(set_file_path(root, "nonterminal").parent)
     with store.open_store(root, write=True) as txn:  # T2: the baseline follows what was written
         refused = {task_id: entry for task_id, entry in (txn.meta("baseline") or {}).items() if entry.get("refused")}
         txn.set_meta("baseline", {**refused, **entries})

@@ -191,8 +191,7 @@ def _discharge(root: Any, witness_id: str, facts: Dict[str, Any]) -> bool:
 def _witnesses(root: Any) -> Dict[str, Dict[str, Any]]:
     from ouroboros import obligations
 
-    with obligations.locked(root):
-        return obligations._read(root, WITNESS_SET, missing_ok=True)
+    return obligations.members(root, WITNESS_SET)
 
 
 def repair_ended_local_custody(root: Any, task_ids: Iterable[str], *, root_task_id: str) -> List[Dict[str, Any]]:

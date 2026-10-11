@@ -163,10 +163,11 @@ def _materialize(root, checkpoint):
 @pytest.mark.serial
 def test_continue_refuses_when_the_default_cap_cannot_be_pinned(tmp_path, monkeypatch):
     """An unpinned choice is no choice: the Continue of an open old root (its
-    imported block disagrees on the cap) is refused, typed, while the result
-    lock is held elsewhere, and the same nonce admits and pins once it is free."""
-    from ouroboros import utils
+    imported block disagrees on the cap) is refused, typed, while the store's
+    write lock is held elsewhere, and the same nonce admits and pins once it is free."""
+    from ouroboros.store import StoreBusy
     from ouroboros.task_results import load_task_result
+    from supervisor import continuation_admission
     from supervisor.continuation_admission import admit_continuation
     from tests._budget_pause_exact_helpers import _install_queue
     from tests.test_owner_continue import NONCE
@@ -179,15 +180,15 @@ def test_continue_refuses_when_the_default_cap_cannot_be_pinned(tmp_path, monkey
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
     monkeypatch.setenv("OUROBOROS_PER_TASK_COST_USD", "20")
     _queue, _state, workers = _install_queue(root, monkeypatch)
-    update = utils.update_json_locked
+    patch = continuation_admission.patch_document
 
     def locked_out(*_args, **_kwargs):
-        raise TimeoutError("result lock held elsewhere")
+        raise StoreBusy("store write lock held elsewhere")
 
-    monkeypatch.setattr(utils, "update_json_locked", locked_out)
+    monkeypatch.setattr(continuation_admission, "patch_document", locked_out)
     assert admit_continuation("P", action_nonce=NONCE) == {"ok": False, "error": "billing_authority_unavailable"}
     assert not workers.PENDING and not load_task_result(root, "P").get("billing_group")
-    monkeypatch.setattr(utils, "update_json_locked", update)
+    monkeypatch.setattr(continuation_admission, "patch_document", patch)
     accepted = admit_continuation("P", action_nonce=NONCE)
     assert accepted["ok"] and load_task_result(root, "P")["billing_group"]["billing_group_limit_source"] == "legacy_default"
 

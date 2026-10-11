@@ -988,20 +988,22 @@ def test_storm_jobs_are_after_all_dead_jobs_and_suppress_respawns(tmp_path, monk
     W.kill_workers.assert_not_called()
 
 
-def test_malformed_child_is_unknown_not_a_paid_retry(tmp_path, monkeypatch):
+def test_unreadable_child_is_unknown_not_a_paid_retry(tmp_path, monkeypatch):
     import supervisor.queue as q
     import supervisor.workers as W
     from supervisor.worker_health import recover_confirmed_dead_worker
     from supervisor.task_reaper import TerminalFileRecoveryPending
+    from tests._store_shared import read_result, seed_result, unreadable_result
 
     job, events = _reserved_job(tmp_path, monkeypatch, child=True)
-    path = Path(job['task']['drive_root']) / 'task_results' / (job['task_id'] + '.json')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('{malformed preserved source', encoding='utf-8')
+    root = Path(job['task']['drive_root'])
+    seed_result(root, job['task_id'], {'status': 'running', 'result': 'preserved source'})
+    switch = unreadable_result(monkeypatch, job['task_id'], root=root)  # the store cannot answer for it
     monkeypatch.setattr(q, 'enqueue_task', MagicMock())
     with pytest.raises(TerminalFileRecoveryPending):
         recover_confirmed_dead_worker(job)
-    assert path.read_text(encoding='utf-8') == '{malformed preserved source'
+    switch['on'] = False
+    assert read_result(root, job['task_id'])['result'] == 'preserved source'
     assert W.RUNNING[job['task_id']] is job['meta'] and job['worker'].reaping
     assert events.empty()
     q.enqueue_task.assert_not_called()

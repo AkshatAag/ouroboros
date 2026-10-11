@@ -1020,10 +1020,10 @@ def test_data_root_is_opt_in_and_never_removed(subject_repo, tmp_path, monkeypat
     # Opt-in: the real root is READABLE through the same tools and survives a
     # FAILED episode.
     data_root = tmp_path / "data"
-    (data_root / "task_results").mkdir(parents=True)
-    (data_root / "task_results" / "t.json").write_text('{"ok": true}', encoding="utf-8")
+    (data_root / "probe").mkdir(parents=True)  # not a task result: those live in the store, not in files
+    (data_root / "probe" / "t.json").write_text('{"ok": true}', encoding="utf-8")
     llm = _ScriptedLLM([
-        {"tool_calls": [_tool_call("read_file", {"path": "task_results/t.json", "root": "runtime_data"}, "c1")]},
+        {"tool_calls": [_tool_call("read_file", {"path": "probe/t.json", "root": "runtime_data"}, "c1")]},
         {"content": _VERDICT},
     ])
     assignment = _assignment(subject_repo, llm)
@@ -1040,7 +1040,7 @@ def test_data_root_is_opt_in_and_never_removed(subject_repo, tmp_path, monkeypat
         NativeToolRoundReviewExecutor(assignment, llm=llm).execute()
     assert seen_roots[-1] == str(data_root)
     assert str(data_root) not in removed
-    assert (data_root / "task_results" / "t.json").read_text(encoding="utf-8") == '{"ok": true}'
+    assert (data_root / "probe" / "t.json").read_text(encoding="utf-8") == '{"ok": true}'
     assert any("ouro-native-review-" in path for path in removed[1:])  # the scratch still went
 
 

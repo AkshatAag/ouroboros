@@ -315,6 +315,12 @@ def custody_log_unreadable(drive_root: Any) -> bool:
             return False
         except ObligationsUnavailable:
             return True
+    return custody_chain_unreadable(drive_root)
+
+
+def custody_chain_unreadable(drive_root: Any) -> bool:
+    """The chain-only probe of ``custody_log_unreadable``: what the importer asks while it
+    folds the chain into the store (the store cannot be consulted about itself)."""
     from ouroboros.utils import JsonlChainUnreadable, jsonl_archive_segments
 
     path = event_log_path(drive_root)

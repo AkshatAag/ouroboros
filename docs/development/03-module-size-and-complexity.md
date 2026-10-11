@@ -94,8 +94,8 @@ Apply ARCHITECTURE §10 invariant 10 to current-state readers; review and growth
   `ouroboros/delegate_custody_memo.py`); the bounded filtered tail
   (`ouroboros/jsonl_tail.py`); per-archive room summaries
   (`ouroboros/gateway/history_segments.py`); summary rows kept by the writing
-  transaction (`ouroboros/usage_store.py`); the stat-invalidated memo
-  (`task_result_facts.py`); the task-event SSE v2 cursor (ARCHITECTURE §3 "Chat and
+  transaction (`ouroboros/usage_store.py`, `store.py`); indexed selects
+  (`task_store.py`); the task-event SSE v2 cursor (ARCHITECTURE §3 "Chat and
   Projects").
 
 Enforcement: CHECKLISTS item 9 `perf_lifecycle` (advisory) fires on diffs that change

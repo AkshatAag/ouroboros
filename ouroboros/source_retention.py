@@ -48,9 +48,10 @@ def retained_child_root(canonical: pathlib.Path, child: pathlib.Path, task_id: s
             return True
         # A timeout successor may occupy the original drive. Its own durable
         # result binds that occupant; a directory name alone does not.
-        row = json.loads((child / "task_results" / f"{task_id}.json").read_text(encoding="utf-8"))
+        from ouroboros.task_store import read_document
+        row = read_document(child, task_id)
         return isinstance(row, dict) and row.get("task_id") == task_id
-    except (OSError, ValueError, TypeError):
+    except Exception:
         return False
 
 
@@ -59,10 +60,11 @@ def retained_task_roots(canonical: pathlib.Path, task_id: str) -> list[pathlib.P
     root = pathlib.Path(canonical).resolve()
     candidates = [root / "state" / "headless_tasks" / task_id / "data", root / "task_drives" / task_id]
     try:
-        row = json.loads((root / "task_results" / f"{task_id}.json").read_text(encoding="utf-8"))
+        from ouroboros.task_store import read_document
+        row = read_document(root, task_id) or {}
         candidates.extend(pathlib.Path(row[key]) for key in ("child_drive_root", "headless_child_drive_root")
                           if isinstance(row.get(key), str) and row[key])
-    except (OSError, ValueError, TypeError):
+    except Exception:
         pass
     return list(dict.fromkeys(path for path in candidates if retained_child_root(root, path, task_id)))
 
@@ -169,6 +171,19 @@ def forget_retention_retry(parent, child, task_id):
     _RETENTION_LOG_FACTS.pop((key[0], key[2]), None)
 
 
+def _result_facts(parent, child, task_id):
+    """The two result rows' write signatures as observations (the role their files' stats played)."""
+    from ouroboros.task_store import signature
+
+    facts = []
+    for root in (parent, child):
+        try:
+            facts.append((f"task:{task_id}@{root}", signature(root, task_id) or ("FileNotFoundError",)))
+        except Exception as exc:
+            facts.append((f"task:{task_id}@{root}", (type(exc).__name__,)))
+    return tuple(facts)
+
+
 def _path_fact(path):
     """Cheap repair evidence includes in-place writes, not only directory changes."""
     try:
@@ -192,8 +207,7 @@ def _unavailable_basis(parent, child, task_id, result):
     unavailable, pending = promotion.get("unavailable_refs") or [], promotion.get("pending_refs") or []
     if not pending:
         return None
-    watched = {parent / "task_results" / f"{task_id}.json", child / "task_results" / f"{task_id}.json",
-               child / "observability" / "calls" / task_id}
+    watched = {child / "observability" / "calls" / task_id}
     for row in pending:
         if not isinstance(row, dict):
             return None
@@ -243,7 +257,7 @@ def _unavailable_basis(parent, child, task_id, result):
             directory = root / "observability" / "calls" / task_id
             watched.add(directory)
             watched.update(directory.glob("*.json"))
-        facts = tuple((str(path), _path_fact(path)) for path in sorted(watched))
+        facts = tuple((str(path), _path_fact(path)) for path in sorted(watched)) + _result_facts(parent, child, task_id)
     except OSError:
         return None
     if any(isinstance(fact[0], str) and fact[0] not in {"FileNotFoundError", "NotADirectoryError"}

@@ -6,6 +6,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from tests._store_shared import read_result, result_exists
 
 _TEST_SUBAGENTS = '{"enabled":true,"items":[{"subagent_id":"api-scout","name":"API scout","recommended_use":"Tests","route":{"kind":"api_model","target_id":"openai/gpt-5.6-sol"},"effort":"high"}]}'
 
@@ -24,8 +25,7 @@ class _FakeEventQueue:
         if self.fail:
             raise RuntimeError("queue unavailable")
         if self.status_root is not None:
-            path = pathlib.Path(self.status_root) / "task_results" / f"{evt['task_id']}.json"
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = read_result(self.status_root, evt["task_id"])
             assert data["status"] == "requested"
         self.events.append(dict(evt))
 
@@ -83,8 +83,7 @@ def test_schedule_task_live_emits_strict_contract_and_requested_status(tmp_path,
     assert evt["child_drive_root"] == evt["drive_root"]
     assert evt["budget_drive_root"] == str(tmp_path)
     assert evt["task_constraint"]["mode"] == "local_readonly_subagent"
-    path = tmp_path / "task_results" / f"{task_id}.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = read_result(tmp_path, task_id)
     assert data["status"] == STATUS_REQUESTED
     assert data["description"] == "Do the thing"
     assert data["expected_output"] == "A concise handoff"
@@ -514,8 +513,8 @@ def test_schedule_task_workspace_mode_inherits_context_and_enqueues(tmp_path, mo
     assert evt["workspace_root"] == str(tmp_path / "workspace")
     assert evt["budget_drive_root"] == str(budget_root)
     assert str(evt["child_drive_root"]).startswith(str(budget_root))
-    assert not (tmp_path / "task_results" / f"{task_id}.json").exists()
-    data = json.loads((budget_root / "task_results" / f"{task_id}.json").read_text(encoding="utf-8"))
+    assert not result_exists(tmp_path, task_id)
+    data = read_result(budget_root, task_id)
     assert data["budget_drive_root"] == str(budget_root)
     assert data["child_drive_root"] == evt["child_drive_root"]
 
@@ -2008,9 +2007,8 @@ def test_handle_schedule_task_admits_identical_siblings_without_semantic_veto(tm
 
     assert [task["id"] for task in enqueued] == ["sib1", "sib2", "sib3", "sib4"]
     for tid in ("sib1", "sib2", "sib3", "sib4"):
-        path = tmp_path / "task_results" / f"{tid}.json"
-        assert path.exists(), f"{tid} was not admitted"
-        data = json.loads(path.read_text(encoding="utf-8"))
+        assert result_exists(tmp_path, tid), f"{tid} was not admitted"
+        data = read_result(tmp_path, tid)
         assert data["status"] == STATUS_SCHEDULED
         assert "duplicate_of" not in data
     assert not [text for _chat, text, _kw in sent if "semantically similar" in text]
@@ -2083,7 +2081,7 @@ def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constrain
     assert task["task_constraint"]["allow_review"] is False
     assert "[EXPECTED_OUTPUT]" in task["text"]
     assert "[BEGIN_PARENT_CONTEXT" in task["text"]
-    data = json.loads((tmp_path / "task_results" / "child123.json").read_text(encoding="utf-8"))
+    data = read_result(tmp_path, "child123")
     assert data["status"] == STATUS_SCHEDULED
     assert data["expected_output"] == "Findings table"
     assert data["child_drive_root"] == task["drive_root"]
@@ -2127,7 +2125,7 @@ def test_handle_schedule_task_rejects_internal_subagent_without_child_drive_cont
         FakeCtx(),
     )
 
-    data = json.loads((tmp_path / "task_results" / "badchild.json").read_text(encoding="utf-8"))
+    data = read_result(tmp_path, "badchild")
     assert data["status"] == STATUS_FAILED
     assert "memory_mode=forked or empty" in data["result"]
     assert sent and sent[0][2]["progress_meta"]["subagent_event"] == "rejected"
@@ -2180,7 +2178,7 @@ def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeyp
 
     assert len(enqueued) == 1
     assert enqueued[0]["chat_id"] == 44
-    scheduled = json.loads((tmp_path / "task_results" / "headless1.json").read_text(encoding="utf-8"))
+    scheduled = read_result(tmp_path, "headless1")
     assert scheduled["status"] == STATUS_SCHEDULED
     assert scheduled["chat_id"] == 44
     assert sent and sent[0][0] == 44
@@ -2208,7 +2206,7 @@ def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeyp
     # headless run's progress log is read back as its benchmark trajectory.
     assert len(enqueued) == 2
     assert enqueued[1]["id"] == "headless2"
-    scheduled2 = json.loads((tmp_path / "task_results" / "headless2.json").read_text(encoding="utf-8"))
+    scheduled2 = read_result(tmp_path, "headless2")
     assert scheduled2["status"] == STATUS_SCHEDULED
     assert scheduled2["chat_id"] == 0
     assert len(sent) == 1
@@ -2251,7 +2249,7 @@ def test_handle_schedule_task_depth_rejection_writes_failed_status(tmp_path, mon
         FakeCtx(),
     )
 
-    data = json.loads((tmp_path / "task_results" / "deep1.json").read_text(encoding="utf-8"))
+    data = read_result(tmp_path, "deep1")
     assert data["status"] == STATUS_FAILED
     assert "depth limit" in data["result"]
     assert sent and "depth limit" in sent[0][1]
@@ -2281,9 +2279,7 @@ def test_configured_zero_subagent_depth_truly_disables_delegation(tmp_path, monk
     assert "depth limit (0) exceeded" in out
     assert "subtask_depth_limit" in out
     refused_id = out.split("task_id=", 1)[1].split(";", 1)[0]
-    refused = json.loads(
-        (tmp_path / "task_results" / f"{refused_id}.json").read_text(encoding="utf-8")
-    )
+    refused = read_result(tmp_path, refused_id)
     assert refused["status"] == STATUS_FAILED
     assert refused["delegation_admission"]["reason_code"] == "subtask_depth_limit"
     assert refused["depth_provenance"] == {
@@ -2329,12 +2325,12 @@ def test_configured_zero_subagent_depth_truly_disables_delegation(tmp_path, monk
         }
 
     ev_module._handle_schedule_task(_event("child-at-1", 1), FakeCtx())
-    child = json.loads((tmp_path / "task_results" / "child-at-1.json").read_text(encoding="utf-8"))
+    child = read_result(tmp_path, "child-at-1")
     assert child["status"] == STATUS_FAILED and "depth limit (0)" in child["result"]
     assert not enqueued
 
     ev_module._handle_schedule_task(_event("root-at-0", 0), FakeCtx())
-    root = json.loads((tmp_path / "task_results" / "root-at-0.json").read_text(encoding="utf-8"))
+    root = read_result(tmp_path, "root-at-0")
     assert root["status"] != STATUS_FAILED
     assert enqueued and enqueued[0]["id"] == "root-at-0"
 
@@ -2409,7 +2405,7 @@ def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, mon
     )
 
     assert enqueued == []
-    data = json.loads((tmp_path / "task_results" / "legacy123.json").read_text(encoding="utf-8"))
+    data = read_result(tmp_path, "legacy123")
     assert data["status"] == STATUS_FAILED
     assert "objective and expected_output" in data["result"]
     assert sent and "objective and expected_output" in sent[0][1]
@@ -2462,7 +2458,7 @@ def test_handle_schedule_task_queues_when_active_subagent_cap_is_full(tmp_path, 
         FakeCtx(),
     )
 
-    data = json.loads((tmp_path / "task_results" / "child999.json").read_text(encoding="utf-8"))
+    data = read_result(tmp_path, "child999")
     assert data["status"] == STATUS_SCHEDULED
     assert enqueued and enqueued[0]["id"] == "child999"
     assert sent and "queued behind active subagent cap" in sent[0][1]
@@ -2485,7 +2481,7 @@ def test_handle_schedule_task_queues_when_active_subagent_cap_is_full(tmp_path, 
         },
         FakeCtx(),
     )
-    data2 = json.loads((tmp_path / "task_results" / "child1000.json").read_text(encoding="utf-8"))
+    data2 = read_result(tmp_path, "child1000")
     assert data2["status"] == STATUS_SCHEDULED
     assert any(task["id"] == "child1000" for task in enqueued)
 
@@ -2633,7 +2629,7 @@ def test_handle_schedule_task_fails_fast_when_worker_pool_unavailable(tmp_path, 
         FakeCtx(),
     )
 
-    data = json.loads((tmp_path / "task_results" / "ghost1.json").read_text(encoding="utf-8"))
+    data = read_result(tmp_path, "ghost1")
     assert data["status"] == STATUS_FAILED
     assert data.get("reason_code") == "workers_unavailable"
 

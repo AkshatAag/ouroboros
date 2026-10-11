@@ -827,12 +827,9 @@ def _prune_delegated_snapshots() -> None:
     try:
         from ouroboros import delegate_custody as _delegate_custody
         from ouroboros import subagent_worktrees as _snap_worktrees
-        from ouroboros.obligations import REBUILD_MARK
         from supervisor.state import append_jsonl
 
-        reason = ("custody_log_unreadable" if _delegate_custody.custody_log_unreadable(DATA_DIR)
-                  else "obligations_rebuild_owed" if (DATA_DIR / "state" / "obligations" / REBUILD_MARK).exists()
-                  else "")
+        reason = "custody_log_unreadable" if _delegate_custody.custody_log_unreadable(DATA_DIR) else ""
         if reason:
             log.warning("Delegated snapshot prune SKIPPED (%s): open snapshots are unknowable (fail-closed)", reason)
             if not append_jsonl(DATA_DIR / "logs" / "events.jsonl", {

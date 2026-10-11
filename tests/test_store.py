@@ -76,16 +76,21 @@ def test_money_errors_keep_their_vocabulary_over_the_shared_core(tmp_path):
 
 # ---- the tri-state open ---------------------------------------------------------
 
-def test_a_missing_store_is_migrating_until_published_and_lost_beside_its_stamp(tmp_path):
-    from ouroboros.startup_migrations import stamp
-
+def test_a_missing_store_is_migrating_while_imported_and_lost_beside_its_stamp(tmp_path):
+    """A never-imported root is imported on first touch; inside the lifespan's import window
+    every other opener is told ``StoreMigrating`` and nothing is created for it."""
     assert store.probe(tmp_path) == ("absent", None)
-    with pytest.raises(StoreMigrating):
-        with store.open_store(tmp_path, write=False):
-            pass
-    assert not store.store_path(tmp_path).exists()  # mode=rw never creates
-    stamp(tmp_path, **{store.GENERATION_KEY: store.GENERATION})
-    assert store.generation_stamped(tmp_path)
+    with store.importing(tmp_path):
+        with pytest.raises(StoreMigrating):
+            with store.open_store(tmp_path, write=False):
+                pass
+        assert not store.store_path(tmp_path).exists()  # mode=rw never creates
+        assert store.store_ready(tmp_path) is False
+    with store.open_store(tmp_path, write=False) as txn:  # first touch: the import ran, the store is published
+        assert txn.load("absent") is None
+    assert store.probe(tmp_path)[0] == "present" and store.store_ready(tmp_path) is True
+    store.store_path(tmp_path).unlink()
+    assert store.generation_stamped(tmp_path)  # the import stamped the generation: a missing store is now LOST
     with pytest.raises(StoreLost):
         with store.open_store(tmp_path, write=True):
             pass
@@ -233,10 +238,86 @@ def test_a_straggler_after_the_retirement_is_told_retired_not_migrating(tmp_path
             pass
     with sqlite3.connect(retired) as conn:
         assert "late" not in conn.execute("SELECT body FROM task_bodies WHERE task_id='t1'").fetchone()[0]
-    retired.unlink()  # no sibling, no stamp: the plain pre-publication answer
-    with pytest.raises(StoreMigrating):
-        with store.open_store(tmp_path, write=False):
+    retired.unlink()  # no sibling, no stamp: a never-imported root again, imported on first touch
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.load("t1") is None  # the retired store's rows are not the import's input
+
+
+def test_a_first_touch_import_answers_a_nested_open_typed_instead_of_re_entering_itself(tmp_path, monkeypatch):
+    """The import holds the import lock; a store open of the same root from inside it (a reader
+    the importer's helpers reach) is told ``StoreMigrating`` rather than waiting on that lock.
+    The custody probe under current reads is such a path: it imports on first touch and answers."""
+    from ouroboros import store_import
+    from ouroboros.delegate_custody import custody_log_unreadable
+    from ouroboros.delegate_custody_current import current_reads
+
+    nested = []
+    real = store_import._custody_rows
+
+    def probing(root, records):
+        with pytest.raises(StoreMigrating):
+            with store.open_store(root, write=False):
+                pass
+        nested.append(str(root))
+        return real(root, records)
+
+    monkeypatch.setattr(store_import, "_custody_rows", probing)
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.load("absent") is None
+    assert nested == [str(tmp_path)]
+    other = tmp_path / "other"
+    other.mkdir()
+    with current_reads(other):
+        assert custody_log_unreadable(other) is False
+    assert store.probe(other)[0] == "present"
+    monkeypatch.setattr(store_import, "_read_results", lambda root: (_ for _ in ()).throw(PermissionError("dir")))
+    with pytest.raises(StoreMigrating):  # the import failing to read its inputs is typed too
+        with store.open_store(tmp_path / "third", write=True):
             pass
+    with store.open_store(tmp_path / "fourth", write=False) as txn:  # a root that does not exist: empty, nothing made
+        assert txn.load("absent") is None and txn.set_rows("custody_open") == {}
+    assert not (tmp_path / "fourth").exists()
+
+
+def test_a_concurrent_first_touch_from_another_thread_waits_for_the_import_instead_of_failing(tmp_path, monkeypatch):
+    """Only the importing thread's own nested open is typed: a second thread touching the same
+    never-imported root waits on the import lock and then reads the published store."""
+    import threading
+    from ouroboros import store_import
+    from ouroboros.utils import atomic_write_json
+
+    root = tmp_path / "shared"
+    root.mkdir()
+    atomic_write_json(root / "task_results" / "t1.json", document("t1"))
+    entered, release = threading.Event(), threading.Event()
+    real = store_import._custody_rows
+
+    def slow(root_, records):
+        entered.set()
+        assert release.wait(5)
+        return real(root_, records)
+
+    monkeypatch.setattr(store_import, "_custody_rows", slow)
+    outcomes = {}
+
+    def reader(name):
+        try:
+            with store.open_store(root, write=False) as txn:
+                outcomes[name] = txn.load("t1")["task_id"]
+        except store.StoreError as exc:
+            outcomes[name] = type(exc).__name__
+
+    first = threading.Thread(target=reader, args=("first",))
+    first.start()
+    assert entered.wait(5)  # the first thread is inside the import
+    second = threading.Thread(target=reader, args=("second",))
+    second.start()
+    second.join(0.5)
+    assert second.is_alive() and "second" not in outcomes  # waiting, not refused
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert outcomes == {"first": "t1", "second": "t1"}
 
 
 # ---- documents, typed columns, obligation rows ------------------------------------

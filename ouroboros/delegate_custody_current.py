@@ -1,10 +1,11 @@
 """Current delegated custody for bookkeeping; evidence replay stays explicit.
 
-Open runs, pending starts, undisposed patches and owned registrations live in
-``custody_open``. Closing a run also owes an addressed terminal-result refresh;
-its receipt travels in ``delegated_runs`` until that refresh lands. The existing
-reducer defines every run field. The boot/periodic sweep binds current reads so
-nested custody helpers cannot accidentally cold-fold the historical chain.
+Open runs, pending starts, undisposed patches and owned registrations are the
+owner-held rows of ``custody_open``. Closing a run also owes an addressed
+terminal-result refresh; its receipt travels in ``delegated_runs`` until that
+refresh lands. The existing reducer defines every run field. The boot/periodic
+sweep binds current reads so nested custody helpers cannot accidentally
+cold-fold the historical chain. Every publication is one store transaction.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from ouroboros import obligations as o
+from ouroboros import store
 
 _CURRENT = contextvars.ContextVar("current_custody_root", default=None)
 
@@ -51,9 +53,12 @@ def _held(entry):
                 and not entry.patch_disposed))
 
 
+def _runs(rows):
+    return {key[4:]: _decode(facts["custody"]) for key, facts in rows.items() if key.startswith("run:")}
+
+
 def state(root):
-    return {key[4:]: _decode(facts["custody"]) for key, facts in o.members(root, "custody_open").items()
-            if key.startswith("run:")}
+    return _runs(o.members(root, "custody_open"))
 
 
 def pending(root):
@@ -65,21 +70,29 @@ def pending(root):
 
 def snapshot(root):
     runs = {}
-    for facts in o.members(root, "delegated_runs").values():
+    with store.open_store(root, write=False) as txn:
+        debts, open_rows = txn.set_rows("delegated_runs"), txn.set_rows("custody_open")
+    for facts in debts.values():
         runs.update({rid: _decode(raw) for rid, raw in facts.get("closed_runs", {}).items()})
-    runs.update(state(root))
+    runs.update(_runs(open_rows))
     return {"state": runs, "pending": pending(root), "current": True}
+
+
+def _write_rows(txn, name, before, rows):
+    for key in set(before) - set(rows):
+        txn.delete_row(name, key)
+    for key, facts in rows.items():
+        if before.get(key) != facts:
+            txn.put_row(name, key, facts)
 
 
 @contextmanager
 def publication(root, event):
     """Publish before append, then merge discharge with current state after it.
 
-    The append may invoke a result writer (result lock -> obligations lock).
-    Never hold the obligations lock across that callback or await another owner.
-    A set update that fails (unreadable, contended, a disk error) never stops the row: it owes
-    a rebuild. The next start adds what the retained chain holds and the set lacks; a missed
-    discharge stays an open candidate until the reconcile sweep settles it again.
+    Both halves are one store transaction each; the append in between is the event
+    log's own write. A failure of either half is logged and leaves the row's fate to
+    the append: the next start's import folds the retained chain into what the rows lack.
     """
     from ouroboros import delegate_custody as c
 
@@ -87,28 +100,27 @@ def publication(root, event):
     kind = event["type"]
 
     def publish():
-        with o.locked(root):
-            rows = o._read(root, "custody_open", missing_ok=True)
+        with store.open_store(root, write=True) as txn:
+            rows = txn.set_rows("custody_open")
             before = dict(rows)
             # Work is addressable before its source event can be lost.
             if kind == c.START_REQUESTED and iid:
                 rows.setdefault(f"invocation:{iid}", {"request": event})
-            runs = {key[4:]: _decode(facts["custody"]) for key, facts in rows.items() if key.startswith("run:")}
+            runs = _runs(rows)
             c._apply(runs, event)
             if kind == c.STARTED and rid in runs:
                 rows[f"run:{rid}"] = {"custody": vars(runs[rid])}
-            if rows != before:
-                o._write(root, "custody_open", rows)
+            _write_rows(txn, "custody_open", before, rows)
 
     def discharge():
-        with o.locked(root):
-            rows = o._read(root, "custody_open", missing_ok=True)
+        with store.open_store(root, write=True) as txn:
+            rows = txn.set_rows("custody_open")
             before = dict(rows)
-            runs = {key[4:]: _decode(facts["custody"]) for key, facts in rows.items() if key.startswith("run:")}
+            runs = _runs(rows)
             # Even with no STARTED in the set, retained closing receipts can accept
             # later output/patch facts without reading the event chain.
-            debts = o._read(root, "delegated_runs", missing_ok=True)
-            prior_debts = {key: dict(value) for key, value in debts.items()}
+            debts = txn.set_rows("delegated_runs")
+            prior_debts = {key: deepcopy(value) for key, value in debts.items()}
             if rid and rid not in runs:
                 for facts in debts.values():
                     raw = facts.get("closed_runs", {}).get(rid)
@@ -128,17 +140,24 @@ def publication(root, event):
                     rows.pop(f"run:{run_id}", None)
             if iid and (kind == c.STARTED or (kind == c.START_FAILED and event.get("definite") is True)):
                 rows.pop(f"invocation:{iid}", None)
-            # Publish the closing receipt before dropping its open-custody member.
-            if debts != prior_debts:
-                o._write(root, "delegated_runs", debts)
-            if rows != before or not o.path(root, "custody_open").exists():
-                o._write(root, "custody_open", rows)
+            # The closing receipt and the open-custody retirement commit together.
+            _write_rows(txn, "delegated_runs", prior_debts, debts)
+            _write_rows(txn, "custody_open", before, rows)
 
-    o._bookkeeping(root, "custody", publish)
+    _attempt(root, "custody", publish)
     landed = [False]
     yield landed
     if landed[0]:
-        o._bookkeeping(root, "custody discharge", discharge)
+        _attempt(root, "custody discharge", discharge)
+
+
+def _attempt(root, what, fn):
+    try:
+        fn()
+    except store.StoreError as exc:
+        import logging
+        logging.getLogger(__name__).warning("Custody %s not recorded under %s (%s); the retained chain keeps it",
+                                            what, root, type(exc).__name__)
 
 
 def rebuild(root, *, replace=False):
@@ -147,19 +166,21 @@ def rebuild(root, *, replace=False):
     if c.custody_log_unreadable(root):
         raise o.ObligationsUnavailable("custody event chain is unreadable")
     rows = tuple(c._iter_rows(c.event_log_path(root)))
-    runs = c.replay(root, rows=rows)
+    runs = c._fold_rows(rows)
     result = {f"run:{rid}": {"custody": vars(entry)} for rid, entry in runs.items() if _held(entry)}
     for entry in c.pending_invocations(root, rows=rows):
         result[f"invocation:{entry['invocation_id']}"] = {"request": {"type": c.START_REQUESTED, **entry}}
-    with o.locked(root):
-        # Migration runs before producers. On an interrupted import, any
+    with store.open_store(root, write=True) as txn:
+        # Repair runs before producers. On an interrupted import, any
         # already-published obligations remain extra candidates.
+        before = txn.set_rows("custody_open")
         if not replace:
-            result.update(o._read(root, "custody_open", missing_ok=True))
-        o._write(root, "custody_open", result)
-        debts = o._read(root, "delegated_runs", missing_ok=True)
+            result.update(before)
+        _write_rows(txn, "custody_open", before, result)
+        debts = txn.set_rows("delegated_runs")
+        prior = {key: deepcopy(value) for key, value in debts.items()}
         for tid, facts in debts.items():
             facts["closed_runs"] = {**facts.get("closed_runs", {}), **{
                 rid: vars(entry) for rid, entry in runs.items() if entry.task_id == tid and entry.settled}}
-        o._write(root, "delegated_runs", debts)
+        _write_rows(txn, "delegated_runs", prior, debts)
     return len(result)

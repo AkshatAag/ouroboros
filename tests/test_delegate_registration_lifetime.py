@@ -1,5 +1,4 @@
 """Engine registration lifetime follows the host's continuation authority."""
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +6,7 @@ import pytest
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_continuation import bind_continuation
 from ouroboros.owner_continue import binding_sha
+from tests._store_shared import seed_result, unreadable_result
 
 
 class Gateway:
@@ -26,8 +26,8 @@ class Gateway:
 def result(root, tid, **fields):
     path = root / 'task_results' / f'{tid}.json'
     path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps({'_schema_version': 1, 'task_id': tid,
-                               'status': 'completed', **fields}), encoding='utf-8')
+    seed_result(root, tid, {'_schema_version': 1, 'task_id': tid,
+                               'status': 'completed', **fields})
 
 
 def seed(root, *, task_id='owner', root_task_id='', source='', project='project'):
@@ -168,13 +168,13 @@ def test_technically_broken_continue_successor_keeps_its_offer(tmp_path, broken)
 
 
 @pytest.mark.parametrize('authority', ['missing', 'unreadable', 'unknown_live', 'reserved'])
-def test_unknown_authority_or_reserved_owner_keeps_registration(tmp_path, authority):
+def test_unknown_authority_or_reserved_owner_keeps_registration(tmp_path, monkeypatch, authority):
     gateway = Gateway()
     row = seed(tmp_path)
     if authority != 'missing':
         result(tmp_path, 'owner')
     if authority == 'unreadable':
-        (tmp_path / 'task_results/owner.json').write_text('{', encoding='utf-8')
+        unreadable_result(monkeypatch, 'owner')
     settle(tmp_path, gateway, row)
     custody.reconcile_orphaned_runs(tmp_path, None if authority == 'unknown_live' else set(),
         gateway_factory=lambda: gateway,

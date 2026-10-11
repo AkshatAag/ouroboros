@@ -24,30 +24,28 @@ def observations(root, operation):
 
 
 @pytest.mark.parametrize("count", [1, 64, 256])
-def test_listing_counts_every_decode_even_when_status_filter_discards(tmp_path, count):
+def test_listing_decodes_only_the_rows_the_status_prefilter_selects(tmp_path, count):
     for index in range(count):
         write_task_result(tmp_path, f"task-{index}", "completed")
     assert list_task_results(tmp_path, statuses=["running"]) == []
     first = observations(tmp_path, "list_task_results")[-1]
-    assert first["operations"] == {"directory_scans": 1, "entries": count, "decode_attempts": count}
+    assert first["operations"] == {"rows": 0}  # the WHERE discards before any body is decoded
     assert first["calls"] == 1 and first["seconds"] >= 0 and not first["failed"]
-    assert first["caller"].endswith(":test_listing_counts_every_decode_even_when_status_filter_discards")
+    assert first["caller"].endswith(":test_listing_decodes_only_the_rows_the_status_prefilter_selects")
     assert len(list_task_results(tmp_path)) == count
-    assert len(observations(tmp_path, "list_task_results")) == 2
+    full = observations(tmp_path, "list_task_results")
+    assert len(full) == 2 and full[-1]["operations"] == {"rows": count}
 
 
-def test_child_lookup_measures_cold_and_warm_selection_phases(tmp_path):
+def test_child_lookup_selects_only_the_lineage_rows_on_every_call(tmp_path):
     for index in range(32):
         write_task_result(tmp_path, f"task-{index}", "completed", delegation_role="subagent",
                           parent_task_id="parent" if index == 0 else "other", root_task_id="parent" if index == 0 else "other")
     for _ in range(2):
         assert [row["task_id"] for row in find_child_tasks(tmp_path, parent_task_id="parent", materialize_artifacts=False)] == ["task-0"]
-    cold, warm = observations(tmp_path, "find_child_tasks")
-    assert cold["operations"]["fact_decodes"] == 32
-    assert warm["operations"].get("fact_decodes", 0) == 0
-    for row in (cold, warm):
-        assert row["operations"]["fact_entries"] == 32
-        assert row["operations"]["selected_decodes"] == 1
+    first, second = observations(tmp_path, "find_child_tasks")
+    for row in (first, second):  # no cold/warm memo: the indexed WHERE selects the one row each time
+        assert row["operations"] == {"selected_rows": 1}
         assert set(row["phases"]) == {"select", "effective", "queue_overlay"}
         assert all(phase["calls"] == 1 and phase["seconds"] >= 0 for phase in row["phases"].values())
 
@@ -69,7 +67,7 @@ def test_failure_is_counted_without_changing_exception_and_next_call_is_clean(tm
     with monkeypatch.context() as broken:
         def refuse(*args, **kwargs):
             raise OSError("fixture unreadable")
-        broken.setattr(task_results, "read_json_dict", refuse)
+        broken.setattr(task_results, "list_documents", refuse)
         with pytest.raises(OSError, match="fixture unreadable"):
             list_task_results(tmp_path)
     assert observations(tmp_path, "list_task_results")[-1]["failed"]
@@ -98,4 +96,4 @@ def test_observing_another_root_does_not_write_into_it(tmp_path, existing_journa
              for path in inspected.rglob("*") if path.is_file()}
     assert after == before
     row = observations(tmp_path, "list_task_results")[-1]
-    assert row["calls"] == 1 and row["operations"]["decode_attempts"] == 1
+    assert row["calls"] == 1 and row["operations"]["rows"] == 1

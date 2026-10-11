@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._store_shared import unreadable_result
 
 pytestmark = pytest.mark.serial
 
@@ -64,7 +65,7 @@ def test_real_local_return_and_registry_predispatch_refusals_settle(tmp_path):
 
 def test_registry_and_predispatch_wait_disclose_unreadable_pause_authority(tmp_path, monkeypatch):
     from ouroboros.model_wait import TaskModelWait
-    from ouroboros.task_results import write_task_result, task_result_path
+    from ouroboros.task_results import write_task_result
     from ouroboros.tools.registry import ToolRegistry
     from ouroboros.owner_pause import install_fence
 
@@ -78,7 +79,7 @@ def test_registry_and_predispatch_wait_disclose_unreadable_pause_authority(tmp_p
     known = registry.execute_result("knowledge_read", {"topic": "x"})
     assert known.meta["control_reason"] == wait.pre_dispatch_pause() == "owner_pause"
     assert "the owner paused" in known.text
-    task_result_path(tmp_path, "root").write_text('{"broken":', encoding="utf-8")
+    unreadable_result(monkeypatch, "root")
     unknown = registry.execute_result("knowledge_read", {"topic": "x"})
     assert unknown.meta["control_reason"] == wait.pre_dispatch_pause() == "owner_pause_authority_unreadable"
     assert "could not be read" in unknown.text and "the owner paused" not in unknown.text

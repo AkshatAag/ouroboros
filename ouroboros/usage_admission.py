@@ -32,6 +32,7 @@ import math
 import pathlib
 from dataclasses import replace
 from typing import Any, Dict, Optional, Sequence
+from ouroboros.task_store import patch_document
 
 log = logging.getLogger(__name__)
 
@@ -127,8 +128,8 @@ def task_billing_fields(task: Dict[str, Any], root_task_id: str, root_limit: Opt
     occurrences derive the initial binding here but persist it atomically with
     their canonical frozen receipt (persist_initial=False).
     """
-    from ouroboros.task_results import load_task_result, task_result_path, stamp_task_result_schema
-    from ouroboros.utils import update_json_locked, utc_now_iso
+    from ouroboros.task_results import load_task_result, stamp_task_result_schema
+    from ouroboros.utils import utc_now_iso
 
     unavailable = {"root_limit_usd": root_limit,
                    "billing_group_id": UNAVAILABLE_GROUP_PREFIX + root_task_id,
@@ -200,7 +201,7 @@ def task_billing_fields(task: Dict[str, Any], root_task_id: str, root_limit: Opt
                 return stamp_task_result_schema({"task_id": root_task_id, "status": "requested", **current,
                                                  "billing_group": binding})
             if persist_initial:
-                update_json_locked(task_result_path(pathlib.Path(budget_root), root_task_id), pin,
+                patch_document(pathlib.Path(budget_root), root_task_id, pin,
                                    strict_existing_dict=True)
         if binding:
             if not isinstance(binding, dict) or not binding.get("billing_group_id") or "billing_group_limit_usd" not in binding:

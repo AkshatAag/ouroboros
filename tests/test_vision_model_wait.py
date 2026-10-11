@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests._store_shared import read_result
 
 pytestmark = pytest.mark.serial
 
@@ -363,6 +364,6 @@ def test_real_parent_quota_controller_polls_metadata_then_rejoins_image_call(chi
     assert text == "pixels read exactly once 🐍" and catalog_calls == [("fixture", None)]
     assert resolutions == [MODEL] and phases == ["started", "finished"]
     assert len([row for row in _events(events) if row["kind"] == "upload"]) == 2
-    persisted = json.loads((root / "task_results" / "image-task.json").read_text())
+    persisted = read_result(root, "image-task")
     wait, = persisted["model_waits"].values()
     assert wait["state"] == "resolved" and wait["resolution"] == "resource_available"

@@ -729,7 +729,11 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # ``state/switch_progress.json`` (``ouroboros/store_switch.py``; three section-2 rows).
 # 359 -> 360 (storage on SQLite, S1): the queue liveness stamp ``state/queue.alive`` published after the
 # structural queue files (``supervisor/queue_snapshot.py``; the queue-snapshot row).
-EXPECTED_SCAN_PATHS = 360
+# 360 -> 358 (storage on SQLite, S3): the obligation sets' lock ``state/obligations.lock`` and rebuild
+# mark ``state/obligations/rebuild.owed`` are gone (flag columns of ``state/current.sqlite``); the
+# result bodies ``task_results/*.json`` are the importer's and exporter's alone, so the scan now names
+# the launch lock and the quarantine files specifically (same rows).
+EXPECTED_SCAN_PATHS = 358
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
