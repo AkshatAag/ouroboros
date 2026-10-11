@@ -397,18 +397,24 @@ def test_update_task_round_trips_the_document_and_projects_the_typed_columns(tmp
         assert txn.row("t1", "has_pause_notices") == 1 and txn.row("t1", "owes_synthesis") == 0
 
 
-def test_riders_share_the_write_transaction(tmp_path):
+def test_task_and_custody_share_the_write_transaction(tmp_path):
     publish(tmp_path, document("t1"))
 
-    def rider(txn, current, updated):
+    def write(n, boom=False):
+        with store.open_store(tmp_path, write=True) as txn:
+            updated = {**txn.load("t1"), "n": n, "boom": boom}
+            txn.store_task(updated)
+            rider(txn, updated)
+
+    def rider(txn, updated):
         txn.conn.execute("INSERT INTO custody_runs (run_id, task_id, state, facts) VALUES (?, ?, ?, ?)",
                          (f"run{updated['n']}", updated["task_id"], "started", "{}"))
         if updated.get("boom"):
             raise RuntimeError("the rider refused")
 
-    store.update_task(tmp_path, "t1", lambda current: {**current, "n": 1}, riders=(rider,))
+    write(1)
     with pytest.raises(RuntimeError, match="the rider refused"):  # the rider's own exception, not a constraint's
-        store.update_task(tmp_path, "t1", lambda current: {**current, "n": 2, "boom": True}, riders=(rider,))
+        write(2, boom=True)
     with store.open_store(tmp_path, write=False) as txn:
         assert txn.load("t1")["n"] == 1  # the refused transaction rolled back whole
         assert [r["run_id"] for r in txn.conn.execute("SELECT run_id FROM custody_runs")] == ["run1"]  # run2 with it

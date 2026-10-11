@@ -347,7 +347,7 @@ def _billing_group(q: Any, predecessor: str, result: Dict[str, Any]) -> Dict[str
 
     if result.get("status"):  # a recorded predecessor: the choice becomes its durable binding, or nothing is admitted
         try:
-            patch_document(q.DRIVE_ROOT, group, pin, strict_existing_dict=True)
+            patch_document(q.DRIVE_ROOT, group, pin)
         except (OSError, ValueError, TimeoutError, StoreError) as exc:
             # An unpinned choice would let the predecessor's own later work follow a changed
             # setting instead of the successor's ceiling: refuse now; the same nonce retries.

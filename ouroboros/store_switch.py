@@ -4,9 +4,9 @@ A door that moves the checkout to a tree WITHOUT the store (UI Rollback, the aut
 boot-smoke rollback, an Update replace to an older official ref, the agent's rollback
 through the UI door) records an intent (``record_switch_intent``, one decision for every
 door: ``switch_or_reset``) instead of switching at once; the restart exit, after every
-worker is dead (``store_boot.switch_at_restart`` from ``server._check_restart``), runs
+worker is dead (``switch_at_restart`` from ``server._check_restart``), runs
 ``run_switch_seam``; a boot that finds a pending intent resumes it first
-(``store_boot.start`` -> ``resume_pending_switch``):
+(``start`` -> ``resume_pending_switch``):
 
 preflight (nothing moves on failure; a refusal is a normal restart on the current code
 plus a reason for the owner) -> phase ``exporting`` in every store -> facts
@@ -22,21 +22,31 @@ tells the owner the switch did not happen. An unconfirmed stop of a writer refus
 switch, never hangs. The switch receipt (``meta`` and ``state/switch_receipt.json``)
 records every completed step and the files it wrote or retired; abandonment after a
 partial export restores BOTH authorities.
+
+Boot opens the import window on the calling thread before HTTP starts. One thread
+resumes a pending switch, requesting restart if switched, otherwise imports in service
+mode. Only publication closes the window; failures and switches keep writes migrating
+and task reads at 503 for the process lifetime. Supervisor/recovery require publication;
+providerless steps run after publication or are dropped. The restart door shares the
+kill census that body_adoption.arm uses; it refuses any unconfirmed stop.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import shutil
 import subprocess
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+import threading
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ouroboros import evidence_packs, store, store_import, usage_store
-from ouroboros.store import EXPORTING, GENERATION_KEY, PUBLISHED, RETIRED
-from ouroboros.store_import import supervisor_row, utc_stamp as _stamp
+from ouroboros.store import EXPORTING, GENERATION_KEY, PUBLISHED, RETIRED, supervisor_row, utc_stamp as _stamp
 from ouroboros.usage_ledger import LEDGER_REL, UsageAccountingError
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+
+log = logging.getLogger(__name__)
 
 INTENT_REL = pathlib.Path("state/switch_intent.json")
 RECEIPT_REL = pathlib.Path("state/switch_receipt.json")
@@ -123,10 +133,8 @@ def next_engine_pin(repo_dir: Any, target_sha: str):
 
 
 def switching_owner(door: str) -> Owner:
-    """Exactly the call the door makes today (every rescue, verification and handoff stays),
-    bound to the intent: the rollback doors carry the intent's reason; the update doors first
-    check that the managed update record they act on names the intent's target and refuse
-    without moving anything otherwise. The seam verifies HEAD after any owner returns."""
+    """The door's original owner, preserving rescue/verification/handoff and the intent's reason.
+    Update doors refuse a managed record naming another target; the seam verifies HEAD."""
     if door in {"ui_rollback", "vcs_rollback"}:
         from supervisor.update_recovery import rollback_to_version
 
@@ -202,11 +210,13 @@ def _money_refusal(root: pathlib.Path, receipt: Dict[str, Any]) -> str:
     """The money exporter's own refusals, checked before anything moves (``usage_store.export_refusal``):
     a completed step whose journal is intact needs nothing; an interrupted one resumes."""
     step = receipt["steps"].get("money") or {}
-    if step.get("status") == "completed" and usage_store._sha256_file(root / LEDGER_REL) == step["journal"]["sha256"]:
-        return ""
-    if _nothing_to_export(root):
+    if _money_done(root, step) or _nothing_to_export(root):
         return ""
     return usage_store.export_refusal(root, resume=step.get("status") in {"started", "completed"})
+
+
+def _money_done(root: pathlib.Path, step: Dict[str, Any]) -> bool:
+    return step.get("status") == "completed" and usage_store._sha256_file(root / LEDGER_REL) == step["journal"]["sha256"]
 
 
 def _nothing_to_export(root: pathlib.Path) -> bool:
@@ -247,7 +257,7 @@ def _export_money(root: pathlib.Path, receipt: Dict[str, Any]) -> Dict[str, Any]
     is skipped; an interrupted step resumes through the store's own export mark (its journal
     recognised by the mark's digest, a landed rename completed from the retired copy)."""
     step = receipt["steps"].get("money") or {}
-    if step.get("status") == "completed" and usage_store._sha256_file(root / LEDGER_REL) == step["journal"]["sha256"]:
+    if _money_done(root, step):
         return step
     if _nothing_to_export(root):
         return {"status": "nothing_to_export", "completed_at": utc_now_iso()}
@@ -400,3 +410,163 @@ def resume_pending_switch(root: Any, *, repo_dir: Any, owner: Optional[Owner] = 
         return {"status": "switch_not_performed", "message": "the export completed but the switch did not run; "
                                                              "the current code stays, press the door again"}
     return {"status": "nothing_pending"}
+
+
+_GUARD = threading.Lock()
+_BOOTS: Dict[str, "_Boot"] = {}
+
+
+class _Boot:
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.outcome: Dict[str, Any] = {"status": "importing"}
+        self.steps: List[Callable[[], Any]] = []
+
+    @property
+    def published(self) -> bool:
+        return self.outcome.get("status") == "published"
+
+
+def start(root: Any, *, repo_dir: Any, request_restart: Callable[[], Any]) -> Dict[str, Any]:
+    """Open the import window and hand ROOT to its one import owner (a thread): the pending
+    switch, then the import, off the ready path. Returns ``{"status": "importing"}``; the
+    outcome is ``wait_ready``'s."""
+    root = pathlib.Path(root)
+    boot = _Boot()
+    store.begin_import(root)  # before the thread exists: no door finds the root idle in between
+    with _GUARD:
+        _BOOTS[str(root)] = boot
+    threading.Thread(target=_run, args=(root, repo_dir, boot, request_restart),
+                     daemon=True, name="current-store-import").start()
+    return {"status": "importing"}
+
+
+def _run(root: pathlib.Path, repo_dir: Any, boot: _Boot, request_restart: Callable[[], Any]) -> None:
+    from ouroboros.delegate_custody_current import flush_outbox
+    from ouroboros.startup_migrations import prepare_startup_state
+
+    outcome: Dict[str, Any] = {"status": "failed"}
+    try:
+        with store.service_thread():  # the owner's own writes pass the gate; every other thread's wait
+            resumed = _resume(root, repo_dir)
+            if resumed["status"] == "switched":
+                outcome = resumed  # the window stays open: nothing is imported into a retired store
+            else:
+                report = prepare_startup_state(root, repo_dir=repo_dir, strict=False)
+                outcome = {"status": "published" if store.published(root) else str(report.get("status") or "unavailable"),
+                           "report": report}
+                if outcome["status"] == "published":
+                    flush_outbox(root)  # a custody event committed before a death reaches its chain at the next boot
+                    store.end_import(root)  # publication: the doors open, the waiting steps run
+    except Exception as exc:
+        log.critical("Boot import of the current-facts store raised; the doors answer migrating until the next boot",
+                     exc_info=True)
+        outcome = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+    with _GUARD:
+        boot.outcome = outcome
+        boot.done.set()
+        steps, boot.steps = boot.steps, []
+    if resumed_switched := outcome["status"] == "switched":
+        request_restart()  # the switched tree's own code runs next
+    if not boot.published:
+        log.critical("The current-facts store is not published after boot (%s); %d waiting step(s) dropped%s",
+                     outcome["status"], len(steps), ": the restart was requested" if resumed_switched else "")
+        return
+    while True:
+        for step in steps:
+            _step(step)
+        with _GUARD:
+            steps, boot.steps = boot.steps, []
+            if not steps:
+                return
+
+
+def _resume(root: pathlib.Path, repo_dir: Any) -> Dict[str, Any]:
+    try:
+        resumed = resume_pending_switch(
+            root, repo_dir=repo_dir, restore_handles=evidence_packs.restore_checkpoint_handles)
+    except Exception as exc:
+        log.critical("Pending authority switch could not be resumed at boot; the intent waits", exc_info=True)
+        resumed = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    if resumed["status"] != "nothing_pending":
+        log.warning("Authority switch at boot: %s", resumed)
+    return resumed
+
+
+def _step(step: Callable[[], Any]) -> None:
+    try:
+        step()
+    except Exception:
+        log.critical("A step waiting on the store's publication failed", exc_info=True)
+
+
+def wait_ready(root: Any, timeout: Optional[float] = None) -> Dict[str, Any]:
+    """Join the boot import of ROOT (at once when none was started here); its outcome."""
+    with _GUARD:
+        boot = _BOOTS.get(str(pathlib.Path(root)))
+    if boot is None:
+        return {"status": "not_started"}
+    boot.done.wait(timeout)
+    return dict(boot.outcome)
+
+
+def require_published(root: Any) -> Dict[str, Any]:
+    """Join the boot import of ROOT and raise ``StoreMigrating`` unless it published (a root no
+    boot imported here passes): the supervisor's startup phase and the startup recovery."""
+    outcome = wait_ready(root)
+    if outcome.get("status") not in ("published", "not_started"):
+        raise store.StoreMigrating(f"current store not published at boot: {outcome.get('status')}")
+    return outcome
+
+
+def when_ready(root: Any, *steps: Callable[[], Any]) -> None:
+    """Run ``steps`` in order once ROOT's boot import has published (on its thread), or now
+    when none runs here: the providerless door's recovery and readiness. A boot that did not
+    publish drops them (the process stays not ready)."""
+    with _GUARD:
+        boot = _BOOTS.get(str(pathlib.Path(root)))
+        if boot is not None and not boot.done.is_set():
+            boot.steps.extend(steps)
+            return
+    if boot is not None and not boot.published:
+        log.critical("%d step(s) dropped: the current-facts store is not published (%s)", len(steps), boot.outcome.get("status"))
+        return
+    for step in steps:
+        _step(step)
+
+
+def switch_at_restart(root: Any, repo_dir: Any, cleanup: Any) -> Dict[str, Any]:
+    """The seam at the restart exit. ``cleanup`` is ``server._emergency_process_cleanup``'s
+    census: ``worker_exits`` the pool's kill census (``supervisor.workers.last_worker_exit_census``),
+    ``live_children`` the handles still alive after it, ``owned_stop`` ``stop_owned_work``'s
+    outcome; an unconfirmed stop in any of them (a missing census included) is a blocker the
+    seam refuses on, never a wait. Never raises."""
+    root = pathlib.Path(root)
+    owner = None
+    if read_switch_intent(root) is None:
+        head = rev_parse(repo_dir, "HEAD")
+        if not head or not switch_needs(repo_dir, head)["facts"]:
+            return {"status": "no_intent"}
+        # T2: the checked-out tree already lacks the store (the agent's vcs_revert, a manual
+        # checkout) and no door recorded the switch: the export runs before this exit with HEAD
+        # as the target; nothing resets a second time.
+        record_switch_intent(root, target_sha=head, target_ref="HEAD", door="vcs_rollback",
+                                          reason="the checked-out tree already lacks the store")
+        owner = lambda intent: (True, "the checkout already is the target")  # noqa: E731
+    wait_ready(root)  # a boot-smoke rollback can arrive while this process still imports: the export reads a published store
+    facts = cleanup if isinstance(cleanup, dict) else {}
+    stop = facts.get("owned_stop") if isinstance(facts.get("owned_stop"), dict) else {}
+    census = facts.get("worker_exits") if isinstance(facts.get("worker_exits"), dict) else None
+    blockers = [name for name, blocked in (
+        ("worker_exits_unconfirmed", census is None or bool(census.get("unconfirmed"))),
+        ("child_processes_alive", bool(facts.get("live_children"))),
+        ("owned_work_unconfirmed", stop.get("state") != "completed" or bool(stop.get("unconfirmed"))),
+    ) if blocked]
+    try:
+        outcome = run_switch_seam(root, repo_dir=repo_dir, owner=owner, blockers=blockers,
+                                               restore_handles=evidence_packs.restore_checkpoint_handles)
+    except Exception as exc:
+        log.critical("Authority switch at the restart exit raised; the intent waits for the next boot", exc_info=True)
+        outcome = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    log.warning("Authority switch at the restart exit: %s", outcome)
+    return outcome

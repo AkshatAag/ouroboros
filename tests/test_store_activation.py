@@ -1,6 +1,6 @@
 """The cutover (S3 activation): ``store.migrating`` as the write doors' predicate, the four
 gateway doors answering 503 ``migrating`` inside the boot import window and proceeding outside
-it, the boot door (``store_boot``: a pending switch first, the import owner off the ready
+it, the boot door (``store_switch``: a pending switch first, the import owner off the ready
 path, readiness after publication), the seam at the restart exit on the kill census, and the
 rollback doors that record an authority switch for a store-less target instead of resetting
 (UI Rollback, the agent's ``vcs_rollback`` through the button's procedure, the boot-smoke
@@ -18,7 +18,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ouroboros import store, store_boot, store_switch
+from ouroboros import store, store_switch
 from ouroboros.store import StoreMigrating
 from ouroboros.store_import import ensure_current_store
 from ouroboros.task_results import write_task_result
@@ -216,23 +216,23 @@ def test_boot_imports_off_the_ready_path_and_runs_the_waiting_steps_after_public
 
     monkeypatch.setattr(startup_migrations, "prepare_startup_state", slow_prepare)
     restarts, steps = [], []
-    outcome = store_boot.start(root, repo_dir=REPO, request_restart=lambda: restarts.append(1))
+    outcome = store_switch.start(root, repo_dir=REPO, request_restart=lambda: restarts.append(1))
     assert outcome == {"status": "importing"}
     assert store.migrating(root) is True  # the window opened before the thread: no idle gap for a door
     assert entered.wait(10)
     assert store.migrating(root) is True  # every write door answers typed while the owner runs
-    store_boot.when_ready(root, lambda: steps.append("recovery"), lambda: steps.append("ready"))
+    store_switch.when_ready(root, lambda: steps.append("recovery"), lambda: steps.append("ready"))
     assert steps == []  # not before publication
     release.set()
-    ready = store_boot.wait_ready(root, timeout=30)
+    ready = store_switch.wait_ready(root, timeout=30)
     assert ready["status"] == "published", ready
     deadline = time.monotonic() + 10
     while steps != ["recovery", "ready"] and time.monotonic() < deadline:
         time.sleep(0.01)
     assert steps == ["recovery", "ready"]  # in order, on the import thread, after publication
     assert store.migrating(root) is False and store.store_ready(root) is True and restarts == []
-    assert store_boot.require_published(root)["status"] == "published"
-    store_boot.when_ready(root, lambda: steps.append("late"))
+    assert store_switch.require_published(root)["status"] == "published"
+    store_switch.when_ready(root, lambda: steps.append("late"))
     assert steps[-1] == "late"  # after publication a step runs at once
 
 
@@ -247,14 +247,14 @@ def test_a_failed_boot_import_leaves_the_root_not_ready_and_no_request_re_import
     monkeypatch.setattr(startup_migrations, "prepare_startup_state",
                         lambda *a, **kw: (_ for _ in ()).throw(OSError(24, "EMFILE while folding")))
     restarts, steps = [], []
-    assert store_boot.start(root, repo_dir=REPO, request_restart=lambda: restarts.append(1)) == {"status": "importing"}
-    store_boot.when_ready(root, lambda: steps.append("recovery"), lambda: steps.append("ready"))
-    outcome = store_boot.wait_ready(root, timeout=30)
+    assert store_switch.start(root, repo_dir=REPO, request_restart=lambda: restarts.append(1)) == {"status": "importing"}
+    store_switch.when_ready(root, lambda: steps.append("recovery"), lambda: steps.append("ready"))
+    outcome = store_switch.wait_ready(root, timeout=30)
     assert outcome["status"] == "failed" and "EMFILE" in outcome["error"] and restarts == []
     assert store.migrating(root) is True and store.store_ready(root) is False and store.probe(root)[0] == "absent"
     with pytest.raises(StoreMigrating):
-        store_boot.require_published(root)
-    store_boot.when_ready(root, lambda: steps.append("late"))
+        store_switch.require_published(root)
+    store_switch.when_ready(root, lambda: steps.append("late"))
     assert steps == []  # dropped before and after done: readiness follows publication only
     from ouroboros.gateway import tasks
 
@@ -274,14 +274,14 @@ def test_a_failed_boot_import_leaves_the_root_not_ready_and_no_request_re_import
 
 
 def test_boot_wait_ready_without_a_boot_answers_at_once(tmp_path):
-    assert store_boot.wait_ready(tmp_path / "never", timeout=0.01) == {"status": "not_started"}
+    assert store_switch.wait_ready(tmp_path / "never", timeout=0.01) == {"status": "not_started"}
 
 
 def test_startup_recovery_waits_for_the_publication_before_its_first_write(tmp_path, monkeypatch):
     from ouroboros import server_maintenance
 
     order = []
-    monkeypatch.setattr(store_boot, "wait_ready", lambda root, timeout=None: order.append(("wait", root)) or {"status": "published"})
+    monkeypatch.setattr(store_switch, "wait_ready", lambda root, timeout=None: order.append(("wait", root)) or {"status": "published"})
     monkeypatch.setattr(server_maintenance, "_startup_live_task_ids",
                         lambda root, **kw: order.append(("read", root)) or (_ for _ in ()).throw(RuntimeError("stop here")))
     report = server_maintenance._run_startup_task_recovery(tmp_path, REPO, skip_live_data=False, prior_worker_pids=set())
@@ -289,7 +289,7 @@ def test_startup_recovery_waits_for_the_publication_before_its_first_write(tmp_p
     assert report["errors"] == ["startup_ownership_unconfirmed: RuntimeError"]
     assert server_maintenance._run_startup_task_recovery(tmp_path, REPO, skip_live_data=True)["errors"] == []
     assert order == [("wait", tmp_path), ("read", tmp_path)]  # the skipped live-data path waits on nothing
-    monkeypatch.setattr(store_boot, "wait_ready", lambda root, timeout=None: {"status": "failed", "error": "x"})
+    monkeypatch.setattr(store_switch, "wait_ready", lambda root, timeout=None: {"status": "failed", "error": "x"})
     report = server_maintenance._run_startup_task_recovery(tmp_path, REPO, skip_live_data=False, prior_worker_pids=set())
     assert report["errors"] == ["store_not_published"] and order[-1] == ("read", tmp_path)  # deferred: no read, no write
 
@@ -304,16 +304,17 @@ def test_boot_with_a_pending_intent_switches_on_the_import_thread_and_keeps_the_
     ensure_current_store(root)
     store_switch.record_switch_intent(root, target_sha=old, target_ref="v-old", reason="test", door="ui_rollback")
     owner, restarts, steps = Owner(repo), [], []
-    assert store_boot.start(root, repo_dir=repo, request_restart=lambda: restarts.append(1), owner=owner) == {"status": "importing"}
-    store_boot.when_ready(root, lambda: steps.append("ready"))
-    outcome = store_boot.wait_ready(root, timeout=60)
+    monkeypatch.setattr(store_switch, "switching_owner", lambda *_: owner)
+    assert store_switch.start(root, repo_dir=repo, request_restart=lambda: restarts.append(1)) == {"status": "importing"}
+    store_switch.when_ready(root, lambda: steps.append("ready"))
+    outcome = store_switch.wait_ready(root, timeout=60)
     assert outcome["status"] == "switched" and restarts == [1] and len(owner.calls) == 1 and steps == []
     assert git(repo, "rev-parse", "HEAD") == old
     assert store_switch.read_switch_intent(root) is None
     assert store.probe(root)[0] == "absent"  # retired aside; the old body reads the exported files
     assert store.migrating(root) is True  # the window is kept: no door writes into the retired store's root
     with pytest.raises(StoreMigrating):
-        store_boot.require_published(root)
+        store_switch.require_published(root)
     store.end_import(root)
 
 
@@ -352,7 +353,7 @@ def test_restart_census_refuses_a_packer_exit_until_confirmed(tmp_path, monkeypa
     monkeypatch.setattr(store_switch, "rev_parse", lambda *a: "example-target")
     monkeypatch.setattr(store_switch, "switching_owner", lambda *_: lambda intent: (switches.append(intent) or True, "switched"))
     store_switch.record_switch_intent(root, target_sha="example-target", target_ref="example", reason="test", door="ui_rollback")
-    outcome = store_boot.switch_at_restart(root, root, cleanup)
+    outcome = store_switch.switch_at_restart(root, root, cleanup)
     if alive:
         assert outcome["status"] == "refused" and outcome["reason"] == "quiescence_unconfirmed"
         assert switches == []
@@ -404,16 +405,16 @@ def test_switch_doors_pass_restore_callback_and_restore_before_switch(tmp_path, 
     monkeypatch.setattr(store_switch, name, seam)
     monkeypatch.setattr(store_switch, "switching_owner", lambda *_: owner)
     if door == "boot":
-        assert store_boot.start(root, repo_dir=root, request_restart=lambda: None, owner=owner) == {"status": "importing"}
-        outcome = store_boot.wait_ready(root, timeout=60)
+        assert store_switch.start(root, repo_dir=root, request_restart=lambda: None) == {"status": "importing"}
+        outcome = store_switch.wait_ready(root, timeout=60)
         store.end_import(root)
     else:
-        outcome = store_boot.switch_at_restart(root, root, _census())
+        outcome = store_switch.switch_at_restart(root, root, _census())
     assert outcome["status"] == "switched" and len(calls) == 1
 
 
 def test_switch_at_restart_without_an_intent_is_a_no_op(tmp_path):
-    assert store_boot.switch_at_restart(tmp_path / "data", REPO, _census()) == {"status": "no_intent"}
+    assert store_switch.switch_at_restart(tmp_path / "data", REPO, _census()) == {"status": "no_intent"}
 
 
 def test_a_tree_that_already_lost_the_store_exports_at_the_restart_exit_without_a_second_reset(tmp_path, monkeypatch, target_repo):
@@ -426,7 +427,7 @@ def test_a_tree_that_already_lost_the_store_exports_at_the_restart_exit_without_
     root = fixture_root(tmp_path)
     ensure_current_store(root)
     monkeypatch.setattr(store_switch, "switching_owner", lambda door: pytest.fail("nothing may reset a second time"))
-    outcome = store_boot.switch_at_restart(root, repo, _census())
+    outcome = store_switch.switch_at_restart(root, repo, _census())
     assert outcome["status"] == "switched" and outcome["exit"] == 42, outcome
     assert git(repo, "rev-parse", "HEAD") == old and store.probe(root)[0] == "absent"
     assert (root / "task_results" / "root1.json").exists() and store_switch.read_switch_intent(root) is None
@@ -448,7 +449,7 @@ def test_switch_at_restart_refuses_on_an_unconfirmed_stop_and_moves_nothing(tmp_
     ensure_current_store(root)
     store_switch.record_switch_intent(root, target_sha=old, target_ref="v-old", reason="test", door="ui_rollback")
     monkeypatch.setattr(store_switch, "switching_owner", lambda door: pytest.fail("nothing may switch"))
-    outcome = store_boot.switch_at_restart(root, repo, cleanup)
+    outcome = store_switch.switch_at_restart(root, repo, cleanup)
     assert outcome["status"] == "refused" and outcome["reason"] == "quiescence_unconfirmed"
     assert blocker in outcome["blockers"]
     assert git(repo, "rev-parse", "HEAD") == new and store.probe(root)[0] == "present"
@@ -463,7 +464,7 @@ def test_switch_at_restart_on_a_clean_census_exports_and_switches_through_the_do
     store_switch.record_switch_intent(root, target_sha=old, target_ref="v-old", reason="test", door="ui_rollback")
     owner = Owner(repo)
     monkeypatch.setattr(store_switch, "switching_owner", lambda door: owner if door == "ui_rollback" else pytest.fail(door))
-    outcome = store_boot.switch_at_restart(root, repo, _census())
+    outcome = store_switch.switch_at_restart(root, repo, _census())
     assert outcome["status"] == "switched" and outcome["exit"] == 42, outcome
     assert git(repo, "rev-parse", "HEAD") == old and owner.calls[0]["target_sha"] == old
     assert store.probe(root)[0] == "absent"
@@ -475,7 +476,7 @@ def test_switch_at_restart_never_raises(tmp_path, monkeypatch, target_repo):
     root = tmp_path / "data"
     store_switch.record_switch_intent(root, target_sha=old, target_ref="v-old", reason="test", door="ui_rollback")
     monkeypatch.setattr(store_switch, "run_switch_seam", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
-    outcome = store_boot.switch_at_restart(root, repo, _census())
+    outcome = store_switch.switch_at_restart(root, repo, _census())
     assert outcome["status"] == "error" and "boom" in outcome["error"]
 
 

@@ -201,8 +201,7 @@ def task_billing_fields(task: Dict[str, Any], root_task_id: str, root_limit: Opt
                 return stamp_task_result_schema({"task_id": root_task_id, "status": "requested", **current,
                                                  "billing_group": binding})
             if persist_initial:
-                patch_document(pathlib.Path(budget_root), root_task_id, pin,
-                                   strict_existing_dict=True)
+                patch_document(pathlib.Path(budget_root), root_task_id, pin)
         if binding:
             if not isinstance(binding, dict) or not binding.get("billing_group_id") or "billing_group_limit_usd" not in binding:
                 return unavailable

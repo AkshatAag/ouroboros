@@ -131,7 +131,7 @@ def retire_tool_invocations(root: Any, task_id: str, root_task_id: str, *,
             return None
         return stamp_task_result_schema({**current, "launch_handoffs": claims,
                                          "retired_tool_invocations": retired})
-    patch_document(root, holder or task_id, retire, strict_existing_dict=True)
+    patch_document(root, holder or task_id, retire)
 
 def task_process_blockers(drive_root: Any, task_ids: set[str]) -> list[dict]:
     """Strict read of existing canonical executor custody without backend I/O.

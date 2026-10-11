@@ -456,8 +456,7 @@ def claim_on_predecessor(drive_root: Any, predecessor_task_id: str, nonce: str,
         outcome.update(claim=claim, created=True)
         return stamp_task_result_schema({**current, "continued_by": claim})
 
-    patch_document(pathlib.Path(drive_root), predecessor_task_id, update,
-                       strict_existing_dict=True)
+    patch_document(pathlib.Path(drive_root), predecessor_task_id, update)
     return dict(outcome["claim"]), bool(outcome["created"])
 
 
@@ -475,8 +474,7 @@ def mark_claim_admitted(drive_root: Any, predecessor_task_id: str, nonce: str) -
         return stamp_task_result_schema(
             {**current, "continued_by": {**claim, "state": "admitted", "admitted_at": utc_now_iso()}})
 
-    patch_document(pathlib.Path(drive_root), predecessor_task_id, update,
-                       strict_existing_dict=True)
+    patch_document(pathlib.Path(drive_root), predecessor_task_id, update)
 
 
 def recorded_continuation(drive_root: Any, predecessor_task_id: str, task_id: str) -> bool:

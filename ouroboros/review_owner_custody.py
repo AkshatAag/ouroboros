@@ -25,14 +25,14 @@ def stamp_paid_review_owner(attempt: Any, *, paid: bool) -> None:
 def _recoverable_review_invocations(drive_root: pathlib.Path) -> Dict[str, str]:
     """Unique durable delegated tokens keyed by their reserved operation."""
     from ouroboros import delegate_custody
-    from ouroboros.delegate_custody_current import held_snapshot
+    from ouroboros.delegate_custody_current import snapshot
 
     # ONE store read: the pending invocations and the held runs, whose rows carry the
     # START_REQUESTED event that minted them (no chain fold per worker death).
-    view = held_snapshot(drive_root)
+    view = snapshot(drive_root, closed=False)
     candidates: Dict[str, Set[str]] = {}
     records = [(record, str(record.get("invocation_id") or "")) for record in view["pending"]]
-    for run in delegate_custody.open_runs(drive_root, state=view["runs"]):
+    for run in delegate_custody.open_runs(drive_root, state=view["state"]):
         token = str(getattr(run, "invocation_id", "") or "")
         if token and getattr(run, "request_event", None):
             records.append((delegate_custody._request_facts(drive_root, run.request_event), token))

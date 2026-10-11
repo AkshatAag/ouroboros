@@ -497,7 +497,7 @@ def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch, tmp_path, 
     census = {"worker_exits": {"unconfirmed": []}, "live_children": [], "owned_stop": {"state": "completed"}}
     monkeypatch.setattr(server, "_emergency_process_cleanup", lambda **kw: cleanup_calls.append(kw) or census)
     seam_calls = []  # the authority switch seam runs on the cleanup's census, before the exit
-    monkeypatch.setattr(server.store_boot, "switch_at_restart",
+    monkeypatch.setattr(server.store_switch, "switch_at_restart",
                         lambda root, repo_dir, cleanup: seam_calls.append((root, repo_dir, cleanup)) or {"status": "no_intent"})
     transfers = []
 

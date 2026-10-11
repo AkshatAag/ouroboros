@@ -15,7 +15,7 @@ import zlib
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros import store
-from ouroboros.utils import _atomic_overwrite, append_jsonl, atomic_write_json, replace_atomic, utc_now_iso, write_bytes_atomic
+from ouroboros.utils import _atomic_overwrite, atomic_write_json, replace_atomic, utc_now_iso, write_bytes_atomic
 
 PACKS_REL = pathlib.Path("observability/packs")
 INDEX_NAME = "index.sqlite"
@@ -591,11 +591,8 @@ def pending_restore_bytes(root: Any) -> int:
 
 
 def settlement_obligations(root: Any, *, txn: Optional[store.Txn] = None, cache: Optional[dict] = None) -> dict:
-    """Read every non-receipt set once, indexed by all of its recorded task owners.
-
-    Reuse this snapshot for a candidate pass or a fresh unlink census; never scan
-    every set again for each task. The task-local rows also form its revision key.
-    """
+    """Read every non-receipt set once, indexed by all recorded task owners.
+    Reuse for a candidate pass or fresh unlink census; task-local rows form its revision key."""
     from ouroboros import obligations
 
     if txn is None:
@@ -1068,4 +1065,4 @@ def write_unpacker(root: Any) -> None:
 
 
 def record_storage_pack(root: Any, **facts: Any) -> None:
-    append_jsonl(pathlib.Path(root) / "logs" / "supervisor.jsonl", {"ts": utc_now_iso(), "type": "storage_pack", **facts})
+    store.supervisor_row(pathlib.Path(root), "storage_pack", facts, best_effort=False)

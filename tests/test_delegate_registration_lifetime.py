@@ -196,12 +196,13 @@ def _counting_full_reads(monkeypatch):
     from ouroboros import delegate_custody_current as current
 
     calls = []
-    original = current.project_runs
+    original = current.runs
 
     def counted(*args, **kwargs):
-        calls.append(1)
+        if len(args) > 1 and args[1] == "project_id=?":
+            calls.append(1)
         return original(*args, **kwargs)
-    monkeypatch.setattr(current, 'project_runs', counted)
+    monkeypatch.setattr(current, 'runs', counted)
     monkeypatch.setattr(custody, '_iter_rows', lambda *a, **kw: pytest.fail('chain fold on the sweep'))
     return calls
 

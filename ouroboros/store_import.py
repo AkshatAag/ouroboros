@@ -1,4 +1,4 @@
-"""Create, import, reconcile and export the current-facts store (dormant until the cutover).
+"""Create, import, reconcile and export the current-facts store.
 
 ``ensure_current_store(root)`` is the only function that creates or imports a store:
 the sibling build with ``synchronous=FULL``, ``meta`` (provenance, counts, the freeze
@@ -19,8 +19,6 @@ after a proven complete export. A file whose size and mtime_ns equal its baselin
 untouched without being read (one listing plus one stat per boot; a rewrite that preserves
 both is the disclosed residual); a stat-changed file is compared by sha256, so a touch with
 the same bytes stays untouched; edits to obligation set files alone are not detected.
-``export_facts(root)`` is the inverse: every row to its byte-equivalent file, every
-obligation set file in FULL, fsync.
 """
 
 from __future__ import annotations
@@ -39,7 +37,7 @@ from ouroboros import obligations as o
 from ouroboros import store
 from ouroboros.store import (
     GENERATION, GENERATION_KEY, IMPORT_LOCK_NAME, LOCK_NAME, PUBLISHED, TIER_ENFORCED, TIER_NAME,
-    StoreLost, Txn, document_text,
+    StoreLost, Txn, document_text, supervisor_row, utc_stamp,
 )
 from ouroboros.task_custody import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR, own_child_drives
 from ouroboros.task_result_schema import (
@@ -54,20 +52,6 @@ Record = Tuple[str, Dict[str, Any]]
 
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def utc_stamp() -> str:
-    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-
-
-def supervisor_row(root: pathlib.Path, kind: str, payload: Dict[str, Any]) -> None:
-    """One best-effort ``logs/supervisor.jsonl`` row of ``kind`` (the import's and the switch's)."""
-    try:
-        append_jsonl(root / "logs" / "supervisor.jsonl", {"ts": utc_now_iso(), "type": kind, **payload})
-    except Exception:
-        import logging
-
-        logging.getLogger(__name__).warning("%s row not recorded", kind, exc_info=True)
 
 
 def _own_children(root: pathlib.Path) -> List[pathlib.Path]:
@@ -585,11 +569,9 @@ def export_facts(root: Any) -> Dict[str, Any]:
 
 
 def absorb_own_export(root: Any, txn: Txn) -> Dict[str, Any]:
-    """At the abandonment of a partial export (inside the transaction that republishes the
-    store): every file on disk whose size and sha256 match the manifest is this store's own
-    write and joins the baseline; a removed stale file leaves it. The next boot then sees
-    nothing out of band and keeps every row, the owner-held sets included, instead of
-    re-importing the store's own partial export as an old body's change."""
+    """At abandonment, adopt manifest-matching (size + sha256) files and stale deletions into the
+    baseline while republishing the store. Its partial export then triggers no old-body
+    re-import at boot, preserving every row, including owner-held sets."""
     root = pathlib.Path(root)
     manifest = txn.meta("export_manifest") or {}
     if manifest.get("status") != "writing":

@@ -92,7 +92,7 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
     task's ``custody_marks`` row, kept by the same reducer transaction.
     """
     from ouroboros import delegate_custody as custody
-    from ouroboros.delegate_custody_current import marks, task_runs
+    from ouroboros.delegate_custody_current import marks, runs as current_runs
     from ouroboros.store import StoreError
 
     tid = str(task_id or "")
@@ -109,7 +109,7 @@ def task_execution_evidence(drive_root: Any, task_id: str) -> Dict[str, Any]:
     # a raise is the typed unknown.
     evidence_read_failed = False
     try:
-        runs = task_runs(drive_root, tid)
+        runs = current_runs(drive_root, "task_id=?", (tid,))
         mark = marks(drive_root, tid)
     except StoreError:
         runs, mark, evidence_read_failed = {}, {}, True

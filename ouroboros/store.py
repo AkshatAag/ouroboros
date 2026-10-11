@@ -1,21 +1,15 @@
 """The current-facts store ``state/current.sqlite`` and the SQLite core it shares with money.
 
-The authority for task result documents and the obligation sets (the former
-``task_results/*.json`` files and ``state/obligations/*.json`` exist only as the
-importer's input and the exporter's output). Here: the connection, lock-tier,
-identity, commit and transaction core ``usage_store`` imports back (one protocol
+The connection, lock-tier, identity, commit and transaction core ``usage_store`` imports back (one protocol
 for both files: rollback journal, ``synchronous=FULL``, no WAL, one connection per
 transaction, ``BEGIN IMMEDIATE`` for writes, every name-tier access inside one
 name lock, nothing above SQLite 3.24 so the bundled engine's file opens on a
-3.37 system engine); the schema (``tasks`` typed facts and obligation flags,
-``task_bodies`` the original document joined only by ``load``, ``obligations``
-owner-held sets, ``task_handoffs``/``custody_runs``/``custody_outbox``, ``meta``);
+3.37 system engine);
 the tri-state open (``probe``/``open_store``: the boot door imports a root's facts
 inside the import window, a public write imports a never-imported root on first
 touch, a read never imports — a root holding facts reads as ``StoreMigrating``
 until published, one holding none reads empty); the one write gate (the window
-and the PUBLISHED phase; ``service`` for the importer/exporter/seam); ``update_task``;
-``load`` (body plus the row-backed fields ``ROW_BACKED_FIELDS``).
+and the PUBLISHED phase; ``service`` for the importer/exporter/seam).
 """
 
 from __future__ import annotations
@@ -27,9 +21,10 @@ import os
 import pathlib
 import sqlite3
 import threading
+import time
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from ouroboros.utils import machine_json, utc_now_iso  # one compact JSON text: key order kept, facts round-trip
+from ouroboros.utils import append_jsonl, machine_json, utc_now_iso  # one compact JSON text: key order kept, facts round-trip
 
 STORE_REL = pathlib.Path("state/current.sqlite")
 LOCK_NAME = "current.lock"  # the name-tier lock around every access
@@ -438,6 +433,22 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC, serv
             raise _typed(exc) from exc
 
 
+def utc_stamp() -> str:
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+
+
+def supervisor_row(root: pathlib.Path, kind: str, payload: Dict[str, Any], *, best_effort: bool = True) -> None:
+    """One supervisor row; pack callers keep append failures, import/switch log them."""
+    try:
+        append_jsonl(root / "logs" / "supervisor.jsonl", {"ts": utc_now_iso(), "type": kind, **payload})
+    except Exception:
+        if not best_effort:
+            raise
+        import logging
+
+        logging.getLogger(__name__).warning("%s row not recorded", kind, exc_info=True)
+
+
 def document_text(document: Dict[str, Any]) -> str:
     """The whole document serialized exactly as the result writer serializes a file: what an
     export writes (the exact inverse of ``load``), what the content baseline hashes."""
@@ -527,9 +538,7 @@ class Txn:
         return None if body is None else project_handoffs(json.loads(body), self.handoffs(task_id))
 
     def store_task(self, document: Dict[str, Any], *, pending_drive: Optional[bool] = None) -> None:
-        """Upsert the body and the typed columns of one document and sync its handoff rows;
-        ``write_seq`` counts the writes (the row signature the memos that used to key on a file's
-        stat compare)."""
+        """Upsert body, typed columns and handoffs; ``write_seq`` advances the memo signature."""
         task_id = str(document["task_id"])
         columns = typed_columns(document, pending_drive=pending_drive)
         columns["write_seq"] = (self.row(task_id, "write_seq") or 0) + 1
@@ -674,12 +683,11 @@ class Txn:
 
 
 def update_task(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]], *,
-                riders: Tuple[Callable[[Txn, Dict[str, Any], Dict[str, Any]], None], ...] = (),
                 pending_drive: Any = None) -> Optional[Dict[str, Any]]:
     """The write seam: ``BEGIN IMMEDIATE`` with the gate's phase read inside (``StoreRetired``
     once an export began, which a straggler's older connection sees in the retired inode); the
     mutator over the current document (``None`` = no write: the read-only transaction commits
-    empty); the cutover's riders on the same connection; COMMIT. ``pending_drive`` is a value, or
+    empty); COMMIT. ``pending_drive`` is a value, or
     a callable ``(txn, current, updated) -> Optional[bool]`` deciding it from the written document."""
     with open_store(root, write=True) as txn:
         current = txn.load(task_id) or {}
@@ -688,6 +696,4 @@ def update_task(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Opt
             return None
         flag = pending_drive(txn, current, updated) if callable(pending_drive) else pending_drive
         txn.store_task({**updated, "task_id": task_id}, pending_drive=flag)
-        for rider in riders:
-            rider(txn, current, updated)
         return updated

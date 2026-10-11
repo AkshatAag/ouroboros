@@ -122,7 +122,7 @@ def set_owner_wait(root: Any, task_id: str, wait: dict,
             raise OwnerWaitSuperseded("owner wait state changed")
         return stamp_task_result_schema({**current, "owner_wait": dict(wait)})
 
-    patch_document(root, task_id, update, strict_existing_dict=True)
+    patch_document(root, task_id, update)
     return dict(wait)
 
 

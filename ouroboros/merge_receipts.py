@@ -129,7 +129,7 @@ def write_receipt(drive_root: Any, task_id: str, receipt: Dict[str, Any], *, cla
         return stamp_task_result_schema({**current, RECEIPTS_KEY: rows,
             **({"launch_handoffs": claims} if "launch_handoffs" in current else {})})
 
-    patch_document(drive_root, task_id, _mutate, strict_existing_dict=True)
+    patch_document(drive_root, task_id, _mutate)
     return selected
 
 

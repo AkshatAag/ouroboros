@@ -25,7 +25,7 @@ import pytest
 
 from ouroboros import delegate_custody as c
 from ouroboros import delegate_custody_current as current
-from ouroboros import store, store_boot, store_switch, task_store, usage_store
+from ouroboros import store, store_switch, task_store, usage_store
 from ouroboros.store_import import ensure_current_store
 from tests._usage_store_testing import attempt_rows_in_start_order, seed
 from tests.test_store_import import fixture_root, load
@@ -127,8 +127,8 @@ def test_v760_reads_the_export_and_the_new_release_reconciles_its_writes(lane_ro
     repo, old, new = target_repo
     root = lane_root
     # The boot door flushes the dead process's committed custody to the chain before anything else.
-    boot = store_boot.start(root, repo_dir=repo, request_restart=lambda: pytest.fail("no switch pending"))
-    assert boot == {"status": "importing"} and store_boot.wait_ready(root, timeout=60)["status"] == "published"
+    boot = store_switch.start(root, repo_dir=repo, request_restart=lambda: pytest.fail("no switch pending"))
+    assert boot == {"status": "importing"} and store_switch.wait_ready(root, timeout=60)["status"] == "published"
     assert current.outbox_depth(root) == 0 and "run-dead" in _chain_text(root)
     outcome = _switch_to_old(root, repo, old)
     assert outcome["status"] == "switched" and outcome["needs"] == {"facts": True, "money": True, "handles": True}
@@ -188,15 +188,15 @@ def test_a_present_store_reconciles_the_old_body_writes_per_row(lane_root, v760,
 def test_the_chain_new_old_new_twice_with_failures_around_the_consume_and_the_switch(lane_root, target_repo, v760, tmp_path):
     repo, old, new = target_repo
     root = lane_root
-    assert store_boot.wait_ready(root, timeout=0.01) == {"status": "not_started"}
+    assert store_switch.wait_ready(root, timeout=0.01) == {"status": "not_started"}
     current.flush_outbox(root)
     # Round one: the switch fails at the owner; the export stays, the store is retired, the new
     # body boots again and rebuilds from the files it wrote.
     failed = _switch_to_old(root, repo, old, owner=Owner(repo, ok=False))
     assert failed["status"] == "switch_failed" and git(repo, "rev-parse", "HEAD") == new
     assert store.probe(root)[0] == "absent" and store_switch.read_switch_intent(root) is None
-    rebuilt = store_boot.start(root, repo_dir=repo, request_restart=lambda: pytest.fail("nothing to switch"))
-    assert rebuilt == {"status": "importing"} and store_boot.wait_ready(root, timeout=60)["status"] == "published"
+    rebuilt = store_switch.start(root, repo_dir=repo, request_restart=lambda: pytest.fail("nothing to switch"))
+    assert rebuilt == {"status": "importing"} and store_switch.wait_ready(root, timeout=60)["status"] == "published"
     assert sorted(load(root, tid)["task_id"] for tid in ("root1", "child1", "done1")) == ["child1", "done1", "root1"]
     usage_store.forget(root)
     usage_store.migrate_from_journal(root)
@@ -220,8 +220,8 @@ def test_the_chain_new_old_new_twice_with_failures_around_the_consume_and_the_sw
     with pytest.raises(RuntimeError):
         store_switch.run_switch_seam(root, repo_dir=repo, owner=dies_before_switching)
     assert store_switch.read_switch_intent(root) is None and store.probe(root)[0] == "absent"
-    resumed = store_boot.start(root, repo_dir=repo, request_restart=lambda: pytest.fail("no switch to resume"))
-    assert resumed == {"status": "importing"} and store_boot.wait_ready(root, timeout=60)["status"] == "published"
+    resumed = store_switch.start(root, repo_dir=repo, request_restart=lambda: pytest.fail("no switch to resume"))
+    assert resumed == {"status": "importing"} and store_switch.wait_ready(root, timeout=60)["status"] == "published"
     assert load(root, "by-old")["description"] == "written by v7.6.0"
     progress = json.loads((root / store_switch.PROGRESS_REL).read_text(encoding="utf-8"))
     assert progress["phase"] == "switch_not_performed"

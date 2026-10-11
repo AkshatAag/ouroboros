@@ -344,8 +344,7 @@ def _persist(binding: ReviewWaitBinding, output: dict, work_ref: str, review_bin
         }
         return stamp_task_result_schema({**current, "presence_continuation": record})
 
-    committed = patch_document(binding.drive_root, binding.task_id, update,
-                                   strict_existing_dict=True)["presence_continuation"]
+    committed = patch_document(binding.drive_root, binding.task_id, update)["presence_continuation"]
     stored = (load_task_result(binding.drive_root, binding.task_id, strict=True) or {}).get("presence_continuation")
     if (not isinstance(stored, dict) or stored.get("lent_at") != now or stored.get("event_identity") != binding.identity
             or not isinstance(stored.get("initial"), dict)

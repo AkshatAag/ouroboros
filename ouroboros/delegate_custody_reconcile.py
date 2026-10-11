@@ -45,9 +45,9 @@ def open_runs(drive_root: Any, state: Optional[Dict[str, "RunCustody"]] = None) 
     """Runs with a durable start and no durable settlement (``state``: a shared
     pre-read snapshot, so a batch of audits pays one read; else the held rows)."""
     if state is None:
-        from ouroboros.delegate_custody_current import held_runs
+        from ouroboros.delegate_custody_current import runs as current_runs
 
-        state = held_runs(drive_root)
+        state = current_runs(drive_root, "state=?", ("held",))
     return [custody for custody in state.values() if not custody.settled]
 
 
@@ -107,7 +107,7 @@ def reconcile_task_runs(drive_root: Any, task_id: str, *,
     mine = str(task_id or "")
     if not mine:
         return []
-    from ouroboros.delegate_custody_current import held_runs, task_snapshot
+    from ouroboros.delegate_custody_current import runs as current_runs, task_snapshot
 
     view = task_snapshot(drive_root, mine)  # the task's rows and pending starts, one read
     held = [c for c in view["runs"].values() if not c.settled]
@@ -117,7 +117,7 @@ def reconcile_task_runs(drive_root: Any, task_id: str, *,
     # sweep tick); deferred registrations stay with the periodic sweep. A
     # project with ANY unsettled run is live; unsettled runs are held rows.
     owned = [r for r in view["runs"].values() if r.project_owned and r.project_id and r.settled]
-    live = ({r.project_id for r in held_runs(drive_root).values() if r.project_id and r.run_id and not r.settled}
+    live = ({r.project_id for r in current_runs(drive_root, "state=?", ("held",)).values() if r.project_id and r.run_id and not r.settled}
             if owned else set())
     owed = [r for r in owned if r.project_id not in live]
     if not held and not stray and not owed:
@@ -182,10 +182,10 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
     # a deferred one must not spin the daemon up.
     from ouroboros.delegate_continuation import still_continuable
 
-    from ouroboros.delegate_custody_current import held_runs
+    from ouroboros.delegate_custody_current import runs as current_runs
 
     # Owned registrations and unsettled runs are HELD rows: one indexed read.
-    snapshot = list(held_runs(drive_root).values())
+    snapshot = list(current_runs(drive_root, "state=?", ("held",)).values())
     # Only a still-owned registration can be retired, so only its rows are asked
     # (each ask reads task results); one continuable row keeps the whole project.
     owned = {row.project_id for row in snapshot if row.project_owned and row.project_id}

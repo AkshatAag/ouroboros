@@ -35,12 +35,12 @@ def test_bad_cancel_row_is_a_gap_while_good_row_migrates(tmp_path, monkeypatch):
 def test_unreadable_import_leaves_boot_available_and_explicit_repair_fails(tmp_path, monkeypatch):
     """The importer cannot read the result files: boot continues with an unavailable store
     (every door answers typed), no store generation is stamped, and the explicit repair fails."""
-    from ouroboros import store, store_boot, store_import
+    from ouroboros import store, store_switch, store_import
     def unreadable(root):
         raise PermissionError("directory unreadable")
     monkeypatch.setattr(store_import, "_read_results", unreadable)
     assert migrations.prepare_startup_state(tmp_path, strict=False)["status"] == "unavailable"
-    assert "strict=False" in inspect.getsource(store_boot._run)  # the boot door's import owner
+    assert "strict=False" in inspect.getsource(store_switch._run)  # the boot door's import owner
     with store.importing(tmp_path), pytest.raises(o.ObligationsUnavailable):  # the boot door keeps its window open
         o.members(tmp_path, "nonterminal")
     assert not store.generation_stamped(tmp_path) and not store.store_path(tmp_path).exists()
@@ -72,7 +72,7 @@ def test_custody_append_can_write_results_and_rows(tmp_path, monkeypatch, kind):
     migrations.prepare_startup_state(tmp_path)
     assert custody.emit(tmp_path, custody.STARTED, {"run_id": "run", "task_id": "task"})
     def append(_path, _row, **_kwargs):
-        assert "run" in current.held_runs(tmp_path) or kind == custody.SETTLED
+        assert "run" in current.runs(tmp_path, "state=?", (current.HELD,)) or kind == custody.SETTLED
         results.write_task_result(tmp_path, "other", "running")
         o.add(tmp_path, "custody_open", "invocation:other", {"request": {"invocation_id": "other"}})
         return True

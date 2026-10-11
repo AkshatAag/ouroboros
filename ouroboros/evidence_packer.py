@@ -8,11 +8,12 @@ import json
 import logging
 import os
 import pathlib
+import sqlite3
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros import evidence_packs as packs
+from ouroboros import evidence_packs as packs, store
 from ouroboros.startup_historical_audit import _REPORT_BYTES, read_job_report, spawn_maintenance_job
 
 log = logging.getLogger(__name__)
@@ -55,10 +56,6 @@ def _loose_task_ids(root: pathlib.Path) -> set:
 
 def swept_stamps(root: pathlib.Path) -> Optional[Dict[str, str]]:
     """Per task, the stamps the last sweep recorded; ``None`` when the cache is unavailable."""
-    import sqlite3
-
-    from ouroboros import store
-
     if not packs.packs_dir(root).is_dir():
         return {}
     try:
@@ -69,10 +66,6 @@ def swept_stamps(root: pathlib.Path) -> Optional[Dict[str, str]]:
 
 
 def record_swept(root: pathlib.Path, task_id: str, stamps: str) -> None:
-    import sqlite3
-
-    from ouroboros import store
-
     with contextlib.suppress(store.StoreError, sqlite3.Error, OSError):
         with packs.open_index(root, write=True) as conn:
             conn.execute("INSERT OR REPLACE INTO swept VALUES (?,?)", (task_id, stamps))

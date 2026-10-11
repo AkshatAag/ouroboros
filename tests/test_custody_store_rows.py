@@ -195,8 +195,8 @@ def test_the_open_set_is_the_held_runs_and_the_pending_invocations(tmp_path):
     assert c.emit(tmp_path, c.SETTLED, {"run_id": "done", "task_id": "c", "state": "succeeded"})
     assert c.emit(tmp_path, c.START_REQUESTED, {"invocation_id": "inv", "task_id": "d", "request": {"prompt": "x"}})
 
-    view = current.held_snapshot(tmp_path)
-    assert set(view["runs"]) == {"live", "owner"}, "unsettled, or settled with an owned registration"
+    view = current.snapshot(tmp_path, closed=False)
+    assert set(view["state"]) == {"live", "owner"}, "unsettled, or settled with an owned registration"
     assert [row["invocation_id"] for row in view["pending"]] == ["inv"]
     assert set(c.replay(tmp_path)) == {"live", "owner", "done"}
     with store.open_store(tmp_path, write=False) as txn:

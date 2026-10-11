@@ -60,25 +60,10 @@ def _decode_all(rows: Dict[str, Dict[str, Any]]):
 
 # -- reads (each one SELECT) ---------------------------------------------------------------
 
-def runs(root):
-    """Every run's custody (the ``replay`` of the store era)."""
+def runs(root, where: str = "", params: tuple = ()):
+    """Custody selected by typed columns (all runs when unfiltered)."""
     with store.open_store(root, write=False) as txn:
-        return _decode_all(txn.custody_rows())
-
-
-def held_runs(root):
-    with store.open_store(root, write=False) as txn:
-        return _decode_all(txn.custody_rows("state=?", (HELD,)))
-
-
-def task_runs(root, task_id: str):
-    with store.open_store(root, write=False) as txn:
-        return _decode_all(txn.custody_rows("task_id=?", (str(task_id or ""),)))
-
-
-def project_runs(root, project_id: str):
-    with store.open_store(root, write=False) as txn:
-        return _decode_all(txn.custody_rows("project_id=?", (str(project_id or ""),)))
+        return _decode_all(txn.custody_rows(where, params))
 
 
 def run(root, run_id: str):
@@ -157,15 +142,6 @@ def task_snapshot(root, task_id: str):
     return {"runs": _decode_all(runs_by_id), "pending": pending_invocations(root, rows=requests)}
 
 
-def held_snapshot(root) -> Dict[str, Any]:
-    """One read: every held run and every pending invocation (the open set of DELTA §3)."""
-    from ouroboros.delegate_pending import pending_invocations
-
-    with store.open_store(root, write=False) as txn:
-        runs_by_id, requests = txn.custody_rows("state=?", (HELD,)), _pending_rows(txn)
-    return {"runs": _decode_all(runs_by_id), "pending": pending_invocations(root, rows=requests)}
-
-
 def invocation(root, invocation_id: str, request_facts: Callable) -> Optional[Dict[str, Any]]:
     """``invocation_record``'s store answer: pending row, bound run, or definite refusal."""
     with store.open_store(root, write=False) as txn:
@@ -194,12 +170,12 @@ def unreadable(root) -> bool:
         return True
 
 
-def snapshot(root):
-    """One read for the boot/periodic sweep: held runs plus the closing receipts still owed."""
+def snapshot(root, closed: bool = True):
+    """One read: held runs and pending invocations, optionally including owed closing receipts."""
     with store.open_store(root, write=False) as txn:
-        debts, held = txn.set_rows("delegated_runs"), txn.custody_rows("state=?", (HELD,))
-        invocations = [facts["request"] for key, facts in txn.set_rows("custody_open").items()
-                       if key.startswith("invocation:")]
+        debts = txn.set_rows("delegated_runs") if closed else {}
+        held = txn.custody_rows("state=?", (HELD,))
+        invocations = _pending_rows(txn)
     from ouroboros.delegate_pending import pending_invocations
 
     state = {}

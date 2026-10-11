@@ -762,10 +762,10 @@ def open_snapshot_ids(drive_root: Any) -> set:
     have bound a live run the worker died before recording). Everything else is
     disposable.
     """
-    from ouroboros.delegate_custody_current import held_runs
+    from ouroboros.delegate_custody_current import runs as current_runs
 
     ids: set = set()
-    for custody in held_runs(drive_root).values():  # a settled, disposed run is closed: never here
+    for custody in current_runs(drive_root, "state=?", ("held",)).values():  # a settled, disposed run is closed: never here
         if custody.snapshot_id and not (custody.settled and custody.patch_disposed):
             ids.add(custody.snapshot_id)
     for record in pending_invocations(drive_root):
@@ -1023,11 +1023,11 @@ def retire_project(drive_root: Any, gateway: Any, custody: RunCustody, *, live_t
 
 def _project_runs(drive_root: Any, custody: RunCustody) -> Optional[List[RunCustody]]:
     """This project's runs (one indexed read); ``None`` when the store cannot answer."""
-    from ouroboros.delegate_custody_current import project_runs
+    from ouroboros.delegate_custody_current import runs as current_runs
     from ouroboros.store import StoreError
 
     try:
-        state = project_runs(drive_root, custody.project_id)
+        state = current_runs(drive_root, "project_id=?", (str(custody.project_id or ""),))
     except StoreError:
         log.warning("Retirement deferred: custody rows unavailable", exc_info=True)
         return None
@@ -1275,9 +1275,9 @@ def open_containment_faults(drive_root: Any) -> List[Dict[str, Any]]:
     scan, which is why a separate projection file once existed). Unavailable store:
     no answer, never an empty one — the caller treats the exception as unknown.
     """
-    from ouroboros.delegate_custody_current import held_runs
+    from ouroboros.delegate_custody_current import runs as current_runs
 
-    return [dict(custody.containment_fault) for custody in held_runs(drive_root).values()
+    return [dict(custody.containment_fault) for custody in current_runs(drive_root, "state=?", ("held",)).values()
             if custody.containment_fault]
 
 
@@ -1468,9 +1468,9 @@ def owned_project_registrations(drive_root: Any, state: Optional[Dict[str, RunCu
     """Runs whose registration is still owned - settled or not (``open_runs``
     cannot see registrations that outlive their runs)."""
     if state is None:
-        from ouroboros.delegate_custody_current import held_runs
+        from ouroboros.delegate_custody_current import runs as current_runs
 
-        state = held_runs(drive_root)  # an owned registration is a held row
+        state = current_runs(drive_root, "state=?", ("held",))  # an owned registration is a held row
     return [custody for custody in state.values() if custody.project_owned and custody.project_id]
 
 
@@ -1478,10 +1478,10 @@ def retire_settled_registrations(drive_root: Any, gateway: Any, *, live_task_ids
     """Retire projects every sharer has settled; a LIVE sharer (owned or not
     - only the creator carries the registration, but any live sibling makes
     the daemon refuse) defers the attempt. Idempotent, fail-soft."""
-    from ouroboros.delegate_custody_current import held_runs, project_runs
+    from ouroboros.delegate_custody_current import runs as current_runs
 
     by_project: Dict[str, List[RunCustody]] = {}
-    for row in held_runs(drive_root).values():  # owned registrations and unsettled runs are held rows
+    for row in current_runs(drive_root, "state=?", ("held",)).values():  # owned registrations and unsettled runs are held rows
         if row.project_id and row.run_id:
             by_project.setdefault(row.project_id, []).append(row)
     for project_id, rows in by_project.items():
@@ -1490,7 +1490,7 @@ def retire_settled_registrations(drive_root: Any, gateway: Any, *, live_task_ids
             continue  # nothing registered here, or a live sharer defers
         from ouroboros.delegate_continuation import still_continuable
         # Every sharer of the project, settled non-owners included: one indexed read.
-        rows = list(project_runs(drive_root, project_id).values())
+        rows = list(current_runs(drive_root, "project_id=?", (str(project_id or ""),)).values())
         if any(not row.settled for row in rows):
             continue
         if (not any(row.project_persistent for row in rows)

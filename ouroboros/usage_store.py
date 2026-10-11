@@ -895,10 +895,6 @@ def _retire_journal(root: pathlib.Path, status: Dict[str, Any]) -> Dict[str, Any
     return {"journal": "changed_after_import", "journal_size": size, "imported_size": imported}
 
 
-def _utc() -> str:
-    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-
-
 def _export_rows(txn: Txn, provenance: Dict[str, Any]) -> Tuple[list, int, int]:
     """The journal rows an older release accepts, from the frozen store."""
     from ouroboros import usage_journal as journal
@@ -1012,8 +1008,8 @@ def export_journal(root: pathlib.Path | str, *, resume: bool = False) -> Dict[st
             mark = {"status": "writing", "started_at": utc_now_iso(),
                     "journal": {"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(), "rows": len(rows)},
                     "marker": journal.journal_marker(rows), "attempts": attempts, "aggregates": aggregates,
-                    "pre_export_as": f"{kept.name}.pre-export-{_utc()}" if kept.exists() else None,
-                    "store_retired_as": f"{path.name}.exported-{_utc()}", "legacy": provenance.get("legacy"),
+                    "pre_export_as": f"{kept.name}.pre-export-{_core.utc_stamp()}" if kept.exists() else None,
+                    "store_retired_as": f"{path.name}.exported-{_core.utc_stamp()}", "legacy": provenance.get("legacy"),
                     "state_marker_before": (state or {}).get("usage_ledger_high_water_seq") if isinstance(state, dict) else None}
             txn.set_meta("export", mark)
         elif hashlib.sha256(payload).hexdigest() != mark["journal"]["sha256"]:

@@ -223,7 +223,7 @@ def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
         return stamp_task_result_schema({**current, "owner_pause": fence})
 
     with launch_lock(root_drive, root_task_id):
-        patch_document(pathlib.Path(root_drive), str(root_task_id), update, strict_existing_dict=True)
+        patch_document(pathlib.Path(root_drive), str(root_task_id), update)
     return dict(outcome["fence"]), bool(outcome["created"])
 
 

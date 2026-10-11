@@ -1091,7 +1091,7 @@ def _run_startup_task_recovery(
         return report
     from ouroboros.platform_layer import pid_is_alive
     from ouroboros.store import StoreMigrating
-    from ouroboros.store_boot import require_published
+    from ouroboros.store_switch import require_published
 
     try:
         require_published(drive_root)  # the store is published before any recovery write (P1)

@@ -121,7 +121,7 @@ def record_transport_queue(root: Path, task_id: str, binding_id: str, snapshot: 
                 return current
         return {**current, "presence_transport_queue": pointer}
 
-    patch_document(root, task_id, update, strict_existing_dict=True)
+    patch_document(root, task_id, update)
     if answer["status"] == "recorded":
         readback = (load_task_result(root, task_id, strict=True) or {}).get("presence_transport_queue") or {}
         # Another newer observation may have won after the lock was released.
