@@ -49,6 +49,18 @@ def members_in(txn: store.Txn, name: str) -> dict[str, dict]:
     return rows
 
 
+def owner_held_rows(name: str, rows: dict[str, dict]) -> dict[str, dict]:
+    """The rows of a set file an import may hold as owner-held rows: a derived set's members
+    come only from the typed columns (``nonterminal`` and the flag columns), so its file rows
+    import nothing; ``delegated_runs`` keeps its closing receipts, ``pending_drives`` the rows a
+    pool handoff published (both retire by their own owner); every other set is owner-held."""
+    if name == "delegated_runs":
+        return {identity: facts for identity, facts in rows.items() if isinstance(facts, dict) and facts.get("closed_runs")}
+    if name == "nonterminal" or (name in store.FLAG_COLUMNS and name != "pending_drives"):
+        return {}
+    return rows
+
+
 def members(root: Any, name: str) -> dict[str, dict]:
     """Return an independent snapshot; no migration or historical fallback."""
     with store.open_store(root, write=False) as txn:

@@ -262,6 +262,34 @@ def test_the_export_reproduces_every_file_byte_for_byte(tmp_path):
     assert ensure_current_store(root)["status"] == "unchanged"  # the baseline followed the export
 
 
+def test_derived_set_file_rows_are_never_imported_as_owner_held(tmp_path):
+    """M7: a stale member of a derived set file (a task no longer running, a synthesis no
+    document owes) imports nothing — membership comes from the current predicates only; the
+    owner-held sets, the closing receipts of ``delegated_runs`` and the pool's ``pending_drives``
+    rows import; the same at P6' after a result change."""
+    root = fixture_root(tmp_path)
+    add_set_member(root, "nonterminal", "done1", {"task_id": "done1"})  # stale: done1 failed
+    add_set_member(root, "synthesis", "done1", {"task_id": "done1"})
+    add_set_member(root, "pause_notices", "done1", {"task_id": "done1"})
+    add_set_member(root, "delegated_runs", "done1", {"task_id": "done1"})  # derived member, no receipt
+    add_set_member(root, "delegated_runs", "child1", {"task_id": "child1", "closed_runs": {"r9": {"settled": True}}})
+    add_set_member(root, "unknowns", "task:x", {"reason": "cancel_latch_migration_failed"})
+    ensure_current_store(root, with_children=False)
+
+    def held(name):
+        with store.open_store(root, write=False) as txn:
+            return txn.set_rows(name)
+
+    assert held("nonterminal") == held("synthesis") == held("pause_notices") == {}
+    assert set(o.members(root, "nonterminal")) == {"root1"} and o.members(root, "synthesis") == {}
+    assert set(o.members(root, "pause_notices")) == {"child1"}  # the document's own notices, from its column
+    assert held("delegated_runs") == {"child1": {"task_id": "child1", "closed_runs": {"r9": {"settled": True}}}}
+    assert "root1" in held("pending_drives") and held("unknowns") == {"task:x": {"reason": "cancel_latch_migration_failed"}}
+    write_result(root, result("fresh2"))  # P6': the old body ran, the set files are re-read
+    assert ensure_current_store(root, with_children=False)["status"] == "reconciled"
+    assert held("nonterminal") == held("synthesis") == {} and set(o.members(root, "nonterminal")) == {"root1"}
+
+
 def test_the_export_writes_derived_sets_in_full_from_the_columns(tmp_path):
     root = fixture_root(tmp_path)
     ensure_current_store(root, with_children=False)
@@ -269,7 +297,7 @@ def test_the_export_writes_derived_sets_in_full_from_the_columns(tmp_path):
     (root / "state" / "obligations" / "nonterminal.json").unlink()
     export_facts(root)
     nonterminal = json.loads((root / "state" / "obligations" / "nonterminal.json").read_text(encoding="utf-8"))
-    assert list(nonterminal) == ["root1", "done1"]  # the stored row first, then the derived member
+    assert list(nonterminal) == ["done1", "root1"]  # the derived members, from the columns (no stored row)
     pending = json.loads((root / "state" / "obligations" / "pending_drives.json").read_text(encoding="utf-8"))
     assert set(pending) == {"root1", "done1"}
 

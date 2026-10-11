@@ -159,6 +159,7 @@ def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tup
     folded, custody = _custody_rows(root, records)
     for name, rows in custody.items():
         sets[name] = {**sets.get(name, {}), **rows} if name == "custody_open" else _merge_receipts(sets.get(name, {}), rows)
+    sets = {name: o.owner_held_rows(name, rows) for name, rows in sets.items()}  # derived members come from the columns
     provenance = {"status": "completed", "imported_at": utc_now_iso(), "lock_tier": tier,
                   "results": len(records), "quarantined": len(quarantined), "refused": refused,
                   "sets": {name: len(rows) for name, rows in sets.items()},
@@ -448,7 +449,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
         baseline.pop(task_id, None)
     sets = _read_sets(root)  # the old body maintained the set files too
     for name in sorted(set(txn.set_names()) | set(sets)):
-        txn.replace_set(name, sets.get(name, {}))
+        txn.replace_set(name, o.owner_held_rows(name, sets.get(name, {})))
     for key, value in (("baseline", baseline), ("freeze_utc", now), ("conflicts", conflicts),
                        ("reconciled", {"at": now, **counts, "quarantined": len(quarantined),
                                        "refused": refused, "conflicts": len(conflicts)})):
