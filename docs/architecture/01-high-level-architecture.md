@@ -282,7 +282,7 @@ ouroboros/ — agent core and shared runtime (§6)
   launcher_server_reaper.py — POSIX same-install stray-server termination by the PID-lock-owning launcher (Runtime topology below)
   launcher_windows_runtime.py — Windows-only pythonnet/pywebview runtime preparation
   launcher_background.py — Desktop background mode: close vs quit, the one consent question, second-launch activation (§9); `DesktopApi`, the alert half the bridge's `MainApi` inherits (§3)
-  launcher_appearance.py — A desktop window's native Windows caption takes the light or dark tint of its page's painted palette; the page's stored choice is the one authority (§3)
+  launcher_appearance.py — A desktop window's native Windows caption takes the light or dark tint of its page's painted palette (§3)
   launcher_tray.py, launcher_tray_macos.py — Windows notification-area icon; macOS menu-bar item, Dock reopen, quit marking (§9)
   desktop_notifications.py — Desktop system notifications, one adapter per platform; submitted/unknown/typed refusal, click token back to the page (§3; DESIGN §9)
   desktop_autostart.py, windows_autostart.py — Host sign-in adapter table: Windows registry, macOS LaunchAgent, Linux systemd/XDG state (Runtime topology below)

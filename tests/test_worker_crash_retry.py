@@ -1176,3 +1176,121 @@ def test_real_crash_retry_keeps_prepared_scope_across_registry_activity(tmp_path
             assert retry["_project_admission"] == admitted["_project_admission"]
         assert retry["workspace_root"] == "/synthetic/frozen-resource"
         assert not done
+
+
+def _run_worker_main_once(monkeypatch, tmp_path, task, error):
+    """Drive the real worker loop over one task whose agent raises ``error`` from handle_task."""
+    import ouroboros.agent as agent_module
+    import ouroboros.config as config
+    import ouroboros.extension_loader as extension_loader
+    import ouroboros.platform_layer as platform_layer
+    import ouroboros.process_custody as process_custody
+    import ouroboros.utils as utils
+    import supervisor.worker_process as WP
+
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    crashes, drives = [], []
+
+    class Runner:
+        owner_wait_callback = None
+
+        def __init__(self, drive_root):
+            self.env = agent_module.Env(repo_dir=repo, drive_root=Path(drive_root))
+            drives.append(str(drive_root))
+
+        def handle_task(self, _task):
+            raise error
+
+    items = iter([task, {"type": "shutdown"}])
+    monkeypatch.setenv("OUROBOROS_IN_WORKER", "0")  # worker_main sets it; teardown restores the original
+    monkeypatch.setattr(WP, "_bind_worker_repo_root", lambda *_a, **_k: None)
+    monkeypatch.setattr(WP, "_prepare_worker_task_runtime", lambda: None)
+    monkeypatch.setattr(WP, "_log_worker_crash", lambda *args: crashes.append(args[2]))
+    monkeypatch.setattr(platform_layer, "create_new_session", lambda: None)
+    monkeypatch.setattr(process_custody, "start_parent_lifeline", lambda **_k: None)
+    monkeypatch.setattr(config, "initialize_runtime_mode_baseline", lambda: None)
+    monkeypatch.setattr(config, "get_skills_repo_path", lambda: "")
+    monkeypatch.setattr(extension_loader, "reload_all", lambda *_a, **_k: None)
+    monkeypatch.setattr(agent_module, "make_agent", lambda **kwargs: Runner(kwargs["drive_root"]))
+    monkeypatch.setattr(utils, "set_log_sink", lambda _sink: None)
+    monkeypatch.setattr(utils, "get_git_info", lambda _repo: ("test", "sha"))
+
+    WP.worker_main(0, SimpleNamespace(get=lambda: next(items)), SimpleNamespace(put=lambda _event: None),
+                   str(repo), str(tmp_path))
+
+    assert crashes == ["handle_task"]  # the worker still records the crash and exits as before
+    return drives
+
+
+@pytest.mark.parametrize("child", [False, True], ids=["pooled_canonical", "headless_child"])
+def test_a_handle_task_exception_is_the_tasks_own_terminal_without_a_crash_retry(tmp_path, monkeypatch, child):
+    """Owner decision 1A (11.10.2026): the caught exception ends the task; recovery finishes it."""
+    import json
+    import supervisor.queue as q
+    import supervisor.workers as W
+    from ouroboros.task_results import load_task_result
+    from supervisor.worker_health import recover_confirmed_dead_worker
+
+    job, events = _reserved_job(tmp_path, monkeypatch, exitcode=0, child=child)
+    drives = _run_worker_main_once(monkeypatch, tmp_path, job["task"],
+                                   ValueError("predecessor plan source unavailable"))
+    assert drives[-1] == job["task"].get("drive_root", str(tmp_path))  # written by the agent that ran it
+    toast = MagicMock()
+    monkeypatch.setattr("supervisor.terminal_delivery.deliver_miss_lane_outcome", MagicMock())
+    monkeypatch.setattr(W, "send_with_budget", toast)
+    monkeypatch.setattr(q, "enqueue_task", MagicMock())
+
+    recover_confirmed_dead_worker(job)
+
+    current = load_task_result(tmp_path, job["task_id"], strict=True)
+    assert (current["status"], current["reason_code"]) == ("failed", "task_exception")
+    assert current["result"] == "⚠️ Error during processing: ValueError: predecessor plan source unavailable"
+    assert current["terminal_time"]["source"] == "executor_terminal" and current["terminal_time"]["occurred_at"]
+    assert "platform-level" not in json.dumps(current, ensure_ascii=False)
+    q.enqueue_task.assert_not_called()
+    toast.assert_not_called()
+    done = events.get_nowait()
+    assert (done["type"], done["status"], done["reason_code"]) == ("task_done", "failed", "task_exception")
+
+
+def test_a_late_handle_task_exception_never_replaces_an_earlier_terminal(tmp_path, monkeypatch):
+    import supervisor.queue as q
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.worker_health import recover_confirmed_dead_worker
+
+    job, events = _reserved_job(tmp_path, monkeypatch, exitcode=0)
+    write_task_result(tmp_path, job["task_id"], "failed", result="ORIGINAL", reason_code="original_reason")
+    before = load_task_result(tmp_path, job["task_id"], strict=True)
+
+    _run_worker_main_once(monkeypatch, tmp_path, job["task"], RuntimeError("late cleanup failure"))
+
+    assert load_task_result(tmp_path, job["task_id"], strict=True) == before
+    monkeypatch.setattr("supervisor.terminal_delivery.deliver_miss_lane_outcome", MagicMock())
+    monkeypatch.setattr(q, "enqueue_task", MagicMock())
+    recover_confirmed_dead_worker(job)
+    current = load_task_result(tmp_path, job["task_id"], strict=True)
+    assert (current["result"], current["reason_code"]) == ("ORIGINAL", "original_reason")
+    q.enqueue_task.assert_not_called()
+    assert events.get_nowait()["reason_code"] == "original_reason"
+
+
+def test_an_unrecorded_handle_task_exception_keeps_the_single_crash_retry(tmp_path, monkeypatch):
+    """No terminal (here its write fails) means today's crash policy: one retry."""
+    import ouroboros.task_results as task_results
+    import supervisor.queue as q
+    from supervisor.worker_health import recover_confirmed_dead_worker
+
+    job, _events = _reserved_job(tmp_path, monkeypatch, exitcode=0)
+    with monkeypatch.context() as broken:
+        broken.setattr(task_results, "write_task_result",
+                       lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk full")))
+        _run_worker_main_once(monkeypatch, tmp_path, job["task"], ValueError("boom"))
+    assert task_results.load_task_result(tmp_path, job["task_id"]) is None
+    retried = []
+    monkeypatch.setattr(q, "enqueue_task", lambda task, front=False: retried.append(dict(task)) or task)
+
+    recover_confirmed_dead_worker(job)
+
+    assert [task["_attempt"] for task in retried] == [2]
+    assert task_results.load_task_result(tmp_path, job["task_id"])["status"] == "interrupted"
