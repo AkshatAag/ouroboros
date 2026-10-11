@@ -142,6 +142,7 @@ print(json.dumps({"same": [json.dumps(copied[key], ensure_ascii=False) == json.d
 """
 
 
+@pytest.mark.serial  # real subprocesses
 @pytest.mark.parametrize("seed", ["0", "1", "2", "3"])
 def test_retention_outcome_does_not_depend_on_the_process_hash_seed(tmp_path, seed):
     """The production field constant, unpatched, in fresh processes with different seeds."""
@@ -155,7 +156,7 @@ def test_retention_outcome_does_not_depend_on_the_process_hash_seed(tmp_path, se
 
 
 _SEEDED_WALK = """
-import json, pathlib, sys, tempfile
+import json, pathlib, sys
 from ouroboros import observability as obs
 seen, real = [], obs._rewrite_child_ref_tree
 def spy(value, *args, **kwargs):
@@ -163,8 +164,8 @@ def spy(value, *args, **kwargs):
         seen.append(value["walked_field"])
     return real(value, *args, **kwargs)
 obs._rewrite_child_ref_tree = spy
-root = pathlib.Path(tempfile.mkdtemp())
-(root / "parent").mkdir()
+root = pathlib.Path(sys.argv[1])
+(root / "parent").mkdir(parents=True)
 (root / "child").mkdir()
 fields = [key for key in obs._PUBLISHED_CHILD_REF_FIELDS
           if key not in {"task_contract", "attachment_manifest", "attachment_manifest_ref"}]
@@ -173,12 +174,13 @@ print(json.dumps(seen))
 """
 
 
-def test_published_fields_are_walked_in_written_order_under_every_hash_seed():
+@pytest.mark.serial  # real subprocesses
+def test_published_fields_are_walked_in_written_order_under_every_hash_seed(tmp_path):
     skipped = {"task_contract", "attachment_manifest", "attachment_manifest_ref"}
     assert isinstance(observability._PUBLISHED_CHILD_REF_FIELDS, tuple)
     written = [key for key in observability._PUBLISHED_CHILD_REF_FIELDS if key not in skipped]
 
-    orders = {seed: _run_seeded(seed, _SEEDED_WALK) for seed in ("0", "1", "2", "3")}
+    orders = {seed: _run_seeded(seed, _SEEDED_WALK, str(tmp_path / seed)) for seed in ("0", "1", "2", "3")}
 
     assert orders == {seed: written for seed in orders}
 
@@ -324,3 +326,35 @@ def test_a_gap_without_exactly_one_own_recorded_path_stays_a_gap(case):
     # Positive control: exactly one own recorded path restores the same gap.
     assert observability.restore_recorded_task_source_gaps(value, {"unavailable_refs": [fact]}, "owner") == {
         "waves": [{"spec_source_ref": _compact(ref)}]}
+
+
+def test_a_successor_review_binds_every_addressed_source_past_an_unrestorable_gap(tmp_path):
+    """A gap no own recorded path restores rides into a started successor's task contract;
+    reader binding skips it (it names no address) and still binds every addressed source."""
+    from ouroboros.agent_startup_checks import validate_task_authority_sources
+    from ouroboros.contracts.task_contract import build_task_contract
+    from ouroboros.review_source_closure import _reader_bindings
+    from tests.test_doc_context import _make_env_and_memory
+
+    env, _memory = _make_env_and_memory(tmp_path)
+    root, pred = env.drive_root, "legacy-pred"
+    _spec, plan = _record_plan(root, pred)
+    wave = plan["waves"][-1]
+    intact = wave["wave_artifact"]
+    wave["spec_source_ref"] = observability._typed_unavailable_ref(wave["spec_source_ref"], "invalid_ref")
+    write_task_result(root, pred, "failed", result="x", reason_code="provider_unavailable",
+                      task_contract={"objective": "o"}, plan_review_state=plan,
+                      child_ref_promotion=_promotion("complete", [], []))  # no fact: nothing restores it
+    task = {"id": "succ", "type": "task", "text": "continue", "budget_drive_root": str(root),
+            "predecessor_authority_source": {"kind": "task_result", "task_id": pred, "tool": "get_task_result",
+                                             "arguments": {"task_id": pred, "include_authority": True}}}
+    assert validate_task_authority_sources(env, task) == {}
+    assert task["predecessor_authority"]["plan_review_source_gap"]["code"] == "PLAN_REVIEW_SOURCE_UNAVAILABLE"
+    own = artifacts.store_actor_source_bytes(root, "succ", category="tool_results", source_id="own",
+                                             data=b"own bytes", extension="txt")
+    request = {"evidence": {"task_contract": build_task_contract(task), "source_refs": [own]}}
+
+    bindings = _reader_bindings(request, root, "succ")
+
+    assert [(row["owner_task_id"], row["source_path"]) for row in bindings] == [
+        (pred, intact["path"]), ("succ", own["path"])]
