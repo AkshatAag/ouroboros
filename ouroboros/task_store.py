@@ -41,11 +41,13 @@ def exists(root: Any, task_id: str) -> bool:
         return txn.row(str(task_id), "task_id") is not None
 
 
-def signature(root: Any, task_id: str) -> Optional[Tuple[int, str]]:
+def signature(root: Any, task_id: str, *, txn: Optional[Txn] = None) -> Optional[Tuple[int, str]]:
     """``(write_seq, updated_at)``: changes on every write; ``None`` for an absent task. The key
     the memos compare that used to compare a result file's stat."""
-    with open_store(root, write=False) as txn:
+    if txn is not None:
         return txn.row(str(task_id), "write_seq", "updated_at")
+    with open_store(root, write=False) as txn:
+        return signature(root, task_id, txn=txn)
 
 
 def delete_document(root: Any, task_id: str) -> bool:

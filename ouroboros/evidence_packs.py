@@ -599,7 +599,7 @@ def pending_restore_bytes(root: Any) -> int:
 
 
 
-def settlement_obligations(root: Any, *, txn: Optional[store.Txn] = None) -> dict:
+def settlement_obligations(root: Any, *, txn: Optional[store.Txn] = None, cache: Optional[dict] = None) -> dict:
     """Read every non-receipt set once, indexed by all of its recorded task owners.
 
     Reuse this snapshot for a candidate pass or a fresh unlink census; never scan
@@ -609,7 +609,10 @@ def settlement_obligations(root: Any, *, txn: Optional[store.Txn] = None) -> dic
 
     if txn is None:
         with store.open_store(root, write=False) as txn:
-            return settlement_obligations(root, txn=txn)
+            return settlement_obligations(root, txn=txn, cache=cache)
+    revision = (str(txn.root), txn.revision())
+    if cache is not None and cache.get("revision") == revision:
+        return cache["rows"]
     by_task: dict = {}
     names = set(obligations.BOOT_SETS) | set(store.FLAG_COLUMNS) | set(txn.set_names())
     for name in sorted(names - set(obligations.RECEIPT_SETS)):
@@ -618,10 +621,13 @@ def settlement_obligations(root: Any, *, txn: Optional[store.Txn] = None) -> dic
                                       (entry, entry.get("custody") or {}, entry.get("request") or {})}
             for owner in owners - {""}:
                 by_task.setdefault(owner, {}).setdefault(name, {})[identity] = entry
+    if cache is not None:
+        cache.update(revision=revision, rows=by_task)
     return by_task
 
 
-def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None) -> Dict[str, Any]:
+def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None,
+                          txn: Optional[store.Txn] = None) -> Dict[str, Any]:
     """The facts the settle predicate reads, through the current store: terminal status,
     every obligation flag, open review operations / undischarged acceptance debt, and unresolved
     money attempts (``None`` = unknown, which never settles). No timer anywhere."""
@@ -634,7 +640,7 @@ def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[
     root = pathlib.Path(root)
     row, owed = {}, set()
     try:
-        with store.open_store(root, write=False) as txn:
+        with (store.open_store(root, write=False) if txn is None else contextlib.nullcontext(txn)) as txn:
             row = read_document(root, task_id, txn=txn) or {}
             if obligation_rows is None:
                 obligation_rows = settlement_obligations(root, txn=txn)
@@ -689,8 +695,9 @@ def facts_settled(facts: Dict[str, Any]) -> bool:
                 and not facts["open_acceptance"] and not facts["open_late_receipts"] and facts["money_open"] is False)
 
 
-def task_settled(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None) -> bool:
-    return facts_settled(task_settlement_facts(root, task_id, obligation_rows=obligation_rows))
+def task_settled(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None,
+                 txn: Optional[store.Txn] = None) -> bool:
+    return facts_settled(task_settlement_facts(root, task_id, obligation_rows=obligation_rows, txn=txn))
 
 
 
@@ -826,15 +833,16 @@ def _member_key(member: Dict[str, Any]) -> tuple:
 
 
 @contextlib.contextmanager
-def _unlink_phase(root: Any) -> Iterator[bool]:
+def _unlink_phase(root: Any) -> Iterator[tuple]:
     """Serialize loose deletion with the switch's phase change, without creating a store."""
     present, _ = store.probe(root)
     with (store.open_store(root, write=True) if present == "present" else contextlib.nullcontext()) as txn:
         yield (txn.phase() == store.PUBLISHED if txn is not None else
-               not (store.generation_stamped(root) or store.retired_sibling(root)))
+               not (store.generation_stamped(root) or store.retired_sibling(root))), txn
 
 
-def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set, revision: str) -> Dict[str, int]:
+def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set, revision: str,
+                 obligation_cache: Optional[dict] = None) -> Dict[str, int]:
     """Remove loose files whose bytes a VERIFIED pack holds; a blob some non-settled task's
     manifests still reference (``keep_shas``) stays loose. A busy file is retried next pass."""
     from ouroboros.evidence_packer import live_manifest_shas, task_stamps
@@ -844,14 +852,14 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
     packed = {_member_key(m) for s in sidecars for m in s["members"]}
     report = {"unlinked": 0, "kept": 0, "busy": 0, "deferred": 1}
 
-    def remove():
-        duties = settlement_obligations(root)
-        if (task_stamps(root, task_id, obligation_rows=duties) != revision
-                or not task_settled(root, task_id, obligation_rows=duties)):
+    def remove(txn):
+        duties = settlement_obligations(root, txn=txn, cache=obligation_cache)
+        if (task_stamps(root, task_id, obligation_rows=duties, txn=txn) != revision
+                or not task_settled(root, task_id, obligation_rows=duties, txn=txn)):
             return
-        keep = keep_shas | live_manifest_shas(root, obligation_rows=duties)
+        keep = keep_shas | live_manifest_shas(root, obligation_rows=duties, txn=txn)
         members = loose_members(root, task_id)
-        if task_stamps(root, task_id, obligation_rows=duties) != revision:
+        if task_stamps(root, task_id, obligation_rows=duties, txn=txn) != revision:
             return
         report["deferred"] = 0
         for member in members:
@@ -871,14 +879,15 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
     # Compression precedes custody -> store write -> manifest publication locks.
     with task_custody_lock(root, task_id) as acquired:
         if acquired:
-            with _unlink_phase(root) as allowed:
+            with _unlink_phase(root) as (allowed, txn):
                 if allowed:
                     with store.name_lock(root, PUBLICATION_LOCK_NAME, timeout_sec=INDEX_WAIT_SEC):
-                        remove()
+                        remove(txn)
     return report
 
 
 def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list] = None, revision: Optional[str] = None,
+              obligation_cache: Optional[dict] = None,
               record: Callable[..., None] = lambda **facts: None) -> Dict[str, Any]:
     """The per-task steps, each idempotent: new loose members -> next generation (write, publish,
     re-read + verify every member, index), then unlink loose files held by verified packs."""
@@ -905,7 +914,8 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
         verify_pack(pack_path, sidecar)  # from disk, EVERY member, before any unlink
         index_upsert(root, pack_path, {**sidecar, "verified_at": utc_now_iso()})
     write_unpacker(root)
-    report.update(unlink_loose(root, task_id, generations, keep_shas=keep_shas, revision=revision))
+    report.update(unlink_loose(root, task_id, generations, keep_shas=keep_shas, revision=revision,
+                               obligation_cache=obligation_cache))
     record(phase="packed", **report)
     return report
 
@@ -937,7 +947,7 @@ def archive_usage_segments(root: Any) -> Dict[str, int]:
                 check.update(chunk)
         if check.hexdigest() != digest.hexdigest():
             raise EvidenceCorrupt(f"evidence_corrupt: archived segment {target.name} failed verification")
-        with _unlink_phase(root) as allowed:
+        with _unlink_phase(root) as (allowed, _txn):
             if not allowed:
                 continue
             source.unlink()

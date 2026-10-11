@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 
 
-def task_stamps(root: pathlib.Path, task_id: str, *, obligation_rows: Optional[dict] = None) -> str:
+def task_stamps(root: pathlib.Path, task_id: str, *, obligation_rows: Optional[dict] = None, txn=None) -> str:
     """Evidence and settlement-source revisions, including owner-held duties and outbox sends."""
     from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.task_store import signature
@@ -27,8 +27,8 @@ def task_stamps(root: pathlib.Path, task_id: str, *, obligation_rows: Optional[d
     from ouroboros.usage_ledger import LEDGER_REL
 
     if obligation_rows is None:
-        obligation_rows = packs.settlement_obligations(root)
-    stamps = [("task", signature(root, task_id)), ("obligations", obligation_rows.get(task_id, {}))]
+        obligation_rows = packs.settlement_obligations(root, txn=txn)
+    stamps = [("task", signature(root, task_id, txn=txn)), ("obligations", obligation_rows.get(task_id, {}))]
     paths = [root / "observability" / "calls" / task_id,
                  task_artifact_dir_path(root, task_id, create=False).joinpath(*packs.CHECKPOINTS_REL.parts),
                  root / "state/terminal_deliveries.json",
@@ -117,13 +117,13 @@ def ordered_candidates(root: pathlib.Path, settled: List[str]) -> List[Tuple[str
     return [(task, raw) for task, raw, _ in recent + backfill]
 
 
-def live_manifest_shas(root: pathlib.Path, *, obligation_rows: Optional[dict] = None) -> set:
+def live_manifest_shas(root: pathlib.Path, *, obligation_rows: Optional[dict] = None, txn=None) -> set:
     """Shas any NON-settled task's manifests reference: those loose blobs stay."""
     keep: set = set()
     if obligation_rows is None:
-        obligation_rows = packs.settlement_obligations(root)
+        obligation_rows = packs.settlement_obligations(root, txn=txn)
     for task in _loose_task_ids(root):
-        if not packs.task_settled(root, task, obligation_rows=obligation_rows):
+        if not packs.task_settled(root, task, obligation_rows=obligation_rows, txn=txn):
             keep.update(sha256 for _, sha256, _ in packs.manifest_blob_refs(root, task))
     return keep
 
@@ -134,7 +134,8 @@ def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
     root = pathlib.Path(root)
     report: Dict[str, Any] = {"status": "completed", "packed": 0, "candidates": 0, "raw": 0, "compressed": 0,
                               "unlinked": 0, "kept": 0, "busy": 0, "faults": 0, "archived": 0}
-    duties = packs.settlement_obligations(root)
+    obligation_cache: dict = {}
+    duties = packs.settlement_obligations(root, cache=obligation_cache)
     revisions = {task: task_stamps(root, task, obligation_rows=duties)
                  for task in changed_tasks(root, obligation_rows=duties)}
     facts = {task: packs.task_settlement_facts(root, task, obligation_rows=duties) for task in revisions}
@@ -151,6 +152,7 @@ def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
             break
         try:
             outcome = packs.pack_task(root, task, keep_shas=set(), listing=listing, revision=revisions[task],
+                                      obligation_cache=obligation_cache,
                                       record=lambda **facts: packs.record_storage_pack(root, **facts))
         except Exception as exc:
             report["faults"] += 1

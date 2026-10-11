@@ -375,7 +375,10 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC) -> I
         stack.callback(conn.close)
         try:
             with transaction(conn, write=write, commit_wait_sec=wait_sec if tier == TIER_ENFORCED else None):
-                yield Txn(conn, root)
+                txn = Txn(conn, root)
+                yield txn
+                if write and conn.total_changes:
+                    txn.set_meta("commit_seq", txn.revision() + 1)
         except sqlite3.Error as exc:
             raise _typed(exc) from exc
 
@@ -443,6 +446,10 @@ class Txn:
 
     def phase(self) -> str:
         return str(self.meta("phase") or PUBLISHED)
+
+    def revision(self) -> int:
+        """Committed current-fact writes; rollback and empty write barriers do not advance it."""
+        return int(self.meta("commit_seq") or 0)
 
     def task_ids(self) -> List[str]:
         return [record["task_id"] for record in self.conn.execute("SELECT task_id FROM tasks ORDER BY task_id")]
