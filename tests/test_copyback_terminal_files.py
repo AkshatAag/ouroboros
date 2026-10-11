@@ -13,6 +13,7 @@ import pytest
 from ouroboros import headless, observability as obs
 from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
 from ouroboros.outcomes import collect_trace_refs
+from ouroboros.store_import import ensure_current_store
 from ouroboros.task_results import load_task_result, write_task_result
 from tests._store_shared import result_signature
 
@@ -300,9 +301,14 @@ def test_retry_refuses_malformed_current_without_rebuilding_from_child(tmp_path)
     _store(child, task["id"], _call(child)["manifest_ref"])
     path = parent / "task_results" / f"{task['id']}.json"
     path.parent.mkdir(exist_ok=True)
-    path.write_text("{")
-    with pytest.raises(ValueError):
+    path.write_text("{", encoding="utf-8")
+    ensure_current_store(parent)  # Boot quarantines the malformed legacy authority.
+    child_signature = result_signature(child, task["id"])
+    with pytest.raises(ValueError, match="authority is unreadable or invalid"):
         headless.retry_child_task_refs(parent, child, task["id"])
+    assert load_task_result(parent, task["id"]) is None
+    assert result_signature(child, task["id"]) == child_signature
+    assert (path.parent / "quarantine" / path.name).read_bytes() == b"{"
 
 
 def test_native_model_send_reverse_reader_accepts_retired_alias(tmp_path, monkeypatch):
