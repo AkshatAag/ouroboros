@@ -652,7 +652,7 @@ An addressed action (Continue, Resume, held selection) first retires the positiv
 
 `release_settled_continuations` and manual Resume observe custody/money outside the queue lock, revalidate the exact candidate/fences/grant under it. Only proven unsent or `paused_before_dispatch` work is selectable; unknown stays held, newer Restart wins. Paid reviews keep their own waits/deadlines beyond the author (Pause: §6 Owner Pause).
 
-`main_context_authority` follows named predecessors for selected accounts/decision lists and verified source readers: history, no current plan/finish authority. Its frozen Runtime prefix cannot be reauthored by current-task `review_notes`.
+`main_context_authority` follows named predecessors for selected accounts/decision lists and verified source readers: history, no current plan/finish authority. Its frozen Runtime prefix cannot be reauthored by current-task `review_notes`. A readable predecessor's unreadable plan source becomes `plan_review_source_gap`; the successor still starts.
 
 #### Saved working state and application stops
 

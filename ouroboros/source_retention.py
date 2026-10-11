@@ -318,8 +318,12 @@ class RetentionWalk:
             self.queue.append(node)
         if self.current_node is not None:
             self.current_node["dependencies"].add(node["key"])
-        if self.discovering:
-            return dict(ref)  # Captured JSON is NEVER a placement projection.
+        if self.discovering or kind == "source":
+            # Captured JSON is NEVER a placement projection, and a task_source carrier
+            # keeps its own reference: one node per file reads, verifies and copies the
+            # bytes, a failure stays a promotion fact, and no carrier receives another
+            # carrier's shape or a placeholder.
+            return dict(ref)
         return dict(node.get("result", ref))
 
     def _read_source(self, node):
@@ -332,8 +336,8 @@ class RetentionWalk:
         for root in dict.fromkeys((self.parent, self.child)):
             try:
                 if kind == "source":
-                    if not obs._task_source_contract_valid(ref):
-                        raise ValueError("invalid actor source read contract")
+                    # The byte reader owns identity (kind, root, placement, size, sha256);
+                    # a carrier's ``read`` is presentation for the model, never checked here.
                     return artifacts.read_actor_source_bytes(root, task, ref), root
                 if kind == "manifest":
                     manifest = obs.read_call_manifest_ref(root, ref, task_id=task)
