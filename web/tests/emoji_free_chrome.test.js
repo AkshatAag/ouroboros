@@ -27,7 +27,14 @@ test('sender labels and the reconnect banner are words', () => {
 test('fixed warning decoration is gone while the tone and words stay', () => {
     const skills = read('modules/skill_card_renderer.js');
     assert.match(skills, /class="skills-menu-item skills-attest-review skills-attest-warn"[^>]*>Skip review<\/button>/);
-    assert.match(read('modules/settings.js'), /statusMsg \+= '\. Warnings: ' \+ data\.warnings\.join\(' \| '\);\n\s*statusType = 'warn';/);
+    const warningState = /statusMsg \+= '\. Warnings: ' \+ data\.warnings\.join\(' \| '\);\r?\n\s*statusType = 'warn';/;
+    for (const eol of ['\n', '\r\n']) {
+        const source = read('modules/settings.js').replace(/\r?\n/g, eol);
+        assert.match(source, warningState, `warning words and tone survive ${JSON.stringify(eol)} checkout`);
+        const opening = source.match(warningState)[0];
+        assert.doesNotMatch(opening.replace("statusType = 'warn'", "statusType = 'ok'"), warningState);
+        assert.doesNotMatch(opening.replace('Warnings: ', ''), warningState);
+    }
     assert.match(read('modules/costs.js'), /msg \+= ' Warnings: ' \+ data\.warnings\.join\(' \| '\);/);
     assert.match(read('modules/costs.js'), /statusEl\.dataset\.tone = \(data\.warnings\?\.length \|\| data\.restart_required\) \? 'warn' : 'ok';/);
     assert.match(read('style.css'), /\.chat-delegated-problem \{\s*color: var\(--status-warn-fg\);/);
