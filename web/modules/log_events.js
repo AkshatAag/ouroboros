@@ -1262,6 +1262,7 @@ function summarizeChatLiveEventView(evt) {
     const delegated = delegatedActivityView(evt); // a delegated run's typed observation, root or child
     if (delegated) return Object.assign(chatView({ ...delegated, chip: executorChip(evt), model: evt.model }), { activity: delegated.activity });
     if ((evt.is_progress || t === 'send_message') && isSubagentEvent(evt)) {
+        const note = describeText(hostRowDisplayText({ ...evt, text: progressText.full }), 240, { markdown: true });
         const sid = subagentId(evt);
         const rawEvent = String(evt.subagent_event || '').toLowerCase();
         const role = String(evt.subagent_role || '').trim();
@@ -1279,7 +1280,7 @@ function summarizeChatLiveEventView(evt) {
         const stopDetail = (evt.task_completion ?? evt.outcome_axes?.execution?.task_completion)?.action === 'stop' ? taskReasonDetail(evt) : '';
         const reasonDetail = cancelDetail || stopDetail || (evt.reason_code ? taskReasonPhrase(evt.reason_code) : '');
         const detailParts = [
-            progressText.full,
+            note.full,
             resultText.full ? `[RESULT]\n${resultText.full}` : '',
             traceText.full ? `[TRACE]\n${traceText.full}` : '',
             errorText.full ? `[ERROR]\n${errorText.full}` : '',
@@ -1318,8 +1319,8 @@ function summarizeChatLiveEventView(evt) {
                 : resultText.full ? resultText
                     : errorText.full ? errorText
                         : traceText.full ? traceText
-                            : progressText)
-            : (progressText.full ? progressText
+                            : note)
+            : (note.full ? note
                 : resultText.full ? resultText
                     : errorText.full ? errorText
                         : traceText);

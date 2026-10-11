@@ -244,7 +244,7 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
     assert "I traced the card renderer end to end" in first and "Thinking" in first
     assert "Maybe the key lives" not in first, "thinking stays behind its labelled disclosure"
     assert kid_card.locator(".chat-delegated-problem").first.inner_text() == \
-        "claude · a01 · Bash: exit 1: 2 failed"
+        "Problem: claude · a01 · Bash: exit 1: 2 failed"
     assert "technical activity" in stretch and "6 technical events since seq 7 · Grep ×3" in stretch, \
         "two silent observations read as one row"
     assert repeated.count("Reading the consumer.") == 2, "equal words at distinct seqs are two utterances"

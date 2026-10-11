@@ -85,8 +85,8 @@ def test_unrecognized_handler_is_not_called_to_guess_its_behavior(native_model):
 
 
 def test_count_waits_for_generation_without_using_its_interrupt_lock(native_model, monkeypatch):
-    from fastapi import FastAPI
-    from llama_cpp.server import app as server
+    FastAPI = pytest.importorskip("fastapi").FastAPI
+    server = pytest.importorskip("llama_cpp.server.app")
 
     async def run():
         inner, outer = asyncio.Lock(), asyncio.Lock()

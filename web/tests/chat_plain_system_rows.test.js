@@ -684,15 +684,15 @@ test('render arm order and enhancement guard are pinned in source', () => {
         chatSource.indexOf('const timeFmt =', chatSource.indexOf("const rendered = role === 'user'")),
     );
     assert.match(ternary, /renderSkillReviewDisclosure\(text, opts\.skillReview \|\| null\)/);
-    assert.match(ternary, /role === 'system' && systemType !== 'skill_review' && markdown !== true\n\s+\? escapeHtml\(painted\)/);
+    assert.match(ternary, /role === 'system' && markdown !== true\n\s+\? escapeHtml\(painted\)/);
     assert.match(chatSource, /: renderChatMarkdown\(painted\);/);
     // `painted` is render-only (host_notice_text.js); Copy keeps the pre-cleanup `shown`.
-    assert.match(chatSource, /const painted = role === 'system' \? hostNoticeDisplayText\(stored, systemType, text\) : text;/);
+    assert.match(chatSource, /const painted = hostRowDisplayText\(\{ text: stored, role, system_type: systemType, narration: opts\.narration \}, text\);/);
     assert.match(chatSource, /chatMedia\.attachCopyControl\(bubble, String\(shown\)\)/);
     // The enhancement pass skips exactly the plain-system case.
     assert.match(
         chatSource,
-        /const richMarkdown = role !== 'user' && systemType !== 'skill_review' && \(role !== 'system' \|\| markdown === true\);/,
+        /const richMarkdown = role !== 'user' && !skillReview && \(role !== 'system' \|\| markdown === true\);/,
     );
 });
 

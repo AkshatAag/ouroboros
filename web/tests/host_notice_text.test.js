@@ -195,3 +195,37 @@ test('skill review paint changes only its generated opening, in legacy and lazy 
     assert.equal(full.innerHTML, painted);
     assert.match(full.innerHTML, /\n⚠️ Skill review round 9 is a quoted answer/);
 });
+
+// Probe independently selected real producer phrases, rather than enumerating the
+// display table (which cannot detect a missing producer entry).
+test('command, partial review and paused-evolution producer variants are covered', () => {
+    const cases = [
+        ['server.py', 'command_reply', '🧠 Background consciousness: ', 'off'],
+        ['ouroboros/tools/plan_review_runtime.py', 'host_progress', '📐 Plan review so far: ', '1 of 3 reviewers answered.'],
+        ['supervisor/evolution_lifecycle.py', 'evolution_notice', '🧬⚠️ Evolution paused: ', '3 consecutive failures.'],
+    ];
+    for (const [path, type, prefix, suffix] of cases) {
+        assert.ok(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8').includes(prefix));
+        const raw = prefix + suffix;
+        assert.equal(hostNoticeDisplayText(raw, type), raw.slice(raw.indexOf(' ') + 1));
+        assert.equal(hostNoticeDisplayText(raw, 'reminder'), raw);
+    }
+});
+
+test('child host progress shares root presentation without changing its raw dedupe identity', () => {
+    const text = '💬 ⚡ Fallback: host route';
+    const event = { type: 'send_message', is_progress: true, task_id: 'child', parent_task_id: 'root',
+        subagent_task_id: 'child', delegation_role: 'subagent', subagent_event: 'progress',
+        role: 'system', system_type: 'host_progress', narration: false, text };
+    const host = summarizeChatLiveEvent(event);
+    assert.equal(host.body, 'Fallback: host route');
+    assert.equal(host.fullBody, 'Fallback: host route');
+    assert.equal(host.activityPreview, 'Fallback: host route');
+    assert.ok(host.dedupeKey.endsWith('⚡ Fallback: host route'));
+    for (const authored of [{ role: 'assistant' }, { narration: true }]) {
+        const row = summarizeChatLiveEvent({ ...event, ...authored });
+        assert.equal(row.body, '⚡ Fallback: host route');
+        assert.equal(row.fullBody, '⚡ Fallback: host route');
+        assert.equal(row.dedupeKey, host.dedupeKey);
+    }
+});

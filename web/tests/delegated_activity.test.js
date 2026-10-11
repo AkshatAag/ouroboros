@@ -76,7 +76,7 @@ test('messages lead, thinking sits behind one labelled disclosure, problems, cou
     const thinking = html.indexOf('<details class="chat-delegated-thinking"><summary>Thinking (2)</summary>');
     assert.ok(message !== -1 && problem > message && thinking > problem, html);
     assert.match(html, /<strong>Telegram<\/strong>/, 'the executor message uses the shared rich-text renderer');
-    assert.match(html, /<div class="chat-delegated-problem">claude · a01 · Bash: exit 1: 2 failed/, 'the warn tone, not a glyph, marks the problem');
+    assert.match(html, /<div class="chat-delegated-problem">Problem: claude · a01 · Bash: exit 1: 2 failed/, 'words and warn tone identify the problem without a glyph');
     assert.match(html, /4 technical events since seq 1 · Read ×2 · Bash ×2/);
     assert.ok(!html.includes('chat-delegated-events'), 'the ordered technical detail waits for the row Expand');
     const expanded = delegatedActivityBodyHtml(view, { expanded: true });

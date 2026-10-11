@@ -216,3 +216,37 @@ def test_settings_cost_warnings_skip_review_and_authored_widget(direct_server_wi
         assert facade.locator('.widgets-facade-title').inner_text() == 'Authored widget'
         page.screenshot(path=str(evidence / 'authored-widget.png'))
         assert not errors, errors
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+@pytest.mark.parametrize("narration", [False, True])
+def test_child_progress_uses_actual_producer_live_and_history(
+    direct_server_with_data, request, monkeypatch, engine, narration,
+):
+    from tests.test_delegated_activity_browser import Producer, ROOT, KID, LINEAGE, EXPAND
+
+    server = direct_server_with_data
+    producer = Producer(server["data_dir"], monkeypatch)
+    root, child = producer.worker(ROOT, None), producer.worker(KID, LINEAGE)
+    text = "⚡ Fallback: child host note" if not narration else "⚡ Fallback: my quoted words"
+    frames = [*producer.say(root, "Following a child."), *producer.lifecycle("Child queued", "scheduled")]
+    ctx, events = child
+    ctx.emit_progress_fn(text, narration=narration)
+    frames.extend(producer._deliver(events))
+    with _browser(server, request, engine) as (page, evidence, errors):
+        _open(page, server["url"])
+        for frame in frames:
+            _emit_ws_frame(page, frame)
+        expected = text if narration else text.split(" ", 1)[1]
+        for phase in ("live", "history"):
+            if phase == "history":
+                _open(page, server["url"], reload=True)
+            page.locator(f'.chat-live-card[data-task-id="{KID}"]').wait_for(state="attached")
+            page.evaluate(EXPAND, [ROOT, KID])
+            body = page.locator(f'#chat-live-timeline-{KID}').inner_text()
+            assert expected in body, body
+            if not narration:
+                assert text not in body, body
+            page.screenshot(path=str(evidence / f"child-{phase}.png"))
+        (evidence / "producer-frames.json").write_text(json.dumps(frames, ensure_ascii=False, indent=2), encoding="utf-8")
+        assert not errors, errors

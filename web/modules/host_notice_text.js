@@ -12,11 +12,11 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     startup_notice: ['♻️ Restored pending queue from snapshot: ', '♻️ Cancelling '],
     command_reply: ['⚠️ Command ignored: ', '✅ Owner chat registered.', '♻️ Restarting.', '⚠️ Restart cancelled: ',
         '🧬 Evolution campaign: ', '🧬 Evolution stayed OFF: ', '🧬 Evolution did not turn on: ',
-        '🧠 Background consciousness '],
+        '🧠 Background consciousness ', '🧠 Background consciousness:'],
     restart_notice: ['♻️ Restart requested by agent: ', '⏳ Restart drain: ', '🧬 Restart cancelled: ',
         '⚠️ Restart skipped: ', '🧬 Body adoption: '],
     consciousness_notice: ['🧠 Background consciousness '],
-    evolution_notice: ['🧬 Evolution stayed OFF: ', '🧬 Evolution stayed off: ', '🧬 Evolution paused: ',
+    evolution_notice: ['🧬⚠️ Evolution paused: ', '🧬 Evolution stayed OFF: ', '🧬 Evolution stayed off: ', '🧬 Evolution paused: ',
         '🧬 Evolution: ', '🧬 Evolution campaigns are self-modification work', '💸 Evolution stopped: ',
         '🛑 Cancelled evolution task(s): ', '⚠️ Evolution stop INCOMPLETE — still live: '],
     evolution_cycle_outcome: ['🧬 Evolution cycle absorbed ', '⚠️ Evolution cycle abandoned '],
@@ -48,7 +48,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     host_progress: ['🌐 Connection restored ', '🌐 The new attempt could not reach the provider ',
         '🌐 Provider connection ', '🌐 The primary provider temporarily refused ',
         '🌐 Could not establish a provider connection ', '🌐 Primary provider answered after ',
-        '🌐 Stopped waiting for ', '🌐 Still waiting for ', '⚡ Fallback: ', '📐 Plan review:', '✅ PR #', '⚠️ PR #'],
+        '🌐 Stopped waiting for ', '🌐 Still waiting for ', '⚡ Fallback: ', '📐 Plan review:', '📐 Plan review so far:', '✅ PR #', '⚠️ PR #'],
 }));
 
 // `text` is the row as stored and decides the match; `shown` is what the caller would

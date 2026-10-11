@@ -8383,6 +8383,9 @@ textarea.chat-input {
     background: var(--menu-item-hover);
     color: var(--text-primary);
 }
+.skills-card-menu-dialog .skills-menu-item.skills-attest-warn {
+    color: var(--status-warn-fg);
+}
 
 
 .chat-photo-menu:not(.ui-popup) {
