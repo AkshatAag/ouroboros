@@ -764,8 +764,11 @@ def test_mcp_import_replaces_legacy_ui(direct_server_with_data, loopback, engine
             disk = _disk(data_dir)
             assert disk["legacy_docs"]["headers"] == {"Authorization": BASIC, "X-Api-Key": CUSTOM}
             assert disk["legacy_docs"]["auth_token"] == "" and disk["legacy_docs"]["enabled"] is True
+            # Save normalizes every server's browser opt-in, including unselected import rows.
+            # HTTP entries remain ordinary MCP connections; the file cannot enable the bridge.
             assert disk["keep_me"] == {**seed[1], "id": "keep_me", "name": "", "command": "", "args": [],
-                                       "auth_header": "Authorization", "auth_token": "", "allowed_tools": []}
+                                       "auth_header": "Authorization", "auth_token": "", "allowed_tools": [],
+                                       "browser_bridge": False}
             assert disk["fresh"]["enabled"] is False and disk["fresh"]["url"].endswith("?k=synthetic-query")
             seen_before = len(http_app.seen)
             cards.nth(0).locator("[data-mcp-refresh]").click()
