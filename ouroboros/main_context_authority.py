@@ -41,7 +41,9 @@ def project_helper_predecessor_authority(
     from ouroboros.contracts.task_contract import build_task_contract
 
     envelope = build_task_contract({"predecessor_authority": authority})["predecessor_authority"]
-    keep = {"kind", "source", "task_id", "authority_sha256", "authority_chars", "digest_semantics"}
+    # A named plan/review source gap is part of the reference itself: declared briefs keep it too.
+    keep = {"kind", "source", "task_id", "authority_sha256", "authority_chars", "digest_semantics",
+            "plan_review_source_gap"}
     if not declared:
         keep.update({"status", "execution_status", "reason_code", "terminal_origin", "outcome_axes",
                      "result", "task_contract", "origin_message_text", "origin_message_ref"})
