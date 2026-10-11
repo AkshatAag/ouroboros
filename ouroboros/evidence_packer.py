@@ -128,8 +128,10 @@ def _external_revision(root: pathlib.Path) -> list:
 
 
 class PackSweep:
-    """One settlement census, outside deletion locks. Changed facts defer the rest of
-    this pass; publications add only their new refs under the publication lock."""
+    """One settlement census, outside deletion locks. Before each unlink ``refresh`` brings it
+    current, still outside the locks: only tasks settled at the census whose facts moved are
+    re-read, and one that left settlement adds its references to the keep-set, so activity
+    elsewhere never stops a pass. Publications add their new refs under the publication lock."""
     def __init__(self, root: pathlib.Path) -> None:
         self.root = root
         self.obligation_cache: dict = {}
@@ -137,6 +139,7 @@ class PackSweep:
         self.external_revision = _external_revision(root)
         self.external = packs.settlement_external(root)
         self.keep: set = set()
+        self.settled: Dict[str, Optional[int]] = {}  # census-settled loose task -> its write sequence
         self.journal = None
 
     def current(self, txn=None) -> bool:
@@ -147,11 +150,35 @@ class PackSweep:
                 and self.external_revision == _external_revision(self.root))
 
     def collect_keep(self, facts: dict) -> None:
+        with store.open_store(self.root, write=False) as txn:
+            seqs = txn.write_seqs()
         for task in _loose_task_ids(self.root):
             fact = facts.get(task)
             if fact is None:
                 fact = packs.task_settlement_facts(self.root, task, obligation_rows=self.duties, external=self.external)
-            if not packs.facts_settled(fact):
+            if packs.facts_settled(fact):
+                self.settled[task] = seqs.get(task)
+            else:
+                self.keep.update(sha for _, sha, _ in packs.manifest_blob_refs(self.root, task))
+
+    def refresh(self) -> None:
+        """Bring the census current outside the deletion locks (class docstring)."""
+        if self.current():
+            return
+        external_revision = _external_revision(self.root)
+        with store.open_store(self.root, write=False) as txn:
+            self.duties = packs.settlement_obligations(self.root, txn=txn, cache=self.obligation_cache)
+            seqs = txn.write_seqs()
+        self.external, self.external_revision = packs.settlement_external(self.root), external_revision
+        for task, seq in list(self.settled.items()):
+            if seqs.get(task) == seq and task not in self.duties and all(
+                    tasks is not None and task not in tasks for tasks in self.external.values()):
+                continue
+            fact = packs.task_settlement_facts(self.root, task, obligation_rows=self.duties, external=self.external)
+            if packs.facts_settled(fact):
+                self.settled[task] = seqs.get(task)
+            else:
+                del self.settled[task]
                 self.keep.update(sha for _, sha, _ in packs.manifest_blob_refs(self.root, task))
 
     def refresh_keep(self) -> set:
@@ -205,8 +232,6 @@ def run_pass(root: pathlib.Path, *, sweep=None) -> Dict[str, Any]:
     if candidates:
         sweep.collect_keep(facts)
     for task, raw in candidates:
-        if not sweep.current():
-            break  # no repeated global census or compression against stale facts
         try:
             outcome = packs.pack_task(root, task, keep_shas=set(), listing=listing, revision=revisions[task],
                                       sweep=sweep)

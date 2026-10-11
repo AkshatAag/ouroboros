@@ -893,6 +893,7 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
             except PermissionError:
                 report["busy"] += 1
 
+    sweep.refresh()  # outside the locks; inside, only this task and an O(1) staleness check
     # Compression precedes custody -> store write -> manifest publication locks.
     with task_custody_lock(root, task_id) as acquired:
         if acquired:

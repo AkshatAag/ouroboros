@@ -231,20 +231,17 @@ def test_manifest_published_after_keep_snapshot_protects_blob(root, monkeypatch,
     assert not Path(refs[0]["path"]).exists()
 
 
-@pytest.mark.parametrize("change", ["row", "money", "delivery", "obligation"])
-def test_changed_settlement_snapshot_defers_without_scanning_under_locks(root, monkeypatch, change):
+@pytest.mark.parametrize("change", ["money", "delivery", "obligation"])
+def test_own_settlement_change_defers_the_candidate_without_scanning_under_locks(root, monkeypatch, change):
     from ouroboros import obligations
     from pathlib import Path
 
     refs, _ = _task(root, "packing", blobs=1)
-    _result(root, "other")
     write = packs.write_pack
 
     def publish(*args, **kwargs):
         result = write(*args, **kwargs)
-        if change == "row":
-            _result(root, "other", "running")
-        elif change == "money":
+        if change == "money":
             _reserve(root, "packing")
         elif change == "delivery":
             terminal_delivery.register_pending_delivery(
@@ -267,6 +264,34 @@ def test_changed_settlement_snapshot_defers_without_scanning_under_locks(root, m
     assert packer.run_pass(root)["unlinked"] == 2
 
 
+def test_unrelated_activity_during_a_pass_does_not_stop_the_backfill(root, monkeypatch):
+    # A busy install commits rows and money between candidates; only the census's own tasks matter.
+    from pathlib import Path
+
+    refs = [_task(root, f"settled-{number}", blobs=1)[0][0] for number in range(6)]
+    write, calls, evaluated = packs.write_pack, [], []
+    facts = packs.task_settlement_facts
+
+    def publish(*args, **kwargs):
+        result = write(*args, **kwargs)
+        calls.append(1)
+        _result(root, "busy", "running", step=len(calls))
+        _reserve(root, f"busy-{len(calls)}")
+        return result
+
+    def observed(root, task, **kwargs):
+        evaluated.append(task)
+        return facts(root, task, **kwargs)
+
+    with monkeypatch.context() as edits:
+        edits.setattr(packs, "write_pack", publish)
+        edits.setattr(packs, "task_settlement_facts", observed)
+        report = packer.run_pass(root)
+    assert report["faults"] == 0 and report["packed"] == 6 and report["unlinked"] == 12
+    assert not any(Path(ref["path"]).exists() for ref in refs)
+    assert len(evaluated) <= 3 * 6  # census, keep-set and each candidate's own check: still linear
+
+
 def test_task_resumed_after_census_keeps_its_existing_shared_reference(root, monkeypatch):
     from pathlib import Path
 
@@ -282,8 +307,9 @@ def test_task_resumed_after_census_keeps_its_existing_shared_reference(root, mon
 
     with monkeypatch.context() as edits:
         edits.setattr(packs, "write_pack", resume)
-        assert packer.run_pass(root)["unlinked"] == 0
-    assert packer.run_pass(root)["kept"] == 1
+        report = packer.run_pass(root)
+    # The same pass sees the resumed sharer: the shared blob stays, the rest of the pass goes on.
+    assert report["faults"] == 0 and report["kept"] == 1 and report["unlinked"] == 1
     assert Path(refs[0]["path"]).exists()
     _result(root, "other")
     assert packer.run_pass(root)["faults"] == 0
