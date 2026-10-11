@@ -154,6 +154,7 @@ ouroboros/ — agent core and shared runtime (§6)
   _usage_cache_splits.py — process-local cache split by task/provider/route/review; a missing entry prices a full cache write (§6)
   usage_store.py, usage_journal.py, openrouter_cost.py — `state/usage.sqlite`, its journal import and explicit OpenRouter price receipts (docs/USAGE_STORE.md)
   cost_projection.py — the one task-cost projection for every producer: `accounted_upper_bound_usd`, null as None and never $0.00 (§6 Budget tracking)
+  storage.py — Dashboard Storage: one bounded, link-safe metadata walk at a time, kept in memory (§3 Dashboard)
   delegate_custody.py, delegate_custody_reconcile.py, delegate_state_sweep.py, delegate_custody_usage.py, delegate_custody_memo.py — Durable delegated-run custody, reconciliation, sweeps, usage and process memo; ownership stays OWNED/FOREIGN/UNKNOWN (§6 Nanny, transport and custody)
   delegate_hold.py — unknown-provider hold in supervised_wait until the leaf wakes; never resends (§6 Context fitting)
   delegate_source_coverage.py — oversized work-order source custody; incomplete source cannot authorize a passing terminal verdict or an apply
@@ -387,7 +388,7 @@ ouroboros/ — agent core and shared runtime (§6)
     task_decision.py — The one `POST /api/decisions` ingress with family-parsed ids (`quiz:` here, `routing:` → routing_decision.py, `interaction:` reserved); writes `KIND_QUIZ_ANSWER` (owner_quiz.py; §11.1)
     task_model_wait.py — Shared model-wait decision effects over the existing mailbox, with live-owner/revision checks
     routing_decision.py — Validates a click against the durable `needs_manual_target` row, recovers the original text, dispatches `steer_task`/`promote_chat_to_task`, confirms through routing_wait receipts
-    logs.py — Read-only runtime log tail
+    logs.py — Read-only runtime log tail; storage.py — Storage routes
     onboarding.py — `POST /api/onboarding/complete`: install-time latch, validation, live engine read, preset compile, one settings write under lock; a typed 503 persists nothing, except `settings_save_timeout`, the unknown outcome (§2)
     onboarding_host.py — GET /onboarding: side-effect-free wizard page served as ES modules
     owner_settings.py — Settings-lock-as-precondition and `CommitBoundary` (Gateway Boundary v1 below); owner_effort.py — the effort range
@@ -529,7 +530,7 @@ ouroboros/ — agent core and shared runtime (§6)
 
 ### Gateway Boundary v1
 
-`ouroboros/gateway/` is the single inbound browser/CLI boundary; `ouroboros/gateways/` holds the thin outbound adapters. `contracts.py` owns the envelopes, `endpoint_index.py` the endpoint index, `router.py` collects the routes, and `files.py`/`host_service.py` stay separate trust boundaries. The contract is executable: `gateway/schema.py` validates ingress against JSON Schema derived from those TypedDicts. Handlers translate transport into calls on existing runtime owners and hold no second copy of queue, review, settings or lifecycle policy. The facade exists for dependency direction: the UI evolves without importing the agent body, the runtime without ad-hoc browser contracts. `gateway/owner_settings.py` is the single owner-scoped settings write seam (every owner write calls `_owner_update_settings`): the settings lock is a precondition, so a timed-out acquisition refuses before any write, and `CommitBoundary` marks the commit instant with `saved` present on both sides, so a later-step failure is reported as that step, not as an ambiguous omission (read-change-write and digest rule: §7 Reading and writing the settings document). Frontend calls go through `web/modules/api_client.js` with the JSDoc mirror `web/modules/api_types.js`, pinned by the gateway parity tests; extension HTTP lives under `/api/extensions/<skill>/…` with namespaced WS dispatch.
+`ouroboros/gateway/` is the single inbound browser/CLI boundary; `ouroboros/gateways/` holds the thin outbound adapters. `files.py` and `host_service.py` stay separate trust boundaries. Handlers translate transport into calls on existing runtime owners and hold no second copy of queue, review, settings or lifecycle policy. The facade exists for dependency direction: the UI evolves without importing the agent body, the runtime without ad-hoc browser contracts. `gateway/owner_settings.py` is the single owner-scoped settings write seam (every owner write calls `_owner_update_settings`): the settings lock is a precondition, so a timed-out acquisition refuses before any write, and `CommitBoundary` marks the commit instant with `saved` present on both sides, so a later-step failure is reported as that step, not as an ambiguous omission (read-change-write and digest rule: §7 Reading and writing the settings document). Frontend calls go through `web/modules/api_client.js` (typed mirror: §11); extension HTTP lives under `/api/extensions/<skill>/…` with namespaced WS dispatch.
 
 ### CLI / Headless Boundary
 
@@ -675,6 +676,6 @@ Birth identity is separate from PID presence. Linux mints boot-qualified ticks, 
 └── ouroboros.pid                  ← launcher PID lock; auto-released on crash
 ```
 
-The generated `docs/inventories/DATA_LAYOUT_INVENTORY.md` probes every entry of this tree: its last literal path segment must be a tracked repo path or a literal in the runtime sources, so a durable file renamed in code while its row survives turns red. The check proves nothing stronger about an entry.
+The generated `docs/inventories/DATA_LAYOUT_INVENTORY.md` probes each entry's last literal segment against tracked paths and runtime literals, so a durable file renamed in code turns its row red; it proves nothing stronger.
 
 ---

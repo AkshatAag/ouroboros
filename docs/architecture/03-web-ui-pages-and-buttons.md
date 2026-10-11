@@ -169,13 +169,15 @@ An out-of-process extension response streams through `extension_route_stream.py`
 
 ### Dashboard
 
-Dashboard groups Logs, Activity, Costs, Updates and Evolution under the common tab binder; each sub-tab owns its loading and refresh policy instead of running every expensive reader while hidden. Charting uses the bundled Chart.js (§3 Widgets page).
+Dashboard's sub-tabs share the common tab binder; each owns its loading and refresh policy instead of running every expensive reader while hidden. Charting uses the bundled Chart.js (§3 Widgets page).
 
 Logs merges live WebSocket log frames with bounded REST backfill from the events, tools, progress and supervisor logs: chronological order, dedupe across live and reconnect overlap, bounded grouped task cards, raw record on demand, and the shared presentation of `log_events.js`. A failed backfill names the unavailable sources in a separate status row while live events continue; clearing the panel deletes no log. Mounted unfinished child cards refresh their holds through `/api/tasks?queue_only=1`. `project_admission_hold` (a gateway contract field) carries the host's label, reason and detail, not a phase; a missing or unreadable queue never proves recovery, and parked phases, Stop and terminal outrank it (`chat_activity.js`).
 
 Activity joins queue entries with the same refresh's `/api/state` census; a partial census cannot prove idleness, and an unavailable queue never renders empty. Independent sections show the consciousness alarm and schedules; a failed read keeps the others. Authoritative controls are cascade cancellation, consciousness start/stop and schedule enable/disable/delete/restore; every schedule button sends action and reason to the audited `POST /api/schedules/{id}/action`, never a stale record rewrite (`activity.js`).
 
 Costs is a projection of the physical-attempt ledger: known spend (confirmed plus estimated, both shown) against the limit, then reserved and unresolved upper-bound holds that do not count as spending, unknown/unmetered usage, open rows and finality; unavailable data renders as unavailable, not `$0`. Breakdowns by model, key, model category and task category are views over the same ledger. Total budget hot-applies; the per-task value is a hard cap over the whole root tree of the next task, not an own-task soft warning (§7 Default settings), and raising a cap does not resume work that already finalized or paused.
+
+Storage measures only on request: opening the tab is one passive `GET /api/storage`; **Measure now** starts the one bounded walk, polled only while running and visible. The headline is counted bytes, never an implied total; a partly counted row or group reads "At least", an unreadable one has no size, and excluded locations (engine home, configured worktree and project roots) are in no share. A failed refresh keeps the last measurement; the view cleans nothing (`storage.js`).
 
 Evolution shows the evolution state, the consciousness alarm clock, campaign objective and progress, queue/failure/budget information and durable history; starting a campaign uses the shared input dialog, where confirmed empty input selects the backend's default autonomous objective. Light runtime mode disables self-modifying campaigns rather than offering a control the backend will refuse.
 
