@@ -454,12 +454,14 @@ def handle_bytes(root: Any, task_id: str, rel_path: str) -> bytes:
 
 
 def handle_info(root: Any, task_id: str, rel_path: str) -> Optional[Dict[str, Any]]:
-    """``{"size", "sha256", "loose"}`` of a handle that exists loose or packed, else ``None``."""
+    """Handle metadata from a digest-verified loose file or its packed placement, else ``None``."""
     rel = pathlib.PurePosixPath(str(rel_path))
     loose = _handle_path(root, task_id, rel.as_posix())
     try:
         if loose.is_file() and not loose.is_symlink():
-            return {"size": loose.stat().st_size, "sha256": rel.name.rsplit("-", 1)[-1].split(".", 1)[0], "loose": True}
+            raw, digest = loose.read_bytes(), rel.stem.rsplit("-", 1)[-1]
+            if hashlib.sha256(raw).hexdigest() == digest:
+                return {"size": len(raw), "sha256": digest, "loose": True}
     except OSError:
         pass
     if rel.parts[:2] != CHECKPOINTS_REL.parts:

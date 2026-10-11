@@ -101,7 +101,8 @@ def test_generation_is_never_reused_while_either_publication_file_exists(root, o
     assert path.read_bytes() == before
 
 
-def test_presence_reentry_projection_reads_loose_and_packed_source(root, monkeypatch):
+@pytest.mark.parametrize("placement", ["missing", "valid", "corrupt_short", "corrupt_same_size"])
+def test_presence_reentry_projection_reads_loose_and_packed_source(root, monkeypatch, placement):
     from ouroboros import artifacts
     from ouroboros.presence_continuation import reentry_source_projection
 
@@ -114,8 +115,13 @@ def test_presence_reentry_projection_reads_loose_and_packed_source(root, monkeyp
     assert before["complete_sha256"] == ref["sha256"]
     assert packer.run_pass(root)["faults"] == 0
 
-    assert not _handle_path(root, "presence", ref).exists()
+    loose = _handle_path(root, "presence", ref)
+    assert not loose.exists()
+    if placement != "missing":
+        loose.write_bytes(raw if placement == "valid" else b"bad" if placement == "corrupt_short" else b"x" * len(raw))
     assert reentry_source_projection(root, "presence", ref["sha256"]) == before
+    assert packs.handle_info(root, "presence", ref["path"]) == {
+        "size": len(raw), "sha256": ref["sha256"], "loose": placement == "valid"}
     assert reentry_source_projection(root, "presence", "0" * 64)["reason"] == "source_unavailable"
     monkeypatch.setattr(artifacts, "read_actor_source_bytes", lambda *a, **k: (_ for _ in ()).throw(OSError("read failed")))
     assert reentry_source_projection(root, "presence", ref["sha256"])["reason"] == "source_unreadable"
