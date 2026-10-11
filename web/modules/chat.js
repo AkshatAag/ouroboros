@@ -1978,7 +1978,6 @@ export function createChatInstance({
             type: 'send_message',
             is_progress: true,
             content: msg.content || msg.text || '',
-            text: msg.content || msg.text || '',
             task_id: taskId,
             ...Object.fromEntries(['subagent_event', 'subagent_task_id', 'root_task_id',
                 'parent_task_id', 'delegation_role', 'subagent_role', 'status', 'result',
