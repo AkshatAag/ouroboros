@@ -145,6 +145,7 @@ Every path-addressed `/api/files/*` operation resolves its requested `path` and 
 | GET | `/api/mcp/status` | |
 | POST | `/api/mcp/refresh` | |
 | POST | `/api/mcp/test` | |
+| POST | `/api/mcp/import/preview` | |
 | WS | `/ws` | |
 | STATIC | `/static/*` | |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/identity` | |

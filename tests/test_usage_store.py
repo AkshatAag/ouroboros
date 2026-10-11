@@ -378,13 +378,15 @@ def test_a_display_read_on_a_fresh_install_creates_the_empty_store(root):
 
 def test_the_server_imports_the_journal_at_lifespan_start_on_every_door():
     """The import runs where the other lifecycle jobs run (before any request, worker or supervisor), so a
-    providerless install that never starts the supervisor imports too."""
+    providerless install that never starts the supervisor imports too. The lifecycle import owner is the
+    boot door (`store_switch.start` runs `prepare_startup_state` under the import window)."""
     import inspect
 
     import server
 
     source = inspect.getsource(server.lifespan)
-    assert source.index("prepare_startup_state(") < source.index("usage_store.migrate_from_journal(") \
+    assert "prepare_startup_state(" not in source
+    assert source.index("store_switch.start(") < source.index("usage_store.migrate_from_journal(") \
         < source.index("yield")
 
 
