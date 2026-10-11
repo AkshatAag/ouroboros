@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
 from ouroboros.utils import utc_now_iso
+from ouroboros.subagents import subagent_intent_fields
 from supervisor.task_admission import (
     restore_terminalization_retry,
     restore_terminalization_retry_rows,
@@ -85,8 +86,7 @@ _PENDING_FIELDS = (
     'actor_id', 'delegation_role', 'workspace_root', 'workspace_mode',
     'project_id', '_project_admission_restore_hold', 'focus', 'allowed_resources',
     'deadline_at', 'task_contract', '_owner_hold', '_consciousness_continuation',
-    'model_lane', 'parent_model_lane', 'requested_model_lane', 'required_model_lane',
-    'requested_executor', 'requested_effort', 'effective_model_lane', 'model',
+    'model_lane', 'effective_model_lane', 'model',
     'use_local_model', 'effective_executor', 'tool_profile', 'executor_route',
     'reasoning_effort', 'effort_level', 'effort_requested', 'effort_source',
     'capability_delta', 'task_group_id', 'task_group', 'subagent_envelope',
@@ -149,7 +149,7 @@ def persist_queue_snapshot(reason: str = "") -> bool:
                 "id": t.get("id"), "type": t.get("type"), "priority": t.get("priority"),
                 "attempt": t.get("_attempt"), "queued_at": t.get("queued_at"),
                 "queue_seq": t.get("_queue_seq"),
-                "task": {**{key: t.get(key) for key in _PENDING_FIELDS},
+                "task": {**{key: t.get(key) for key in _PENDING_FIELDS}, **subagent_intent_fields(t),
                          **{key: t[key] for key in ('_project_admission', 'admitted_dispatch', '_project_scope_none', '_working_recovery') if key in t}},
             })
         running_rows = []

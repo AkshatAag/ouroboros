@@ -746,7 +746,13 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # Store-backed packing removes state/obligations, state/obligations/* and
 # state/obligations/rebuild.owed. The remaining 359 are S3's 356 plus the three
 # documented evidence-pack paths above; no new durable plane or exemption.
-EXPECTED_SCAN_PATHS = 359
+# 353 -> 364 (Sprint 4 review pool): per-operation reviewer checking
+# areas/markers/evidence generations, retained frozen folder views and staging
+# names (review_checking.py), plus investigation named evidence
+# (tools/subagent_integration_delegated.py). The two section-4 checking rows and
+# section-7 delegated evidence row in PERSISTENCE.md cover the measured additions.
+# merge of the storage PR (353 -> 359, above) and Sprint 4 (353 -> 364): 353 + 6 + 11.
+EXPECTED_SCAN_PATHS = 370
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

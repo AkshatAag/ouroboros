@@ -14,7 +14,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     chat_decision.js, question_presentation.js, chat_render_batch.js, task_phase_chip.js, task_activity_types.js, lifecycle_card.js — chat helpers: decision cards, the one Project-question form and its Main mirror (Python twin `project_dialogue.QUESTION_STATUS`), keyed timeline patches, shared status/motion and census schema, skill lifecycle card (§3 Chat and Projects)
     chat_history.js, chat_history_replay.js, chat_reading_position.js — bounded per-chat pages, replay without live-task authority, one reading intent (§3 Timeline ownership and ordering)
     delegated_activity.js — executor activity projection with explicit preview gaps (§3 Child cards and executor presentation)
-    welcome_preference.js — Main's empty state from the hidden `welcome` preference (DESIGN "Chat authorship and System rows")
+    welcome_preference.js, host_notice_text.js — Main's empty state from the hidden `welcome` preference; known host sentences painted without the leading pictograph (DESIGN "Chat authorship and System rows")
     project_answer.js — Main's Project lifecycle rows and folded mirrored answers (§3 Main rows)
     project_handoff.js — compact Main creation/transfer entries; receipt folding preserves work identity (§3 Project handoff receipts)
     project_reference.js — the one Project pointer control and the only raiser of `ouro:open-project` (DESIGN "References and actions")
@@ -252,13 +252,13 @@ ouroboros/ — agent core and shared runtime (§6)
   review_execution_projection.py — Reviewer-execution projection; kinds `api` | `harness` | `native`, so the owner can tell a retrieving review from a packet review on the same model
   preflight_runner.py, preflight_node.py — Hermetic pre-commit test runner and Node lane (§6 Hermetic preflight proof; §8)
   review_substrate.py — Review seat coordinator: independent seats, per-actor records that keep transport, parse, verdict, coverage and quorum distinct (§6 Review stack, Task acceptance)
-  review_custody.py, review_source_closure.py, review_operation.py — Physical reviewer workers with no-resend retry custody; retained owner-bound review inputs; panel-owned waits, checkpoints and existing-producer collection (§6 Task acceptance)
+  review_custody.py, review_source_closure.py, review_operation.py, review_live_join.py — Physical reviewer workers with no-resend retry custody; retained owner-bound review inputs; panel-owned waits, checkpoints and existing-producer collection and its live join (§6 Task acceptance)
   review_owner_custody.py — Paid attempts record `(server session, pid)`; owner loss is proven by pid death, never by elapsed time (§6 Paid stamp and owner custody)
   review_execution.py, review_session_preparation.py — Review delivery (`delivery_retrieves(route, native_retrieval)`) and session preparation without transport fallback (§6 Review delivery)
   review_native_episode.py — Read-only native API reviewer episodes for pool seats and deep self-review (§6 Native tool-round episode)
   review_session_reads.py — Harness-journal reading diagnostics (`harness_observed`), never verdict, quorum or retry authority (§6 Review delivery)
   review_verdict_extraction.py — Verdict canonicalization by output shape: strict parse, then light-model extraction; `array` keeps the findings ladder, `object` the whole verdict, `report` passes through verbatim
-  review_session_custody.py — Delegated-review recovery validation and the pre-POST durable invocation checkpoint
+  review_session_custody.py, review_checking.py — Delegated-review recovery validation and the pre-POST durable invocation checkpoint; writable seats' private checking copies (§6 Review delivery)
   review_slot_cancel.py — A cancel outcome reports only what it proved; a succeeded run whose result read fails is the typed `ReviewSessionSucceededResultUnavailable`, never "may still be live"
   review_actor_aggregation.py, review_session_usage.py, review_thread_continuity.py — Completed-actor contract aggregation; delegated-session usage attribution; Claudexor thread operations for delegated plan reviewers
   commit_admission.py — Deterministic commit-admission SSOT (release checks, staged-Python syntax, `run_tests_preflight_with_proof`); the commit gate delegates here (§6 Hermetic preflight proof)
@@ -308,7 +308,7 @@ ouroboros/ — agent core and shared runtime (§6)
   skill_owner_attestation.py — Owner attestation lane: the owner may skip the LLM skill review for skills they authored
   skill_publish_snapshot.py, skill_publish_scanner.py, skill_publish_result.py, skill_publish_github.py, skill_publish_eligibility.py — Publication leaves: captured-byte authority, exact-byte Betterleaks evidence, typed attempt/receipt, GitHub transport after the local gates, author publication authority (§6 Skill publication)
   skill_review_status.py — Verdict aggregation → `executable_review` (anchors the §13 readiness statuses); an Advisory author acceptance may outlive a stale critic hash, Blocking requires fresh critic authority
-  skill_review_passes.py — One multi-model pass or chunked quorum; reserves the complete operation roster before dispatch
+  skill_review_passes.py, skill_review_collect.py — One multi-model pass or chunked quorum, reserving the complete operation roster before dispatch; exact-wave collection without paid dispatch
   skill_review.py — Skill review orchestration: deterministic preflight, then the tri-model gate against the Skill Review Checklist (docs/CHECKLISTS.md) and docs/CREATING_SKILLS.md
   skill_review_prompt.py, skill_review_packs.py, skill_review_output.py, skill_review_rebuttals.py — The skill reviewer's leaves: prompt contract and waves, the reviewable payload, parsed findings and rendering, review-history evidence read before re-judging
   skill_review_history.py — Write-ahead review-history marker and the idempotent `state/skill_review_root_tasks.jsonl` projection; a failed append is the typed `skill_review_history_append_failed` event
