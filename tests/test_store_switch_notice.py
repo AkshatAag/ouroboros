@@ -4,7 +4,7 @@ import pathlib
 
 import pytest
 
-from ouroboros import server_maintenance, store, store_switch
+from ouroboros import store, store_switch
 from ouroboros.store_import import ensure_current_store
 from ouroboros.utils import atomic_write_json
 from supervisor import message_bus, state
@@ -16,7 +16,6 @@ from tests.test_store_switch import switch_root as switch_root, target_repo as t
 def owner_chat(switch_root, monkeypatch):
     state.init(switch_root)
     atomic_write_json(state.STATE_PATH, {"owner_chat_id": 7})  # the legacy install already bound its owner
-    monkeypatch.setattr(server_maintenance, "DATA_DIR", switch_root)
     sent = []
     monkeypatch.setattr(message_bus, "send_with_budget", lambda chat, text, **kw: sent.append((chat, text, kw)))
     return sent
@@ -52,7 +51,7 @@ def test_next_boot_reports_failed_switch_once(switch_root, target_repo, owner_ch
     assert owner_chat == []
     store_switch.resume_pending_switch(root, repo_dir=repo)
     ensure_current_store(root)
-    server_maintenance._startup_store_switch_notice()
+    store_switch.startup_notice(root)
     if outcome == "switched":
         assert owner_chat == []
         return
@@ -67,7 +66,7 @@ def test_next_boot_reports_failed_switch_once(switch_root, target_repo, owner_ch
     state.init(root)  # a new boot reloads durable state, not a process-local sent flag
     store_switch.resume_pending_switch(root, repo_dir=repo)
     ensure_current_store(root)
-    server_maintenance._startup_store_switch_notice()
+    store_switch.startup_notice(root)
     assert len(owner_chat) == 1
 
 
@@ -77,16 +76,16 @@ def test_notice_waits_for_owner_and_publication_and_preserves_each_outcome(switc
         intent(root, old, door)
         store_switch.run_switch_seam(root, repo_dir=repo, blockers=["worker:42"])
     atomic_write_json(state.STATE_PATH, {"owner_chat_id": 0})
-    server_maintenance._startup_store_switch_notice()
+    store_switch.startup_notice(root)
     assert owner_chat == []
     atomic_write_json(state.STATE_PATH, {"owner_chat_id": 7})
     with store.importing(root):
-        server_maintenance._startup_store_switch_notice()
+        store_switch.startup_notice(root)
     assert owner_chat == []
-    server_maintenance._startup_store_switch_notice()
+    store_switch.startup_notice(root)
     assert len(owner_chat) == 2
     assert "Agent rollback" in owner_chat[0][1] and "Update" in owner_chat[1][1]
-    server_maintenance._startup_store_switch_notice()
+    store_switch.startup_notice(root)
     assert len(owner_chat) == 2
 
 
@@ -94,7 +93,7 @@ def test_supervisor_wires_switch_notice_after_publication_and_bus_initialization
     source = (pathlib.Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
     body = source.split("def _run_supervisor(settings: dict) -> None:", 1)[1].split("\ndef ", 1)[0]
     assert body.index("store_switch.require_published(DATA_DIR)") < body.index("bus_init(")
-    assert body.index("bus_init(") < body.index("_startup_store_switch_notice()")
+    assert body.index("bus_init(") < body.index("store_switch.startup_notice(DATA_DIR)")
 
 
 def test_previous_body_outcome_and_failed_send_remain_owed(switch_root, target_repo, owner_chat, monkeypatch):
@@ -107,9 +106,9 @@ def test_previous_body_outcome_and_failed_send_remain_owed(switch_root, target_r
     atomic_write_json(root / store_switch.PROGRESS_REL, legacy)
     with monkeypatch.context() as patch:
         patch.setattr(message_bus, "send_with_budget", lambda *a, **kw: (_ for _ in ()).throw(OSError("chat unavailable")))
-        server_maintenance._startup_store_switch_notice()
+        store_switch.startup_notice(root)
     assert owner_chat == [] and progress(root) == legacy
-    server_maintenance._startup_store_switch_notice()
+    store_switch.startup_notice(root)
     assert len(owner_chat) == 1 and "Automatic rollback to v7.6.0" in owner_chat[0][1]
-    server_maintenance._startup_store_switch_notice()
+    store_switch.startup_notice(root)
     assert len(owner_chat) == 1 and progress(root)["outcomes"][0]["reported"]

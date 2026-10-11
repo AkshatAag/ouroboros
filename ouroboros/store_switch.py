@@ -67,6 +67,18 @@ def _progress(root: pathlib.Path, phase: str, **facts: Any) -> None:
     supervisor_row(root, "storage_switch", {"phase": phase, **facts})
 
 
+def startup_notice(root: Any) -> None:
+    """After publication and owner binding, deliver every unreported failed switch outcome (never raises)."""
+    try:
+        from supervisor.state import load_state
+
+        owner_chat = int(load_state().get("owner_chat_id") or 0)
+        if owner_chat and store.store_ready(root):
+            report_outcomes(pathlib.Path(root), owner_chat)
+    except Exception:
+        log.warning("Storage switch notice remains owed", exc_info=True)
+
+
 def report_outcomes(root: pathlib.Path, owner_chat_id: int) -> None:
     """Deliver retained failed outcomes once through the startup-notice seam, then fsync reported.
 
