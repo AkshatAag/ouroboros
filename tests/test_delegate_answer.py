@@ -381,11 +381,16 @@ def test_wire_answer_outcome_reaches_the_nanny(tmp_path, monkeypatch, status, co
     _own_run(delegate)
     with httpx.Client(transport=httpx.MockTransport(respond), base_url="http://offline.invalid") as client:
         gateway._client = client
-        out = json.loads(delegate._delegate_answer(ctx, "run-1", "int-1", [
+        result = delegate._delegate_answer(ctx, "run-1", "int-1", [
             {"question_id": "q1", "free_text": "9090"},
-        ]).text)
+        ])
+        out = json.loads(result.text)
     delegate._CUSTODY.clear()
     assert out["status"] == status and out["accepted"] is accepted
+    if status == "not_found":
+        # A decoded engine outcome follows the legacy typed path: the tool
+        # completed normally, while the answer itself was not accepted.
+        assert result.status == "ok" and result.code == "OK"
     assert len(requests) == 1
     assert requests[0].url.path == "/v2/runs/run-1/interactions/int-1/answer"
     assert json.loads(requests[0].content) == {
