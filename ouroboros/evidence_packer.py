@@ -112,27 +112,86 @@ def ordered_candidates(root: pathlib.Path, settled: List[str]) -> List[Tuple[str
     return [(task, raw) for task, raw, _ in recent + backfill]
 
 
-def live_manifest_shas(root: pathlib.Path, *, obligation_rows: Optional[dict] = None, txn=None) -> set:
-    """Shas any NON-settled task's manifests reference: those loose blobs stay."""
-    keep: set = set()
-    if obligation_rows is None:
-        obligation_rows = packs.settlement_obligations(root, txn=txn)
-    external = packs.settlement_external(root)
-    for task in _loose_task_ids(root):
-        if not packs.task_settled(root, task, obligation_rows=obligation_rows, external=external, txn=txn):
-            keep.update(sha256 for _, sha256, _ in packs.manifest_blob_refs(root, task))
-    return keep
+def _external_revision(root: pathlib.Path) -> list:
+    """A snapshot-validity fence, never part of a task's candidate stamp."""
+    from ouroboros.usage_store import STORE_REL
+    from ouroboros.usage_ledger import LEDGER_REL
+
+    stamps = []
+    for rel in (STORE_REL, str(STORE_REL) + "-wal", LEDGER_REL, "state/terminal_deliveries.json"):
+        try:
+            stat = (root / rel).stat()
+            stamps.append((stat.st_ino, stat.st_size, stat.st_mtime_ns))
+        except FileNotFoundError:
+            stamps.append(None)
+    return stamps
+
+
+class PackSweep:
+    """One settlement census, outside deletion locks. Changed facts defer the rest of
+    this pass; publications add only their new refs under the publication lock."""
+    def __init__(self, root: pathlib.Path) -> None:
+        self.root = root
+        self.obligation_cache: dict = {}
+        self.duties = packs.settlement_obligations(root, cache=self.obligation_cache)
+        self.external_revision = _external_revision(root)
+        self.external = packs.settlement_external(root)
+        self.keep: set = set()
+        self.journal = None
+
+    def current(self, txn=None) -> bool:
+        if txn is None:
+            with store.open_store(self.root, write=False) as txn:
+                return self.current(txn)
+        return (self.obligation_cache["revision"] == (str(txn.root), txn.revision())
+                and self.external_revision == _external_revision(self.root))
+
+    def collect_keep(self, facts: dict) -> None:
+        for task in _loose_task_ids(self.root):
+            fact = facts.get(task)
+            if fact is None:
+                fact = packs.task_settlement_facts(self.root, task, obligation_rows=self.duties, external=self.external)
+            if not packs.facts_settled(fact):
+                self.keep.update(sha for _, sha, _ in packs.manifest_blob_refs(self.root, task))
+
+    def refresh_keep(self) -> set:
+        # The caller holds the publication lock: only the appended suffix is read.
+        for line in self.journal:
+            sha = line.decode("ascii").strip()
+            if len(sha) != 64 or sha.strip("0123456789abcdef"):
+                raise OSError("incomplete evidence publication journal")
+            self.keep.add(sha)
+        return self.keep
+
+
+@contextlib.contextmanager
+def pack_sweep(root: pathlib.Path):
+    """Serialize packer passes, tracking publications from before the census to the
+    last unlink. A crashed pass's scratch journal is replaced by the next pass."""
+    with store.name_lock(root, "packs_sweep.lock", timeout_sec=packs.INDEX_WAIT_SEC):
+        sweep = PackSweep(root)
+        path = packs.packs_dir(root) / packs.PUBLICATIONS_NAME
+        with store.name_lock(root, packs.PUBLICATION_LOCK_NAME, timeout_sec=packs.INDEX_WAIT_SEC):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            sweep.journal = path.open("w+b")
+        try:
+            yield sweep
+        finally:
+            with store.name_lock(root, packs.PUBLICATION_LOCK_NAME, timeout_sec=packs.INDEX_WAIT_SEC):
+                sweep.journal.close()
+                path.unlink()
 
 
 
-def run_pass(root: pathlib.Path) -> Dict[str, Any]:
+def run_pass(root: pathlib.Path, *, sweep=None) -> Dict[str, Any]:
     """Pack every settled candidate one task at a time, then the money archive and the unpacker."""
     root = pathlib.Path(root)
+    if sweep is None:
+        with pack_sweep(root) as sweep:
+            return run_pass(root, sweep=sweep)
     report: Dict[str, Any] = {"status": "completed", "packed": 0, "candidates": 0, "raw": 0, "compressed": 0,
                               "unlinked": 0, "kept": 0, "busy": 0, "faults": 0, "archived": 0}
-    obligation_cache: dict = {}
-    duties = packs.settlement_obligations(root, cache=obligation_cache)
-    external = packs.settlement_external(root)
+    duties, external = sweep.duties, sweep.external
     revisions = {task: task_stamps(root, task, obligation_rows=duties, external=external)
                  for task in changed_tasks(root, obligation_rows=duties, external=external)}
     facts = {task: packs.task_settlement_facts(root, task, obligation_rows=duties, external=external) for task in revisions}
@@ -143,10 +202,14 @@ def run_pass(root: pathlib.Path) -> Dict[str, Any]:
     candidates = ordered_candidates(root, sorted(settled))
     report["candidates"] = len(candidates)
     listing = packs.list_sidecars(root)
+    if candidates:
+        sweep.collect_keep(facts)
     for task, raw in candidates:
+        if not sweep.current():
+            break  # no repeated global census or compression against stale facts
         try:
             outcome = packs.pack_task(root, task, keep_shas=set(), listing=listing, revision=revisions[task],
-                                      obligation_cache=obligation_cache)
+                                      sweep=sweep)
         except Exception as exc:
             report["faults"] += 1
             packs.record_storage_pack(root, phase="fault", task_id=task, exception_class=type(exc).__name__)
