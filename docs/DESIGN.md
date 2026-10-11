@@ -1629,14 +1629,12 @@ has migrated. Migrated today:
 - `web/settings.css` (settings shell, model/effort cards, MCP cards)
 - `web/onboarding.css` (the whole first-run wizard)
 - `web/model_roles.css` (shared role editor)
-- `web/style.css` between the `design-system:migrated-begin` and
-  `design-system:migrated-end` marker pairs (several — migrated surfaces are
-  not contiguous in the file): harness accounts, the
-  Dashboard → Updates tab (status card, one action row, collapsed Recovery
-  with a single restore list), and chat (typography, foreground and status
-  colour; component geometry keeps its local literals per the viewport
-  reserve contract, while the shared palette channels keep translucent glass
-  surfaces coherent across themes)
+- `web/style.css` regions paired by `design-system:migrated-begin` /
+  `design-system:migrated-end`: harness accounts; Dashboard → Updates (status
+  card, one action row, collapsed Recovery with one restore list) and Storage;
+  chat typography, foreground and status colour. Chat geometry retains local
+  literals per the viewport reserve contract; shared palette channels keep
+  translucent glass coherent across themes.
 - the global `.muted`, `.form-section h3` and shared `.ui-status` tone rules
 
 The remaining page-specific typography in skills, marketplace, widgets, logs
