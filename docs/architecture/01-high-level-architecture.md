@@ -141,7 +141,7 @@ ouroboros/ — agent core and shared runtime (§6)
   working_checkpoint.py — one rolling working state per attempt, delayed content ACK, frozen recovery (§6 Saved working state)
   local_custody_repair.py — an addressed action retires a positively ended local owner's claim; passive reads write nothing (§6 Owner Continue)
   owner_continue.py — owner Continue data half: identity, eligibility, exact owner sources (§6 Owner Continue)
-  routing_wait.py — durable routing-receipt waits, so the gateway picker and the routing tools poll the same receipts
+  routing_wait.py — receipt waits and the one act projection that the picker, routing tools and observer share
   outcomes.py — typed task-outcome and acceptance-decision authority with separate lifecycle, execution, objective, review, artifact and verification axes; a policy denial never masquerades as a tool failure (§6 Task lifecycle; §10.1)
   outcome_receipt_store.py — verification-receipt append/read authority; a zero-run receipt writes `incomplete`/`unknown` only, because a zero-run "complete" is unverifiable self-report
   depth_evidence.py — pure `requested_depth`/permitted/attempted/achieved projection; a missing admitted permission stays unknown rather than reconstructed from live config

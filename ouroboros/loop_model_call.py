@@ -1291,7 +1291,8 @@ def _append_routing_receipts(ctx: _RoundModelCallContext) -> bool:
            str(delivery.get("client_message_id") or "") if isinstance(delivery, dict) else ""]
     ids = [value for index, value in enumerate(ids) if value and value not in ids[:index]]
     own = [ref for ref in getattr(tool_ctx, "unconfirmed_routing_acts", None) or [] if isinstance(ref, dict)]
-    root = meta.get("budget_drive_root") or ctx.drive_root or getattr(tool_ctx, "drive_root", None)
+    root = (getattr(tool_ctx, "budget_drive_root", "") or meta.get("budget_drive_root") or ctx.drive_root
+            or getattr(tool_ctx, "drive_root", None))
     if not (ids or own) or not root or str(meta.get("delegation_role") or "") == "subagent":
         return False
     try:

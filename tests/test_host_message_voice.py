@@ -10,6 +10,7 @@ rows"): every host type sits in one closed class with its exact number of sites,
 so a new type or a new site of a known one waits for a person to place it.
 """
 import ast
+import functools
 from collections import Counter
 from pathlib import Path
 
@@ -154,13 +155,15 @@ def test_exceptions_are_counted_and_stale_rows_fail():
 # A host fact names its carrier: a task's fact is a row of its card, an owner message's fact the
 # typed annotation on it, and a landed act publishes no row. A standalone System row exists only
 # where nothing else can carry the fact. Each literal host type: (class, number of producer sites).
+# Two types are mixed and disclosed: `deep_self_review_queued` also echoes the model's own request,
+# `skill_repair` also the host's automatic repair after a marketplace install.
 HOST_ROW_CLASSES = {
     "acceptance_late_settlement": ("card_row", 1),
     "budget_notice": ("runtime_state", 1),
     "cancel_receipt": ("owner_act_receipt", 2),
     "cancellation_notice": ("card_row", 1),
     "command_reply": ("owner_act_receipt", 2),
-    "consciousness_notice": ("owner_act_receipt", 1),
+    "consciousness_notice": ("runtime_state", 1),
     "deep_self_review_queued": ("owner_act_receipt", 1),
     "deep_self_review_unavailable": ("not_started", 2),
     "evolution_cycle_outcome": ("runtime_state", 1),
@@ -174,14 +177,14 @@ HOST_ROW_CLASSES = {
     "project_completion_summary": ("main_lifecycle", 1),
     "project_handoff": ("main_lifecycle", 1),
     "project_started": ("main_lifecycle", 1),
-    "promotion_notice": ("owner_act_receipt", 4),
+    "promotion_notice": ("runtime_state", 4),
     "reminder": ("signed_words", 1),
     "restart_notice": ("runtime_state", 7),
     "retired_settings_notice": ("runtime_state", 2),
     "review_pool_migration_notice": ("runtime_state", 1),
     "runtime_liveness_notice": ("runtime_state", 1),
     "skill_lifecycle": ("card_row", 2),
-    "skill_lifecycle_pointer": ("card_row", 1),
+    "skill_lifecycle_pointer": ("owner_act_receipt", 1),
     "skill_notice": ("signed_words", 1),
     "skill_repair": ("owner_act_receipt", 2),
     "startup_notice": ("runtime_state", 1),
@@ -227,8 +230,13 @@ def census_errors(observed, classes=HOST_ROW_CLASSES):
                      if name not in HOST_ROW_CLASS_NAMES]
 
 
+@functools.lru_cache(maxsize=1)
+def _live_census():
+    return host_row_census(_runtime_sources())
+
+
 def test_every_host_row_type_sits_in_one_closed_class_with_its_counted_sites():
-    assert not (errors := census_errors(host_row_census(_runtime_sources()))), (
+    assert not (errors := census_errors(_live_census())), (
         "Place each host row in DESIGN 'Chat authorship and System rows' (a landed act publishes no row; "
         f"a task's fact is a row of its card) and record its class and site count here: {errors}")
 
@@ -240,6 +248,5 @@ def test_every_host_row_type_sits_in_one_closed_class_with_its_counted_sites():
 ])
 def test_a_new_site_of_a_known_type_or_a_new_type_is_red(call):
     """Borrowing an approved type (a card type sent unplaced) is a new site, so it is red too."""
-    sources = {**_runtime_sources(), "new.py": "def emit():\n    " + call}
-    assert census_errors(host_row_census(sources))
-    assert census_errors(host_row_census({**sources, "new.py": ""})) == []
+    assert census_errors(_live_census() + host_row_census({"new.py": "def emit():\n    " + call}))
+    assert census_errors(_live_census()) == []

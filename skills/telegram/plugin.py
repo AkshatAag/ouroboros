@@ -1049,9 +1049,9 @@ def _make_outbound(api):
             if _child_row_held_for_root(api, event):
                 return
 
-            # Progress telemetry and a card's placed host rows → dropped by default; the
-            # typing indicator already signals "working". Opt in via the toggle.
-            if (event.get("is_progress") or event.get("card_row")) and not _mirror_progress_enabled(local_settings):
+            # Progress telemetry and a root's own card rows → dropped by default (a child's row waits above,
+            # then goes as before); the typing indicator already signals "working". Opt in via the toggle.
+            if (event.get("is_progress") or (event.get("card_row") and event.get("delegation_role") != "subagent")) and not _mirror_progress_enabled(local_settings):
                 return
 
             # Routing receipts are typed annotations (suppress_bubble, no text). A landed act stays silent except for a
@@ -1061,7 +1061,7 @@ def _make_outbound(api):
                 if str(event.get("status") or "") != "needs_manual_target":
                     names = [str(row.get("label") or "file") for row in event.get("attachment_manifest") or [] if isinstance(row, dict) and row.get("status") == "rejected"]
                     if names:
-                        await client.send_message(chat_id, "Not attached to the task: " + ", ".join(names), parse_mode="")
+                        await client.send_message(chat_id, _LOCALIZED_TEXTS[lang].format("attachments_not_attached", names=", ".join(names)), parse_mode="")
                     return
                 raw_options = event.get("options") if isinstance(event.get("options"), list) else []
                 from ouroboros.project_dialogue import routing_option_label

@@ -1,7 +1,7 @@
 // Display-only form of a host sentence that its producer opens with a decorative
 // pictograph (DESIGN "Chat authorship and System rows"). The stored row keeps its bytes:
 // history, message keys, Copy, Telegram, the model's context and outcomes.py, which
-// reads some of these prefixes, see exactly what the producer wrote.
+// reads their warning marks, see exactly what the producer wrote.
 //
 // A closed table, keyed by the row's typed `system_type`; each entry is one producer's
 // exact source prefix. Only a row whose type and opening both match loses the leading
@@ -52,7 +52,17 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
         '🌐 Stopped waiting for ', '🌐 Still waiting for ', '⚡ Fallback: ', '📐 Plan review:', '📐 Plan review so far:', '✅ PR #', '⚠️ PR #'],
 }));
 
-const prefixFor = (text, type) => (HOST_NOTICE_PREFIXES.get(String(type || '')) || []).find(entry => text.startsWith(entry));
+// Producers this install no longer runs: rows they already wrote keep losing only the mark at
+// display (host_notice_text.test.js pins that none of them is written again).
+export const RETIRED_HOST_NOTICE_PREFIXES = new Map(Object.entries({
+    attachment_notice: ['📎 Attachment staging report for ', '⚠️ Task not started: every attachment was rejected.',
+        '⚠️ Some declared attachments could not be staged; '],
+    task_admission_notice: ['✅ Repair task '],
+    task_started: ['🧬 Evolution task ', '🔎 Review task '],
+}));
+
+const prefixFor = (text, type) => [...(HOST_NOTICE_PREFIXES.get(String(type || '')) || []),
+    ...(RETIRED_HOST_NOTICE_PREFIXES.get(String(type || '')) || [])].find(entry => text.startsWith(entry));
 
 // `text` is the row as stored and decides the match; `shown` is what the caller would
 // otherwise paint (the translated sentence for a `tx` type), which loses the same mark.

@@ -168,7 +168,8 @@ def routing_act_fields(root: Path, client_message_id: str, row: Dict[str, Any]) 
     rejected = sum(1 for item in manifest if isinstance(item, dict) and item.get("status") == "rejected")
     return {
         "action": action, "target": target, "target_label": str(row.get("target_label") or ""),
-        "status": status, "ts": str(row.get("ts") or ""), "project_id": str(row.get("project_id") or ""),
+        "status": status, "ts": str(row.get("ts") or settled.get("confirmed_at") or ""),
+        "project_id": str(row.get("project_id") or ""),
         **({"reason": reason} if reason and status in {"rejected", "needs_manual_target"} else {}),
         **({"files_not_attached": rejected} if rejected else {}),
     }

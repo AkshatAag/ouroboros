@@ -632,7 +632,8 @@ can speak, no mind will read the message, the owner's own direct act, the
 runtime's state, Main's Project lifecycle, or words signed by their author (a
 reminder, a skill notice). It is one short typed mark in owner words, never a
 paragraph or text written for a model. `tests/test_host_message_voice.py` keeps
-every host type in one of these classes with its counted producer sites.
+every host type stamped as a literal at its send site in one of these classes, with
+its counted producer sites.
 
 Language follows the same line. The install's interface language
 (`OUROBOROS_UI_LANGUAGE`, Settings → Appearance → Language) translates chrome and
