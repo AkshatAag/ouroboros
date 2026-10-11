@@ -84,7 +84,7 @@ MIRRORS = (
 )
 
 
-def render_readme(mirror: Mirror, version: str, source: str) -> str:
+def render_readme(mirror: Mirror, version: str, source: str, branches: tuple[str, ...] = ()) -> str:
     return (
         f"# {mirror.title}\n\n"
         "> [!IMPORTANT]\n"
@@ -93,8 +93,9 @@ def render_readme(mirror: Mirror, version: str, source: str) -> str:
         f"> - Download the current version: {LATEST_URL}\n"
         f"> - Issues, pull requests, discussions and stars: {OFFICIAL_URL}\n"
         "> - Website: https://ouroboros-agent.ai/\n\n"
-        f"{mirror.intro} Its branches are refreshed automatically after each stable release; "
-        f"the code here is Ouroboros v{version} (official commit {source[:9]}).\n"
+        f"{mirror.intro} After each stable release these branches are refreshed automatically: "
+        f"`{'`, `'.join(('main', *branches))}`. They hold Ouroboros v{version} (official commit {source[:9]}); "
+        "other branches are historical.\n"
     )
 
 
@@ -102,7 +103,9 @@ def render_pointer(mirror: Mirror, version: str) -> str:
     body = (
         "## Ouroboros has moved\n\n"
         f"Ouroboros is developed at **{OFFICIAL_URL}**.\n\n"
-        f"**Download the current version (v{version}):** {LATEST_URL}\n"
+        f"**Download the current version (v{version}):** {LATEST_URL}\n\n"
+        "The *Source code* archives attached to this notice are a historical snapshot; "
+        f"get the current source from {OFFICIAL_URL}.\n"
     )
     if mirror.mark_old_releases:
         body += ("\nThe releases listed below this one are outdated Ouroboros Desktop builds from "
@@ -216,9 +219,10 @@ def is_ancestor(old: str, new: str) -> bool:
     return subprocess.run(["git", "merge-base", "--is-ancestor", old, new]).returncode == 0
 
 
-def build_main_commit(mirror: Mirror, source: str, parent: str | None, version: str) -> str | None:
+def build_main_commit(mirror: Mirror, source: str, parent: str | None, version: str,
+                      branches: tuple[str, ...] = ()) -> str | None:
     """Return a new main commit, or None when the mirror's main already has this tree."""
-    files = {"README.md": render_readme(mirror, version, source)}
+    files = {"README.md": render_readme(mirror, version, source, branches)}
     if mirror.colab_stub:
         files["notebooks/quickstart.ipynb"] = colab_stub()
     with tempfile.TemporaryDirectory() as tmp:
@@ -245,8 +249,9 @@ def refresh(gh: GitHub, token: str, mirror: Mirror, source: str, version: str, s
     refspecs = [f"+refs/heads/{b}:refs/legacy-mirror/{slug}/{b}" for b in ("main", *mirror.branches)]
     git(*auth_args(token), "fetch", "--no-tags", "--quiet", url, *refspecs)
     pushes: list[str] = []
+    refreshed = tuple(b for b in mirror.branches if f"{mirror.repo}:{b}" not in skip)
     for branch in mirror.branches:
-        if f"{mirror.repo}:{branch}" in skip:
+        if branch not in refreshed:
             log.append(f"{mirror.repo}:{branch} skipped by request")
             continue
         old = git("rev-parse", f"refs/legacy-mirror/{slug}/{branch}")
@@ -257,7 +262,7 @@ def refresh(gh: GitHub, token: str, mirror: Mirror, source: str, version: str, s
                                "refusing a force push")
         pushes.append(f"{source}:refs/heads/{branch}")
     main_old = git("rev-parse", f"refs/legacy-mirror/{slug}/main")
-    main_new = build_main_commit(mirror, source, main_old, version)
+    main_new = build_main_commit(mirror, source, main_old, version, refreshed)
     if main_new:
         pushes.append(f"{main_new}:refs/heads/main")
     if pushes and not gh.dry_run:
@@ -267,6 +272,8 @@ def refresh(gh: GitHub, token: str, mirror: Mirror, source: str, version: str, s
 
     pointer_body = render_pointer(mirror, version)
     status, existing = gh.call("GET", f"/repos/{mirror.repo}/releases/tags/{POINTER_TAG}")
+    if status not in (200, 404) and not gh.dry_run:
+        raise RuntimeError(f"pointer release lookup -> HTTP {status}: {existing.get('message', '')}")
     if status == 200:
         gh.must("PATCH", f"/repos/{mirror.repo}/releases/{existing['id']}",
                 {"body": pointer_body, "make_latest": "true"})

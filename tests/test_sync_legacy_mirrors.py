@@ -40,6 +40,9 @@ def test_readme_and_pointer_send_visitors_to_the_official_repository():
     readme = mirrors.render_readme(desktop, "7.6.0", "4b37f96223a1")
     assert mirrors.OFFICIAL_URL in readme and mirrors.LATEST_URL in readme
     assert "v7.6.0 (official commit 4b37f9622)" in readme
+    assert "refreshed automatically: `main`." in readme  # only the branches this run refreshed
+    assert "`main`, `ouroboros`." in mirrors.render_readme(desktop, "7.6.0", "4b37f96223a1", ("ouroboros",))
+    assert "historical snapshot" in mirrors.render_pointer(fork, "7.6.0")
     assert mirrors.LATEST_URL in mirrors.render_pointer(fork, "7.6.0")
     assert "outdated Ouroboros Desktop builds" in mirrors.render_pointer(desktop, "7.6.0")
     assert "outdated Ouroboros Desktop builds" not in mirrors.render_pointer(fork, "7.6.0")

@@ -19,7 +19,7 @@ OFFICIAL_REMOTE_NAME = "managed"
 # before v6.8.0 store one of them as their configured update source: it is the
 # project's own retired address, not a fork or mirror an owner chose.
 LEGACY_OFFICIAL_REPOS = frozenset({"joi-lab/ouroboros-desktop", "joi-lab/ouroboros"})
-_GITHUB_URL_PREFIXES = ("https://github.com/", "http://github.com/", "git@github.com:")
+_GITHUB_URL_PREFIXES = ("https://github.com/", "http://github.com/", "ssh://git@github.com/", "git@github.com:")
 
 
 @dataclass
@@ -45,9 +45,13 @@ def normalize_repo_slug(value: str) -> str:
 
 
 def is_legacy_official_repo(value: str) -> bool:
-    """True when ``value`` is a GitHub URL of exactly one former official home."""
+    """True when ``value`` is a GitHub URL of exactly one former official home (no extra path)."""
     text = str(value or "").strip().lower()
-    return text.startswith(_GITHUB_URL_PREFIXES) and normalize_repo_slug(text) in LEGACY_OFFICIAL_REPOS
+    for prefix in _GITHUB_URL_PREFIXES:
+        if text.startswith(prefix):
+            path = text[len(prefix):].rstrip("/")
+            return path.removesuffix(".git").rstrip("/") in LEGACY_OFFICIAL_REPOS
+    return False
 
 
 def follow_former_official_home(url: str) -> str:
