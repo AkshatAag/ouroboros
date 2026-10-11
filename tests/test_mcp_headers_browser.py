@@ -335,13 +335,150 @@ def test_late_status_keeps_typed_field(direct_server_with_data, loopback, engine
             browser.close()
 
 
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_late_status_keeps_tools_disclosure(direct_server_with_data, loopback, engine):  # noqa: F811
+    """A status answer patches only changed tools: an open disclosure keeps its focus and selection.
+
+    Unchanged tools keep every node; a changed list is patched inside the same
+    open disclosure; an empty list removes it.
+    """
+    from playwright.sync_api import expect, sync_playwright
+
+    url = direct_server_with_data['url']
+    _app, http_url = loopback('http', {'X-Api-Key': CUSTOM})
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        page = browser.new_page(viewport={'width': 1440, 'height': 1000})
+        page._evidence_engine = engine
+        try:
+            held = []
+            page.route('**/api/mcp/status', lambda route: held.append(route))
+            _seed(page, url, [{'id': 'tools_focus', 'enabled': True, 'transport': 'streamable_http',
+                               'url': http_url, 'headers': {'X-Api-Key': CUSTOM}}])
+            card = page.locator('[data-mcp-card]').first
+            message, badge = card.locator('[data-mcp-message]'), card.locator('.mcp-server-status')
+
+            def answer(change=None, focused=False):
+                """Refresh without moving focus, then answer its held status read, changed or not."""
+                with page.expect_request(lambda request: request.url.endswith('/api/mcp/status'), timeout=20_000):
+                    button = card.locator('[data-mcp-refresh]')
+                    button.evaluate('button => button.click()') if focused else button.click()
+                expect(message).to_contain_text('Refreshing tools')
+                for route in held:
+                    response = route.fetch()
+                    data = response.json()
+                    for entry in data['servers']:
+                        if change and entry.get('id') == 'tools_focus':
+                            change(entry)
+                    route.fulfill(response=response, json=data)
+                held.clear()
+                expect(message).to_contain_text('Saved catalog refreshed', timeout=20_000)
+
+            def kept():
+                return page.evaluate("""() => {
+                    const {details, summary, field, text} = window.__tools;
+                    const card = document.querySelector('[data-mcp-card]');
+                    return {same: card.querySelector('.mcp-tools-disclosure') === details && details.isConnected,
+                            open: details.open, focused: document.activeElement === summary,
+                            field: card.querySelector('[data-mcp-field="id"]') === field && field.isConnected,
+                            selected: getSelection().toString() === text && text !== ''};
+                }""")
+
+            answer()
+            expect(badge).to_have_text('1 tool discovered')
+            summary = card.locator('.mcp-tools-disclosure summary')
+            summary.focus()
+            page.keyboard.press('Enter')
+            page.evaluate("""() => {
+                const details = document.querySelector('[data-mcp-card] .mcp-tools-disclosure');
+                const name = details.querySelector('.mcp-tools-list strong');
+                const range = document.createRange();
+                range.selectNodeContents(name);
+                getSelection().removeAllRanges();
+                getSelection().addRange(range);
+                window.__tools = {details, summary: document.activeElement, text: name.textContent,
+                                  field: document.querySelector('[data-mcp-card] [data-mcp-field="id"]')};
+            }""")
+            ready = {'same': True, 'open': True, 'focused': True, 'field': True, 'selected': True}
+            assert kept() == ready, 'test setup: the open disclosure must hold focus and a selection'
+
+            answer(focused=True)
+            assert kept() == ready, 'an unchanged status answer replaced the Discovered tools disclosure'
+            card.locator('.mcp-tools-disclosure').scroll_into_view_if_needed()
+            _capture(page, 'mcp-late-status-tools-kept')
+
+            answer(lambda entry: (entry['tools'].append({'name': 'synthetic_lookup', 'description': 'Synthetic.'}),
+                                  entry.update(tool_count=2)), focused=True)
+            expect(badge).to_have_text('2 tools discovered')
+            assert card.locator('.mcp-tools-list li').count() == 2
+            assert 'synthetic_lookup' in card.locator('.mcp-tools-list').text_content()
+            assert {key: value for key, value in kept().items() if key != 'selected'} == {
+                'same': True, 'open': True, 'focused': True, 'field': True}, 'a changed tool list must patch in place'
+
+            answer(lambda entry: entry.update(tools=[], tool_count=0), focused=True)
+            expect(badge).to_have_text('0 tools discovered')
+            assert card.locator('.mcp-tools-disclosure').count() == 0
+            page.unroute('**/api/mcp/status')
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('legacy_header', ['Authorization', 'X-Api-Key'])
+def test_edited_legacy_token_stays_removed_on_stdio(direct_server_with_data, engine, legacy_header):  # noqa: F811
+    """An edited saved legacy token, switched to stdio and removed, stays gone from Save, disk and reload.
+
+    The edit makes the legacy row a header-map row and clears the legacy pair, so
+    Remove unsupported fields must not rebuild the rows from the replaced saved token.
+    """
+    from playwright.sync_api import sync_playwright
+
+    from ouroboros.mcp_client import normalize_server_config
+
+    url, data_dir = direct_server_with_data['url'], direct_server_with_data['data_dir']
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        page = browser.new_page(viewport={'width': 1440, 'height': 1000})
+        page._evidence_engine = engine
+        try:
+            _seed(page, url, [{'id': 'legacy_switch', 'enabled': False, 'transport': 'streamable_http',
+                               'url': 'https://legacy.example/mcp', 'auth_header': legacy_header, 'auth_token': BEARER}])
+            card = page.locator('[data-mcp-card]').last
+            assert _rows(card) == [(legacy_header, BEARER[:8] + '...')]
+            card.locator('[data-mcp-header-field="value"]').fill('Bearer synthetic-edited-0006')
+            card.locator('[data-mcp-field="transport"]').select_option('stdio')
+            card = page.locator('[data-mcp-card]').last
+            card.locator('[data-mcp-field="command"]').fill('python3')
+            notice = card.locator('.form-row:has([data-mcp-clear-unsupported]) .muted').inner_text()
+            card.locator('[data-mcp-clear-unsupported]').click()
+            card = page.locator('[data-mcp-card]').last
+            remaining = card.locator('.form-row:has([data-mcp-clear-unsupported]) .muted').all_inner_texts()
+            _capture(page, f'mcp-legacy-stdio-removed-{legacy_header}')
+            _save(page)
+            entry = _disk(data_dir)['legacy_switch']
+            errors = []
+            assert normalize_server_config(entry, errors=errors) is not None, errors
+            assert BEARER not in json.dumps(entry) and 'synthetic-edited' not in json.dumps(entry)
+            assert (entry['transport'], entry['command'], entry.get('auth_token', ''),
+                    entry.get('auth_header', 'Authorization'), 'headers' in entry) == (
+                'stdio', 'python3', '', 'Authorization', False)
+            assert notice == 'Fields retained but not applied: url, headers', notice
+            assert remaining == [], remaining
+            page.locator('[data-mcp-card]').last.locator('[data-mcp-field="transport"]').select_option('streamable_http')
+            assert page.locator('[data-mcp-card]').last.locator('[data-mcp-header-row]').count() == 0
+        finally:
+            browser.close()
+
+
 TENANT = "synthetic-browser-tenant-0003"
 ALPHA = "synthetic-browser-alpha-0004"
 BETA = "synthetic-browser-beta-0005"
 
 
 def _seed(page, url, servers):
-    """Write through the real Settings writer, then load the page from it."""
+    """Write through the real Settings writer, then load the page from it and let its loads settle."""
+    from playwright.sync_api import expect
+
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     status = page.evaluate("""async (servers) => {
         const response = await fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -350,6 +487,9 @@ def _seed(page, url, servers):
     }""", servers)
     assert status[0] == 200, status
     _open_mcp(page, url)
+    # Showing Settings reloads it once more; that late load replaces every card and
+    # drops a pending Refresh or Test message, so act only on the settled draft.
+    expect(page.locator("#settings-status")).to_have_text("Settings refreshed", timeout=30_000)
 
 
 def _rows(card):

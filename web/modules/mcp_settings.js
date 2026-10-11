@@ -124,13 +124,13 @@ function unsupportedFields(server) {
     const fields = Object.keys(draft).filter((key) => !SERVER_FIELDS.has(key)
         || (unused.includes(key) && !['', '[]', '{}', 'null'].includes(JSON.stringify(draft[key]))
             && draft[key] !== ''));
-    if (server.transport === 'stdio' && server.auth_header && server.auth_header !== 'Authorization') {
+    if (server.transport === 'stdio' && draft.auth_header && draft.auth_header !== 'Authorization') {
         fields.push('auth_header');
     }
     return fields;
 }
 
-/** The saved-status parts of a card: its badge and its discovered tools. */
+/** The saved-status parts of a card: its badge and its discovered tools' list items. */
 function statusParts(server) {
     const status = mcpStatusByServer[String(server.id ?? '')] || null;
     const toolCount = status ? Number(status.tool_count || 0) : 0;
@@ -140,34 +140,46 @@ function statusParts(server) {
     const badge = lastError ? [`Error: ${lastError}`, 'mcp-server-status-danger']
         : toolCount > 0 ? [`${toolCountLabel(toolCount)} discovered`, 'mcp-server-status-ok']
             : lastRefreshed ? ['0 tools discovered', 'mcp-server-status-warn'] : ['Not refreshed yet', 'mcp-server-status-muted'];
-    const toolsHtml = tools.length
-        ? `<details class="mcp-tools-disclosure"><summary>Discovered tools</summary><ul class="mcp-tools-list">${tools.map((t) => `
+    const toolItems = tools.map((t) => `
                 <li>
                     <strong>${escapeHtml(t.name || t.prefixed_name || '')}</strong>
                     ${t.description ? `<span class="mcp-tool-desc">${escapeHtml(String(t.description).slice(0, 220))}</span>` : ''}
                 </li>
-            `).join('')}</ul></details>`
+            `).join('');
+    return { badgeText: badge[0], badgeClass: `mcp-server-status ${badge[1]}`, toolItems };
+}
+
+function toolsDisclosure(toolItems) {
+    return toolItems
+        ? `<details class="mcp-tools-disclosure"><summary>Discovered tools</summary><ul class="mcp-tools-list">${toolItems}</ul></details>`
         : '';
-    return { badgeText: badge[0], badgeClass: `mcp-server-status ${badge[1]}`, toolsHtml };
 }
 
 /**
  * A status answer arrives whenever its read finishes, often while the owner is
- * typing: it repaints only the badge and tools, so every editable node keeps
- * its identity, focus, caret and Show state.
+ * typing or reading: it repaints only the badge and the tools that changed, so
+ * every editable node and the Discovered tools disclosure keep their identity,
+ * focus, caret, selection, open and Show state.
  */
 function paintStatus() {
     for (const server of mcpServers) {
         const card = isServer(server) ? cardFor(server) : null;
         if (!card) continue;
-        const { badgeText, badgeClass, toolsHtml } = statusParts(server);
+        const { badgeText, badgeClass, toolItems } = statusParts(server);
         const badge = card.querySelector('.mcp-server-status');
         badge.className = badgeClass;
-        badge.textContent = badgeText;
-        const old = card.querySelector('.mcp-tools-disclosure');
-        if (old) old.remove();
-        card.insertAdjacentHTML('beforeend', toolsHtml);
-        if (old?.open) card.querySelector('.mcp-tools-disclosure')?.setAttribute('open', '');
+        if (badge.textContent !== badgeText) badge.textContent = badgeText;
+        const disclosure = card.querySelector('.mcp-tools-disclosure');
+        if (!toolItems) {
+            disclosure?.remove();
+        } else if (!disclosure) {
+            card.insertAdjacentHTML('beforeend', toolsDisclosure(toolItems));
+        } else {
+            const list = disclosure.querySelector('.mcp-tools-list');
+            const next = list.cloneNode(false);
+            next.innerHTML = toolItems;
+            if (!list.isEqualNode(next)) list.replaceChildren(...next.childNodes);
+        }
     }
 }
 
@@ -189,7 +201,7 @@ function renderServerCard(server, index) {
         const selected = opt.value === transport ? ' selected' : '';
         return `<option value="${escapeHtml(opt.value)}"${selected}>${escapeHtml(opt.label)}</option>`;
     }).join('');
-    const { badgeText, badgeClass, toolsHtml } = statusParts(server);
+    const { badgeText, badgeClass, toolItems } = statusParts(server);
 
     const message = cardMessages.get(server);
     const pending = pendingActions.get(server) || new Set();
@@ -271,7 +283,7 @@ function renderServerCard(server, index) {
             <div class="settings-inline-status mcp-server-message" data-mcp-message ${message ? `data-tone="${escapeHtml(message.tone)}"` : 'hidden'}>${escapeHtml(message?.text || '')}</div>
             ${unsupported.length ? `<div class="form-row"><span class="muted">Fields retained but not applied: ${escapeHtml(unsupported.join(', '))}</span>
                 <button type="button" class="btn btn-default" data-mcp-clear-unsupported>Remove unsupported fields</button></div>` : ''}
-            ${toolsHtml}
+            ${toolsDisclosure(toolItems)}
         </article>
     `;
 }
@@ -322,8 +334,12 @@ function bindCardEvents(card) {
 
     card.querySelector('[data-mcp-clear-unsupported]')?.addEventListener('click', () => {
         const fields = unsupportedFields(rowServer);
+        const credentials = fields.includes('headers') || fields.includes('auth_token');
+        // The list was judged on what the header rows would save; keep that before
+        // rebuilding the rows, or an edited saved legacy token comes back.
+        if (credentials) Object.assign(rowServer, credentialPayload(rowServer));
         for (const key of fields) delete rowServer[key];
-        if (fields.includes('headers') || fields.includes('auth_token')) resetHeaderRows(rowServer);
+        if (credentials) resetHeaderRows(rowServer);
         renderAll();
         serverEdited(rowServer);
     });
