@@ -29,6 +29,8 @@ mode. Only publication closes the window; failures and switches keep writes migr
 and task reads at 503 for the process lifetime. Supervisor/recovery require publication;
 providerless steps run after publication or are dropped. The restart door shares the
 kill census that body_adoption.arm uses; it refuses any unconfirmed stop.
+Failed outcomes remain in switch_progress.json until the supervisor's startup notice
+can reach a bound owner after publication; each successful send durably marks reported.
 """
 
 from __future__ import annotations
@@ -52,12 +54,49 @@ INTENT_REL = pathlib.Path("state/switch_intent.json")
 RECEIPT_REL = pathlib.Path("state/switch_receipt.json")
 PROGRESS_REL = pathlib.Path("state/switch_progress.json")
 DOORS = ("ui_rollback", "vcs_rollback", "boot_smoke_rollback", "update_replace")
+_NOTICE_PHASES = ("refused", "switch_failed", "switch_not_performed")
 Owner = Callable[[Dict[str, Any]], Tuple[bool, str]]
 
 
 def _progress(root: pathlib.Path, phase: str, **facts: Any) -> None:
-    atomic_write_json(root / PROGRESS_REL, {"phase": phase, "at": utc_now_iso(), **facts})
+    outcomes = (read_json_dict(root / PROGRESS_REL) or {}).get("outcomes", [])
+    current = {"phase": phase, "at": utc_now_iso(), **facts}
+    if phase in _NOTICE_PHASES:
+        outcomes.append({**current, "reported": False})
+    atomic_write_json(root / PROGRESS_REL, {**current, "outcomes": outcomes}, fsync=True)
     supervisor_row(root, "storage_switch", {"phase": phase, **facts})
+
+
+def report_outcomes(root: pathlib.Path, owner_chat_id: int) -> None:
+    """Deliver retained failed outcomes once through the startup-notice seam, then fsync reported.
+
+    The caller supplies a bound owner after publication. A failed send remains owed.
+    Like other startup notices, a death between sending and marking may repeat a line.
+    """
+    from supervisor.message_bus import send_with_budget
+
+    progress = read_json_dict(root / PROGRESS_REL) or {}
+    if "outcomes" not in progress and progress.get("phase") in _NOTICE_PHASES:
+        # A failure recorded by the previous body also owes its first notice.
+        intent = (read_json_dict(root / RECEIPT_REL) or {}).get("intent", {})
+        progress["outcomes"] = [{**progress, "intent": intent, "reported": False}]
+    doors = dict(zip(DOORS, ("Rollback", "Agent rollback", "Automatic rollback", "Update")))
+    reasons = {"quiescence_unconfirmed": "the app could not confirm that all running work had stopped",
+               "second_failure": "the export failed twice and was abandoned",
+               "abandonment_resumed": "an interrupted export was abandoned and the current data restored"}
+    for outcome in progress.get("outcomes", []):
+        if outcome.get("reported"):
+            continue
+        intent = outcome.get("intent") or {}
+        door = doors.get(intent.get("door"), "Version switch")
+        target = intent.get("target_ref") or intent.get("target_sha") or "the requested version"
+        reason = outcome.get("reason") or outcome.get("message") or "the app stopped before changing versions"
+        reason = " ".join(str(reasons.get(reason, reason)).split()).rstrip(".")
+        msg = (f"{door} to {target} did not happen: {reason}. The app is running the current version. "
+               "You can press that door again.")
+        send_with_budget(owner_chat_id, msg, role="system", system_type="storage_switch_notice", require_write=True)
+        outcome["reported"] = utc_now_iso()
+        atomic_write_json(root / PROGRESS_REL, progress, fsync=True)
 
 
 
@@ -295,11 +334,11 @@ def _abandon(root: pathlib.Path, receipt: Dict[str, Any]) -> Dict[str, Any]:
 
 def _refuse(root: pathlib.Path, intent: Dict[str, Any], receipt: Dict[str, Any], reason: str, **facts: Any) -> Dict[str, Any]:
     """Nothing switches: the intent is set aside, both authorities stay (restored if a previous
-    attempt moved them), and the owner gets the reason at the next boot."""
+    attempt moved them); progress retains the reason for the next startup owner notice."""
     restored = _abandon(root, receipt)
     refused = root / INTENT_REL.with_name(f"{INTENT_REL.stem}.refused-{_stamp()}.json")
     os.replace(root / INTENT_REL, refused)
-    _progress(root, "refused", reason=reason, restored=restored, intent_moved_to=refused.name, **facts)
+    _progress(root, "refused", intent=intent, reason=reason, restored=restored, intent_moved_to=refused.name, **facts)
     return {"status": "refused", "reason": reason, "restored": restored, **facts}
 
 
@@ -371,7 +410,7 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
                              f"{intent['target_sha'][:12]}: {message}"
     receipt["switched"] = {"ok": bool(ok), "message": str(message), "head": head, "at": utc_now_iso()}
     _write_receipt(root, receipt)
-    _progress(root, "switched" if ok else "switch_failed", message=str(message))
+    _progress(root, "switched" if ok else "switch_failed", intent=intent, message=str(message))
     return {"status": "switched" if ok else "switch_failed", "message": str(message), "needs": needs, "exit": 42}
 
 
@@ -394,7 +433,7 @@ def _retire(drive: pathlib.Path) -> str:
 def resume_pending_switch(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, blockers: Sequence[str] = (),
                           restore_handles: Optional[Callable[[pathlib.Path], Dict[str, Any]]] = None) -> Dict[str, Any]:
     """The boot door: a pending intent resumes the seam; a completed export whose switch never
-    ran is reported (the owner presses the door again), never replayed."""
+    ran is recorded for the startup owner notice (press the door again), never replayed."""
     root = pathlib.Path(root)
     if read_switch_intent(root) is not None:
         return run_switch_seam(root, repo_dir=repo_dir, owner=owner, blockers=blockers,
@@ -403,7 +442,8 @@ def resume_pending_switch(root: Any, *, repo_dir: Any, owner: Optional[Owner] = 
     if (receipt.get("export") or {}).get("status") == "completed" and not receipt.get("switched"):
         receipt["switched"] = {"ok": False, "message": "the switch never ran after the export", "at": utc_now_iso()}
         atomic_write_json(root / RECEIPT_REL, receipt, fsync=True)
-        _progress(root, "switch_not_performed", target_sha=receipt.get("intent", {}).get("target_sha"))
+        _progress(root, "switch_not_performed", intent=receipt.get("intent", {}),
+                  target_sha=receipt.get("intent", {}).get("target_sha"))
         return {"status": "switch_not_performed", "message": "the export completed but the switch did not run; "
                                                              "the current code stays, press the door again"}
     return {"status": "nothing_pending"}

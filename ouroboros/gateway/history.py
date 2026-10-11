@@ -361,10 +361,8 @@ def _load_terminal_result(
     task_id: str,
     cache: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Effective status/cost, receipts and child identity, read once per request.
-
-    Shared by lineage anchoring and annotation. A history GET must never copy
-    artifacts or claim disposition hashes (materialize contract).
+    """Read effective facts once for lineage/annotation, without artifact materialization.
+    Migration must reach the HTTP boundary, never become an absent terminal fact.
     """
     if task_id in cache:
         return cache[task_id]
@@ -372,6 +370,8 @@ def _load_terminal_result(
         from ouroboros.task_status import load_effective_task_result
 
         result = load_effective_task_result(data_dir, task_id, materialize_artifacts=False)
+    except StoreMigrating:
+        raise
     except Exception:
         result = None
     if result:
@@ -384,6 +384,8 @@ def _load_terminal_result(
         try:
             if not exists(data_dir, task_id):
                 cache[task_id] = {"_history_result_absent": True}
+        except StoreMigrating:
+            raise
         except Exception:
             pass
     return cache[task_id]
@@ -402,12 +404,9 @@ def _annotate_terminal_task_truth(
 ) -> None:
     """Project task truth AFTER quotas, paying only for represented/current tasks.
 
-    Cost/axes/review use the in-window summary/latest progress; absent rows get
-    inert tool-evidence carriers. Results share the pre-floor lineage cache.
-    Precomputed floor/anchored_children strip unanchored pre-floor child identity
-    AFTER legacy injection, preventing orphaned Working parents. Anchoring is a
-    live child, represented/live immediate parent or its transitive children
-    (#496); stripping adds no reads.
+    Use in-window cost/axes/review and inert evidence carriers; share the pre-floor cache.
+    Strip unanchored pre-floor child identity AFTER injection (#496), without extra reads.
+    Anchor live children or those with represented/live immediate parents, transitively.
     """
 
     try:
@@ -647,6 +646,8 @@ def _annotate_terminal_task_truth(
                 for key in SUBAGENT_MESSAGE_FIELDS:
                     message.pop(key, None)
                 log.debug("Stripped stale subagent lineage from chat final %s", task_id)
+    except StoreMigrating:
+        raise
     except Exception as exc:
         log.debug("Failed to annotate terminal task status in history: %s", exc)
 
@@ -1358,6 +1359,8 @@ def _apply_window_quotas(
                         grew = True
                 if not grew:
                     break
+        except StoreMigrating:
+            raise
         except Exception as exc:
             log.debug("Failed to resolve pre-floor lineage terminal truth: %s", exc)
     lineage = [

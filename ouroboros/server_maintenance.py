@@ -490,6 +490,19 @@ def review_pool_migration_payload(settings: dict, *, document: dict | None = Non
     return migration_payload(settings if document is None else document, DATA_DIR, review_pool_migration_records(), running=settings)
 
 
+def _startup_store_switch_notice() -> None:
+    """After publication and owner binding, deliver every unreported failed switch outcome."""
+    try:
+        from ouroboros import store, store_switch
+        from supervisor.state import load_state
+
+        owner_chat = int(load_state().get("owner_chat_id") or 0)
+        if owner_chat and store.store_ready(DATA_DIR):
+            store_switch.report_outcomes(pathlib.Path(DATA_DIR), owner_chat)
+    except Exception:
+        log.warning("Storage switch notice remains owed", exc_info=True)
+
+
 def _startup_review_pool_notice(settings: dict) -> None:
     """Tell the OWNER once about every review-lane -> review-pool migration recorded for this
     data root, from the DURABLE receipts — never from this process's memory alone.
@@ -945,7 +958,7 @@ def _periodic_zombie_reconcile(*, on_orphans_healed: Any = None, stop_event: Any
     """Heal zombie 'running' records on a supervisor cadence. A worker that died
     mid-review (crash / SIGKILL / manual stop) leaves ``review_job.json`` at running
     until the next boot reconcile (``GET /api/extensions`` is a passive read and
-    heals nothing); the same death leaves ``task_results/<id>.json`` at
+    heals nothing); the same death leaves the current task-store record at
     running. Both reconciles are liveness-gated (pid-dead / queue-empty + worker-boot
     evidence), so a live review or task is never touched. Off the loop thread, so
     ``stop_event`` (the generation token) is re-read before every step."""

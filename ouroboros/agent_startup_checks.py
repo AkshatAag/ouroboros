@@ -168,7 +168,7 @@ def _automatic_predecessor_authority_projection(
     rides as a typed preview beside the named pull source (the same
     whole-or-pointer rule main_context_authority already applies to Main).
     Digest facts are observed at binding; the complete canonical authority
-    stays in task_results/<id>.json, pullable whole via the named source.
+    stays in the current task store, pullable whole via the named source.
     """
 
     from ouroboros.contracts.task_contract import bounded_continuation_envelope

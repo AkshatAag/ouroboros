@@ -1287,7 +1287,7 @@ def _wait_for_tasks(
         # envelope duplicated forensics (trace_refs, loop_outcome internals,
         # verification_ledger) into the parent context on every batch absorb.
         # The parent decision needs the semantic handoff only; the full envelope
-        # stays on disk in task_results/<id>.json, addressable by
+        # stays in the current task store, addressable by
         # child_result_sha256 (the join-ledger SSOT hash), and is fetched with
         # get_task_result — a DISCLOSED omission (BIBLE P1), not silent
         # truncation. get_task_result and a SETTLED wait_task stay full; an
