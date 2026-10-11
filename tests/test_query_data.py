@@ -441,3 +441,13 @@ def test_delivery_retains_the_complete_query_before_cut(ctx):
     ref = _source_ref(shown)
     assert artifacts.read_actor_source_bytes(ctx.drive_root, ctx.task_id, ref) == full.encode("utf-8")
     assert trace["tool_calls"][0]["result_partial"]
+
+
+def test_direct_current_reads_stop_within_half_the_writers_wait(ctx):
+    # A direct current-store read holds the lock task writes wait on; a longer query goes to a snapshot.
+    from ouroboros import query_data_sql as sql
+
+    refused = call(ctx, op="sql", query="SELECT 1", timeout_sec=sql.CURRENT_HOLD_SEC + 1)
+    assert refused["status"] == "error" and "snapshot=true" in refused["message"]
+    assert call(ctx, op="sql", query="SELECT 1", timeout_sec=sql.CURRENT_HOLD_SEC)["status"] == "ok"
+    assert call(ctx, op="sql", query="SELECT 1", timeout_sec=sql.CURRENT_HOLD_SEC + 1, snapshot=True)["status"] == "ok"

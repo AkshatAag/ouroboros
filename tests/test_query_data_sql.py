@@ -197,6 +197,40 @@ def test_snapshot_is_a_distinct_checked_database(ctx, tmp_path, monkeypatch):
     assert next(path for path, statement in seen if statement == "SELECT task_id FROM tasks") == scratch / "snapshot.sqlite"
 
 
+def test_current_store_hold_stays_within_half_the_writers_wait(ctx, tmp_path, monkeypatch):
+    # Task writes wait store.STORE_WAIT_SEC on the lock a current-store read holds; a snapshot's own query holds nothing.
+    from contextlib import contextmanager
+
+    seen, real_source = [], sql._source
+
+    @contextmanager
+    def connection(path, tier, seconds):
+        seen.append((path.name, seconds))
+        conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, isolation_level=None)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    @contextmanager
+    def source(root, db, seconds):
+        seen.append(("source", seconds))
+        with real_source(root, db, seconds) as tier:
+            yield tier
+
+    monkeypatch.setattr(sql, "_connection", connection)
+    monkeypatch.setattr(sql, "_source", source)
+    assert sql.CURRENT_HOLD_SEC == store.STORE_WAIT_SEC / 2
+    for timeout, held in ((9, sql.CURRENT_HOLD_SEC), (1, 1)):
+        seen.clear()
+        scratch = tmp_path / f"scratch-{timeout}"
+        scratch.mkdir()
+        result = sql._execute(dict(root=str(ctx.drive_root), db="current", timeout_sec=timeout, snapshot=True,
+                                   query="SELECT task_id FROM tasks", scratch=str(scratch), max_rows=10, max_bytes=65536))
+        assert result["rows"] == [["caller"]]
+        assert seen == [("source", held), (store.store_path(ctx.drive_root).name, held), ("snapshot.sqlite", timeout)]
+
+
 def test_name_tier_uses_the_store_lock(tmp_path, monkeypatch):
     from ouroboros import platform_layer
     monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda _: False)

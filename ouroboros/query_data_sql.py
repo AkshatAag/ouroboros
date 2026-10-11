@@ -24,6 +24,11 @@ HEAP_BYTES = 134217728
 PRAGMAS = {"table_info", "table_xinfo", "table_list", "index_list", "index_info"}
 
 
+# A current-store read holds the lock its writers' COMMIT waits on for store.STORE_WAIT_SEC: the hold
+# stays within half of that wait, so a reader can delay a task write but never fail it.
+CURRENT_HOLD_SEC = store.STORE_WAIT_SEC / 2
+
+
 def database_path(root: Path, db: str) -> Path:
     from ouroboros import evidence_packs
     return {"current": store.store_path(root), "money": root / "state" / "usage.sqlite",
@@ -113,9 +118,10 @@ def _execute(request):
 
     root, db = Path(request["root"]), request["db"]
     path, seconds = database_path(root, db), request["timeout_sec"]
+    hold = min(seconds, CURRENT_HOLD_SEC) if db == "current" else seconds  # a snapshot's own query holds nothing
     snapshot = request["snapshot"]
-    with _source(root, db, seconds) as tier:
-        with _connection(path, tier, seconds) as conn:
+    with _source(root, db, hold) as tier:
+        with _connection(path, tier, hold) as conn:
             if not snapshot:
                 return fetch_query(conn)
             target = Path(request["scratch"]) / "snapshot.sqlite"

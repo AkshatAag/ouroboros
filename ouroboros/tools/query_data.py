@@ -185,12 +185,15 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
         if op == "sql":
             if db not in {"current", "money", "packs"} or not isinstance(query, str) or not query.strip() or len(query) > 16384:
                 raise ValueError("sql requires db=current|money|packs and one query of at most 16384 characters")
+            use_snapshot = db == "money" if snapshot is None else snapshot
+            if db == "current" and not use_snapshot and timeout_sec > sql.CURRENT_HOLD_SEC:
+                raise ValueError(f"a direct db=current read stops at {sql.CURRENT_HOLD_SEC:g} s because task writes wait "
+                                 "on it; use snapshot=true for a longer query")
             path = _path(ctx, root, sql.database_path(root, db).relative_to(root))
             absent = not any(path.parent.glob("*.members.json")) if db == "packs" else not path.is_file()
             if absent:
                 result = {"status": "unavailable", "code": "no_packs" if db == "packs" else "not_found", "source": {"db": db}}
             else:
-                use_snapshot = db == "money" if snapshot is None else snapshot
                 source.update(db=db, query=query, snapshot=use_snapshot)
                 result = sql.run_sql(ctx, root, db=db, query=query, max_rows=max_rows, max_bytes=max_bytes,
                                      snapshot=use_snapshot, timeout_sec=timeout_sec)
@@ -271,7 +274,7 @@ def get_tools():
     return [ToolEntry("query_data", {"name": "query_data", "description": (
         "Read runtime facts, money, pack indexes, typed JSON/JSONL and verified blobs. No paths accepted. "
         "Current SQL exposes tasks facts; use json/task_result for bodies. Money snapshots default on. "
-        "Direct current readers hold facts writers' COMMIT: keep defaults small; snapshot=true for heavy analysis. "
+        f"Current-store reads hold the lock task writes wait on: at most {sql.CURRENT_HOLD_SEC:g} s; longer: snapshot=true. "
         "One allocating SQL function's TIME is not bounded by interrupt (its memory is); the child has a deadline. "
         "save_as retains exact whole-record bytes in the calling task's artifact_store with path/sha256/size/source. "
         "Projections use sorted UTF-8 JSON; store documents and multi-ID bundles are flagged reconstructed. "
