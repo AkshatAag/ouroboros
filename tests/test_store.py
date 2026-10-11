@@ -11,7 +11,7 @@ import sqlite3
 
 import pytest
 
-from ouroboros import platform_layer, store, usage_store
+from ouroboros import platform_layer, store, task_store, usage_store
 from ouroboros.store import StoreBusy, StoreLost, StoreMigrating, StoreRetired
 from ouroboros.utils import machine_json
 
@@ -482,3 +482,34 @@ def test_the_schema_builds_on_this_engine(tmp_path):
                           "custody_outbox", "meta"}
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 0  # the version lives in meta
+
+
+def test_readers_decode_bodies_after_the_read_transaction_closed(tmp_path, monkeypatch):
+    """Grok M2: a listing fetches inside the store and decodes outside it, so a writer's COMMIT
+    during the decode is not held behind the reader's SHARED lock (``StoreBusy`` after the
+    wait). The probe commits a write from inside the first body's ``json.loads``."""
+    import json as json_module
+    from ouroboros.task_results import write_task_result
+    from ouroboros.task_status import find_child_tasks
+
+    for index in range(3):
+        write_task_result(tmp_path, f"t{index}", "completed", parent_task_id="t0" if index else None,
+                          delegation_role="subagent" if index else None)
+    real_loads, fired = json_module.loads, []
+
+    def decoding(text, *args, **kwargs):
+        if '"task_id"' in text and not fired:  # the first body: a writer commits meanwhile
+            fired.append(text)
+            with store.open_store(tmp_path, write=True, wait_sec=0.5) as txn:
+                txn.set_meta("probe", 1)
+        return real_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(json_module, "loads", decoding)
+    assert [row["task_id"] for row in task_store.list_documents(tmp_path)] == ["t0", "t1", "t2"]
+    assert fired
+    fired.clear()
+    assert sorted(row["task_id"] for row in find_child_tasks(tmp_path, parent_task_id="t0", scope="direct",
+                                                             materialize_artifacts=False)) == ["t1", "t2"]
+    assert fired
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.meta("probe") == 1

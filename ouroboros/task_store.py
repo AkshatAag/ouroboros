@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from ouroboros import store
 from ouroboros.store import Txn, open_store
 
-FACT_KEYS = ("task_id", "ts", "updated_at", "delegation_role", "parent_task_id", "project_id", "root_task_id",
+FACT_KEYS = ("task_id", "status", "ts", "updated_at", "delegation_role", "parent_task_id", "project_id", "root_task_id",
              "child_drive_root", "headless_child_drive_root", "superseded_by", "retry_task_id",
              "presence_binding_id", "presence_authority_recorded")
 _NEWEST_ORDER = "ORDER BY ts DESC, task_id DESC"  # NULL ts sorts last: a row without one is oldest
@@ -84,12 +84,19 @@ def patch_document(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], 
     return seen.get("current", {}) if updated is None else {**updated, "task_id": task_id}
 
 
-def _documents(txn: Txn, where: str = "", params: Iterable[Any] = (), order: str = "ORDER BY t.task_id") -> List[Dict[str, Any]]:
+def _fetch(txn: Txn, where: str = "", params: Iterable[Any] = (), order: str = "ORDER BY t.task_id") -> Tuple[list, list]:
+    """The matching rows and their handoff rows as stored (text): all the store is held for.
+    A reader decodes AFTER its transaction closed (``_decode``), so a writer's COMMIT never
+    waits behind a listing's ``json.loads``."""
     clause = f"WHERE {where}" if where else ""
     rows = txn.conn.execute(
         f"SELECT b.body, t.* FROM tasks AS t JOIN task_bodies AS b ON b.task_id = t.task_id {clause} {order}",
         tuple(params)).fetchall()
-    handoffs = txn.handoffs_of([record["task_id"] for record in rows])
+    return rows, txn.handoff_records([record["task_id"] for record in rows])
+
+
+def _decode(rows: list, handoff_records: list) -> List[Dict[str, Any]]:
+    handoffs = store.decode_handoffs([record["task_id"] for record in rows], handoff_records)
     return [store.project_handoffs(json.loads(record["body"]), handoffs[record["task_id"]]) for record in rows]
 
 
@@ -134,12 +141,11 @@ def list_documents(root: Any, *, statuses: Optional[Iterable[str]] = None) -> Li
     """Every document, or those whose stored status is one of ``statuses`` (the WHERE prefilter;
     a caller filtering on the EFFECTIVE status still filters the overlaid rows itself)."""
     wanted = None if statuses is None else sorted({str(status) for status in statuses})
+    if wanted is not None and not wanted:
+        return []
     with open_store(root, write=False) as txn:
-        if wanted is None:
-            return _documents(txn)
-        if not wanted:
-            return []
-        return _documents(txn, f"t.status IN ({','.join('?' * len(wanted))})", wanted)
+        fetched = _fetch(txn) if wanted is None else _fetch(txn, f"t.status IN ({','.join('?' * len(wanted))})", wanted)
+    return _decode(*fetched)
 
 
 def lineage_where(parent: str, root_id: str, *, direct_only: bool) -> Tuple[str, Tuple[str, ...]]:
@@ -162,7 +168,8 @@ def select_lineage(root: Any, parent: str, root_id: str, *, direct_only: bool = 
     """The child-lookup candidates in ``task_id`` order (``lineage_where``); the Python projection decides the rest."""
     where, params = lineage_where(str(parent or ""), str(root_id or ""), direct_only=direct_only)
     with open_store(root, write=False) as txn:
-        return _documents(txn, where, params)
+        fetched = _fetch(txn, where, params)
+    return _decode(*fetched)
 
 
 def task_facts(root: Any, *, where: str = "", params: Iterable[Any] = ()) -> Dict[str, Dict[str, Any]]:
@@ -197,8 +204,8 @@ def documents_by_ids(root: Any, task_ids: Iterable[str]) -> Dict[str, Dict[str, 
     if not ids:
         return {}
     with open_store(root, write=False) as txn:
-        documents = _documents(txn, f"t.task_id IN ({','.join('?' * len(ids))})", ids)
-    return {str(document.get("task_id")): document for document in documents}
+        fetched = _fetch(txn, f"t.task_id IN ({','.join('?' * len(ids))})", ids)
+    return {str(document.get("task_id")): document for document in _decode(*fetched)}
 
 
 def task_ids(root: Any) -> List[str]:

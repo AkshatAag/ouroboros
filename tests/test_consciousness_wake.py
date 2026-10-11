@@ -683,10 +683,10 @@ def test_wake_scan_reads_each_result_and_project_registry_once(tmp_path, monkeyp
     for index in range(total):
         _write(tmp_path, f"t{index:04d}", status="completed", ts=_iso(T0 - 10), updated_at=_iso(T0 - 10), project_id="p1")
     reads, project_reads = Counter(), []
-    real_documents, real_load = task_store._documents, store.Txn.load
+    real_decode, real_load = task_store._decode, store.Txn.load
 
-    def documents(txn, *args, **kwargs):  # every body the scan decodes, by task
-        rows = real_documents(txn, *args, **kwargs)
+    def decode(*args):  # every body the scan decodes, by task
+        rows = real_decode(*args)
         for row in rows:
             reads[row["task_id"]] += 1
         return rows
@@ -695,7 +695,7 @@ def test_wake_scan_reads_each_result_and_project_registry_once(tmp_path, monkeyp
         reads[task_id] += 1
         return real_load(self, task_id)
 
-    monkeypatch.setattr(task_store, "_documents", documents)
+    monkeypatch.setattr(task_store, "_decode", decode)
     monkeypatch.setattr(store.Txn, "load", load)
     monkeypatch.setattr(projects, "list_reserved_projects", lambda _root: project_reads.append(True) or [
         {"id": "p1", "name": "Project", "chat_id": 42, "lifecycle": "active"}])

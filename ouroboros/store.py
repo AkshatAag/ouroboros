@@ -479,6 +479,14 @@ def typed_columns(document: Dict[str, Any], *, pending_drive: Optional[bool] = N
     return columns
 
 
+def decode_handoffs(task_ids: List[str], records: list) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """``{task_id: {kind: {op_id: facts}}}`` from stored handoff rows, every kind present (no store held)."""
+    rows: Dict[str, Dict[str, Dict[str, Any]]] = {task_id: {kind: {} for kind in ROW_BACKED_FIELDS} for task_id in task_ids}
+    for record in records:
+        rows[record["task_id"]].setdefault(record["kind"], {})[record["op_id"]] = json.loads(record["facts"])
+    return rows
+
+
 def project_handoffs(document: Dict[str, Any], rows: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """The body's emptied keys take their rows back; a key the body lacks appears only with rows."""
     for kind, held in rows.items():
@@ -590,16 +598,19 @@ class Txn:
 
     # -- handoff rows: one row per operation of a task's ``ROW_BACKED_FIELDS`` projection, keyed
     #    (task_id, op_id); ``kind`` names the field. Insertion order is the dict order the document had.
-    def handoffs_of(self, task_ids: List[str]) -> Dict[str, Dict[str, Dict[str, Any]]]:
-        """``{task_id: {kind: {op_id: facts}}}`` for the given tasks (one query), every kind present."""
-        rows = {task_id: {kind: {} for kind in ROW_BACKED_FIELDS} for task_id in task_ids}
+    def handoff_records(self, task_ids: List[str]) -> list:
+        """The handoff rows of the given tasks as stored (``facts`` still text), in row order."""
+        records: list = []
         for start in range(0, len(task_ids), 500):
             chunk = task_ids[start:start + 500]
-            for record in self.conn.execute(
-                    f"SELECT task_id, kind, op_id, facts FROM task_handoffs WHERE task_id IN "
-                    f"({','.join('?' * len(chunk))}) ORDER BY rowid", chunk):
-                rows[record["task_id"]].setdefault(record["kind"], {})[record["op_id"]] = json.loads(record["facts"])
-        return rows
+            records.extend(self.conn.execute(
+                f"SELECT task_id, kind, op_id, facts FROM task_handoffs WHERE task_id IN "
+                f"({','.join('?' * len(chunk))}) ORDER BY rowid", chunk).fetchall())
+        return records
+
+    def handoffs_of(self, task_ids: List[str]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """``{task_id: {kind: {op_id: facts}}}`` for the given tasks (one query), every kind present."""
+        return decode_handoffs(task_ids, self.handoff_records(task_ids))
 
     def handoffs(self, task_id: str) -> Dict[str, Dict[str, Any]]:
         return self.handoffs_of([task_id]).get(task_id, {})

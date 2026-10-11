@@ -1191,6 +1191,28 @@ def test_supervisor_admission_enforces_may_delegate_false_even_when_stringified(
     assert rejected["reason_code"] == "delegation_rights_may_delegate"
 
 
+def test_direct_child_count_is_one_indexed_select_not_a_listing(tmp_path, monkeypatch):
+    """Grok M2: the admission count reads the parent's subagent rows by typed column (and only
+    a failed child's body, for its admission fact); a full listing is never taken."""
+    from ouroboros import task_store
+
+    rows = {"accepted": {"status": "running"}, "asked": {"status": "requested"},
+            "dup": {"status": "rejected_duplicate"}, "fell": {"status": "failed"},
+            "fell-admitted": {"status": "failed", "delegation_admission": {"status": "accepted"}},
+            "self": {"status": "running"}}
+    for task_id, extra in rows.items():
+        seed_result(tmp_path, task_id, {"task_id": task_id, "parent_task_id": "parent", "delegation_role": "subagent", **extra})
+    seed_result(tmp_path, "other", {"task_id": "other", "parent_task_id": "someone-else", "delegation_role": "subagent",
+                                    "status": "running"})
+    seed_result(tmp_path, "parent", {"task_id": "parent", "status": "running"})
+    for name in ("ouroboros.task_results.list_task_results", "ouroboros.task_results.list_documents"):
+        monkeypatch.setattr(name, lambda *a, **k: pytest.fail("a full listing was taken"))
+    monkeypatch.setattr(task_store, "list_documents", lambda *a, **k: pytest.fail("a full listing was taken"))
+    monkeypatch.setattr(task_store, "select_lineage", lambda *a, **k: pytest.fail("the lineage walk was taken"))
+    assert durable_direct_child_count(tmp_path, "parent") == 3  # accepted, fell-admitted, self
+    assert durable_direct_child_count(tmp_path, "parent", exclude_task_id="self") == 2
+
+
 def test_direct_child_count_read_gap_is_typed_unknown(tmp_path, monkeypatch):
     seed_result(tmp_path, "child-one", {"task_id": "child-one", "parent_task_id": "parent",
                                         "delegation_role": "subagent", "status": "running"})
@@ -1437,7 +1459,7 @@ def test_supervisor_rejects_count_bounded_child_when_count_scan_fails(
     from supervisor import events
 
     monkeypatch.setattr(
-        "ouroboros.task_results.list_task_results",
+        "ouroboros.task_store.task_facts",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("unreadable")),
     )
     parent_contract = build_task_contract({

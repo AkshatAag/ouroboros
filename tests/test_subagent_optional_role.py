@@ -240,6 +240,8 @@ def test_final_only_history_recovers_role_without_rewriting_old_rows(tmp_path, r
         "actor_id": "historical-actor", "model": "openai/fixture-model", **role_fields,
     }), encoding="utf-8")
     originals = {path: path.read_bytes() for path in (history, result)}
+    from ouroboros.store_import import ensure_current_store
+    ensure_current_store(tmp_path)  # the boot door imports the historic file; a page read never imports
     endpoint = make_chat_history_endpoint(tmp_path)
     response = asyncio.run(endpoint(SimpleNamespace(query_params={"chat_id": "7"})))
     assert response.status_code == 200

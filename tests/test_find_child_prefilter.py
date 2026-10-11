@@ -18,14 +18,10 @@ from ouroboros.task_status import find_child_tasks, wait_for_effective_tasks
 
 
 def _write_result(drive_root: pathlib.Path, row: dict) -> None:
-    from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
-    from ouroboros.task_result_schema import TASK_RESULT_SCHEMA_VERSION
+    """The row as stored (stamped by the seed): a read never imports, so the fixture seeds the store."""
+    from tests._store_shared import seed_result
 
-    d = drive_root / "task_results"
-    d.mkdir(parents=True, exist_ok=True)
-    # Campaign ABI 7.0: readers QUARANTINE an unstamped row.
-    row = {SCHEMA_VERSION_KEY: TASK_RESULT_SCHEMA_VERSION, **row}
-    (d / f"{row['task_id']}.json").write_text(json.dumps(row), encoding="utf-8")
+    seed_result(drive_root, row["task_id"], row)
 
 
 def test_non_matching_rows_never_reach_the_projection(tmp_path, monkeypatch):
@@ -150,14 +146,14 @@ def test_child_lookup_reads_only_selected_bodies_and_sees_a_changed_lineage(tmp_
     _write_result(tmp_path, {"task_id": "child", "status": "completed", "delegation_role": "subagent",
                             "parent_task_id": "owner", "root_task_id": "owner", "result": "selected answer"})
     decoded = []
-    real = task_store._documents
+    real = task_store._decode
 
-    def counted(txn, where="", params=(), order="ORDER BY t.task_id"):
-        rows = real(txn, where, params, order)
+    def counted(*fetched):
+        rows = real(*fetched)
         decoded.extend(str(row.get("task_id")) for row in rows)
         return rows
 
-    monkeypatch.setattr(task_store, "_documents", counted)
+    monkeypatch.setattr(task_store, "_decode", counted)
     rows = find_child_tasks(tmp_path, parent_task_id="owner", scope="direct")
     assert [row["task_id"] for row in rows] == ["child"] and rows[0]["result"] == "selected answer"
     assert decoded == ["child"]
@@ -171,16 +167,18 @@ def test_child_lookup_reads_only_selected_bodies_and_sees_a_changed_lineage(tmp_
 
 
 def test_child_selection_preserves_whole_scan_quarantine_for_unrelated_bad_rows(tmp_path, monkeypatch):
-    """The first touch imports the directory: unrelated inadmissible files are quarantined with
-    one batched event, exactly as the complete reader did, before the lineage query answers."""
+    """The boot import is the door: unrelated inadmissible files are quarantined with one
+    batched event, exactly as the complete reader did, before the lineage query answers."""
     from ouroboros import store_import
 
-    _write_result(tmp_path, {"task_id": "child", "status": "completed", "delegation_role": "subagent", "parent_task_id": "owner"})
     directory = tmp_path / "task_results"
+    directory.mkdir(parents=True)
     (directory / "old.json").write_text(json.dumps({"task_id": "old", "status": "completed"}), encoding="utf-8")
     (directory / "torn.json").write_text("{broken", encoding="utf-8")
     events = []
     monkeypatch.setattr(store_import, "emit_quarantine_event", lambda _root, rows: events.append(rows) if rows else None)
+    store_import.ensure_current_store(tmp_path)
+    _write_result(tmp_path, {"task_id": "child", "status": "completed", "delegation_role": "subagent", "parent_task_id": "owner"})
     assert [row["task_id"] for row in find_child_tasks(tmp_path, parent_task_id="owner", scope="direct")] == ["child"]
     assert len(events) == 1 and {row["task_id"] for row in events[0]} == {"old", "torn"}
     assert not (directory / "old.json").exists() and not (directory / "torn.json").exists()
