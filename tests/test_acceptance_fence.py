@@ -214,10 +214,11 @@ def test_malformed_acceptance_fence_snapshot_fails_closed_and_terminalizes(monke
     assert load_task_result(tmp_path, "uncertain")["status"] == STATUS_CANCELLED
     events = [
         json.loads(line)
-        for line in (tmp_path / "logs" / "supervisor.jsonl").read_text().splitlines()
+        for line in (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert events[-1]["type"] == "queue_restore_invalid_acceptance_fences"
-    assert events[-1]["action"] == "fail_closed_no_restore"
+    diagnostic = next(event for event in events if event.get("type") == "queue_restore_invalid_acceptance_fences")
+    assert diagnostic["action"] == "fail_closed_no_restore"
+    assert diagnostic["affected_task_ids"] == ["uncertain"]
 
 
 def test_restore_does_not_count_enqueue_admission_rejection(monkeypatch, tmp_path):
