@@ -10,6 +10,7 @@ import types
 import pytest
 
 from tests.test_swarm_host_admission import host as _swarm_host
+from tests._store_shared import delete_result, seed_result
 
 swarm_host = _swarm_host
 
@@ -182,9 +183,7 @@ def test_cat_root_keeps_full_authority_and_helpers_keep_a_predecessor_brief(
     }
     result_dir = tmp_path / "task_results"
     result_dir.mkdir()
-    (result_dir / f"{predecessor_id}.json").write_text(
-        json.dumps({"_schema_version": 1, **predecessor}), encoding="utf-8",
-    )
+    seed_result(tmp_path, predecessor_id, {"_schema_version": 1, **predecessor})
     assert len(json.dumps(predecessor["plan_review_state"])) < 1_000
     assert len(json.dumps({
         key: predecessor[key]
@@ -309,9 +308,7 @@ def test_main_promotion_selects_only_manifested_canonical_predecessor(tmp_path, 
         {"_schema_version": 1, "task_id": "old-b", "status": "completed", "title": "Chosen project"},
     ]
     for row in rows:
-        (result_dir / f"{row['task_id']}.json").write_text(
-            json.dumps(row), encoding="utf-8",
-        )
+        seed_result(tmp_path, row['task_id'], row)
     manifest = {"final_results": [server._task_result_ground_truth(row) for row in rows]}
     selected = _managed_swarm_ctx(tmp_path, task_metadata={
         "force_plan": True, "force_plan_source": "swarm",
@@ -359,7 +356,7 @@ def test_main_promotion_selects_only_manifested_canonical_predecessor(tmp_path, 
         "force_plan": True, "force_plan_source": "swarm",
         "main_routing_manifest": manifest,
     })
-    (result_dir / "old-b.json").unlink()
+    delete_result(tmp_path, "old-b")
     refused = _promote_chat_to_task(
         missing, "Continue missing work", predecessor_task_id="old-b",
     )

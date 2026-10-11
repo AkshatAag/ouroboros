@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from typing import Any, Dict, MutableSet, Optional
 
 from ouroboros.context_budget import PREDECESSOR_RESULT_INLINE_CHARS
+from ouroboros.store import StoreError
 
 _RAW_AUTHORITY_KEYS = frozenset({"result", "final_answer"})
 
@@ -383,7 +384,7 @@ def project_predecessor_review_views(runtime: dict, *, drive_root: Any, repo_roo
             if "previous_review_context" in node:
                 addressed["previous_review_context"] = node["previous_review_context"]
             node.update(addressed)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, StoreError) as exc:
             node["historical_review_context"] = {"task_id": owner, "source": copy.deepcopy(source),
                 "status": "source_unavailable", "gap": type(exc).__name__ + ": " + str(exc),
                 "rule": "The earlier selected account could not be read; no current task authority was inferred."}

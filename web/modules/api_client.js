@@ -8,6 +8,8 @@ export async function apiFetch(url, init = {}) {
     return fetch(url, init);
 }
 
+export const isStoreMigrating = error => error?.status === 503 && error?.body?.reason_code === 'migrating';
+
 /**
  * Read an owner-visible sentence out of a gateway error body. Several routes
  * answer with a STRUCTURED error (`{error: {code, message, ...}}`), and
@@ -274,7 +276,10 @@ export async function fetchTaskDetailStrict(taskId) {
         if (resp.ok !== false) return resp.json();
         if (resp.status === 404) return null;
     }
-    throw new Error(`task detail read failed (HTTP ${resp?.status ?? 'no response'})`);
+    const error = new Error(`task detail read failed (HTTP ${resp?.status ?? 'no response'})`);
+    error.status = resp?.status;
+    try { error.body = await resp.json(); } catch { /* Retain the HTTP failure without a readable body. */ }
+    throw error;
 }
 
 export function cleanExtensionRoute(value) {

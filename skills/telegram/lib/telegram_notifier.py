@@ -239,7 +239,11 @@ async def _check_tasks_notify(
         rounds = e.get("rounds")
         if rounds is not None:
             parts.append(f"{rounds}r")
-        tr = _read_json_file(_data_dir(api) / "task_results" / f"{tid}.json")
+        try:
+            from ouroboros.task_results import load_task_result
+            tr = load_task_result(_data_dir(api), tid) or {}
+        except Exception:
+            tr = {}
         try:
             if tr.get("cost_usd") is not None:
                 parts.append(f"${float(tr.get('cost_usd')):.2f}")

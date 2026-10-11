@@ -291,7 +291,7 @@ def write_blob(drive_root: pathlib.Path, payload: Any, *, kind: str = "json") ->
     if not path.exists():
         tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
         try:
-            with gzip.open(tmp, "wb") as fh:
+            with gzip.open(tmp, "wb", compresslevel=1) as fh:
                 fh.write(raw)
             _chmod_private(tmp)
             replace_atomic(tmp, path)
@@ -329,40 +329,21 @@ def read_blob_ref(
     ref: Dict[str, Any],
     *,
     expected_kind: str = "json",
+    max_bytes: int | None = None,
+    raw_bytes: bool = False,
 ) -> Any:
-    """Read and verify one content-addressed blob below this drive root."""
-    if not isinstance(ref, dict):
-        raise ValueError("observability blob ref must be an object")
-    kind = str(ref.get("kind") or "")
-    if kind != expected_kind or ref.get("encoding") != "gzip":
-        raise ValueError("observability blob ref has an unexpected kind or encoding")
-    expected_sha = str(ref.get("sha256") or "")
-    try:
-        expected_size = int(ref["size"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("observability blob ref has no valid size") from exc
-    if not expected_sha:
-        raise ValueError("observability blob ref has no sha256")
+    """Read and verify one content-addressed blob below this drive root (loose, else its
+    evidence pack; retained child roots the ref names are tried the same way). Only a bounded
+    read (``max_bytes``) accepts a ref without a recorded size; ``raw_bytes`` returns the bytes."""
+    from ouroboros.evidence_packs import blob_bytes, blob_ref_fields
 
-    path = _blob_ref_path(drive_root, ref)
-    def read(candidate):
-        with gzip.open(candidate, "rb") as handle:
-            raw = handle.read()
-        if len(raw) != expected_size or hashlib.sha256(raw).hexdigest() != expected_sha:
-            raise ValueError("observability blob ref failed size or sha256 verification")
-        return json.loads(raw.decode("utf-8")) if kind == "json" else raw.decode("utf-8", errors="replace")
-    try:
-        return read(path)
-    except (OSError, ValueError) as original_error:
-        from ouroboros.source_retention import retained_child_root
-
-        original = pathlib.Path(str(ref.get("path") or ""))
-        suffix = (OBSERVABILITY_DIR, "blobs", f"{expected_sha}.{kind}.gz")
-        if original.is_absolute() and original.parts[-3:] == suffix:
-            child = pathlib.Path(*original.parts[:-3])
-            if original != path and retained_child_root(pathlib.Path(drive_root), child):
-                return read(_blob_ref_path(child, ref))
-        raise original_error
+    _sha256, kind, size = blob_ref_fields(ref)
+    if size < 0 and max_bytes is None:
+        raise ValueError("observability blob ref has no valid size")
+    raw = blob_bytes(drive_root, ref, expected_kind=expected_kind, max_bytes=max_bytes)
+    if raw_bytes:
+        return raw
+    return json.loads(raw.decode("utf-8")) if kind == "json" else raw.decode("utf-8", errors="replace")
 
 
 def _ref_path(drive_root: pathlib.Path, ref: dict, relative: pathlib.Path) -> pathlib.Path:
@@ -993,7 +974,7 @@ def call_manifest_path(drive_root: pathlib.Path, task_id: str, call_id: str) -> 
 
 
 def read_call_payload(drive_root: pathlib.Path, *, task_id: str, call_id: str) -> tuple:
-    """Read one exact call and its complete digest-verified existing CAS body."""
+    """Verify a call's CAS body and restore an omitted identical send history."""
     path = call_manifest_path(drive_root, task_id, call_id)
     if not path.exists():
         from ouroboros.source_retention import retained_task_roots
@@ -1006,6 +987,8 @@ def read_call_payload(drive_root: pathlib.Path, *, task_id: str, call_id: str) -
     if not isinstance(manifest, dict) or manifest.get("task_id") != task_id or manifest.get("call_id") != call_id:
         raise ValueError("observability call identity mismatch")
     payload = read_blob_ref(drive_root, manifest.get("full_payload_ref"))
+    if manifest.get("call_type") == "llm_request" and isinstance(payload, dict) and "messages" in payload:
+        payload.setdefault("send_messages", payload["messages"])
     ref = {"call_id": call_id, "manifest_ref": {"path": str(path), "call_id": call_id,
            "sha256": hashlib.sha256(raw).hexdigest()},
            "redacted_projection_ref": manifest.get("redacted_projection_ref"),
@@ -1021,6 +1004,7 @@ def write_call_manifest(
     manifest: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Write the small per-call manifest with refs into the private ledger."""
+    from ouroboros import evidence_packs, store
 
     path = call_manifest_path(drive_root, task_id, call_id or new_call_id("call"))
     safe_call = path.stem
@@ -1035,7 +1019,9 @@ def write_call_manifest(
         "call_id": safe_call,
         **dict(manifest or {}),
     }
-    atomic_write_json(path, payload, trailing_newline=True)
+    with store.name_lock(pathlib.Path(drive_root), evidence_packs.PUBLICATION_LOCK_NAME, timeout_sec=4.0):
+        evidence_packs.note_manifest_publication(drive_root, payload)
+        atomic_write_json(path, payload, trailing_newline=True)
     _chmod_private(path)
     try:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1273,11 +1259,11 @@ def latest_llm_response_text(drive_root: pathlib.Path, task_id: str) -> str:
     for manifest_path in manifests:
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            blob_path = pathlib.Path(str((manifest.get("full_payload_ref") or {}).get("path") or ""))
-            if not blob_path.is_file():
+            from ouroboros.evidence_packs import blob_bytes
+            try:
+                payload = json.loads(blob_bytes(drive_root, manifest.get("full_payload_ref")).decode("utf-8", errors="replace"))
+            except (OSError, ValueError):
                 continue
-            with gzip.open(blob_path, "rb") as fh:
-                payload = json.loads(fh.read().decode("utf-8", errors="replace"))
             message = payload.get("message") if isinstance(payload, dict) else None
             content = message.get("content") if isinstance(message, dict) else None
             text = str(content or "").strip()
