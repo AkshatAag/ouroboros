@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -1250,15 +1251,10 @@ def artifact_record(path: pathlib.Path, *, kind: str = "task_artifact", source_p
 
 
 def store_task_artifact_bytes(
-    drive_root: Union[pathlib.Path, str],
-    task_id: str,
-    name: str,
-    data: bytes,
-    *,
-    kind: str = "task_artifact",
+    drive_root: Union[pathlib.Path, str], task_id: str, name: str, data: bytes,
+    *, kind: str = "task_artifact",
 ) -> Dict[str, Any]:
     """Publish immutable actor-readable bytes; reuse equal bytes, refuse collisions.
-
     Byte-oriented twin of ``copy_file_to_task_artifacts`` for canonical bytes."""
     safe_name = pathlib.Path(str(name or "")).name
     if not safe_name or safe_name in {".", ".."} or safe_name != str(name):
@@ -1268,24 +1264,28 @@ def store_task_artifact_bytes(
     artifact_dir = task_artifact_dir_path(drive_root, task_id, create=True)
     path = artifact_dir / safe_name
     temporary = path.with_name(f".{uuid.uuid4().hex}.tmp")
-    try:
-        write_bytes_atomic(temporary, data)
+
+    def publish(_current):
         try:
             os.link(temporary, path)
-        except FileExistsError:
-            if path.read_bytes() != data:
-                raise ValueError(f"task artifact collision: {safe_name}")
+        except OSError as exc:
+            if (exc.errno not in {errno.EEXIST, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM, errno.EXDEV, errno.ENOSYS}
+                    and getattr(exc, "winerror", None) != 50):
+                raise
+            if path.exists():
+                if path.read_bytes() != data:
+                    raise ValueError(f"task artifact collision: {safe_name}")
+            else:
+                temporary.replace(path)
+    try:
+        write_bytes_atomic(temporary, data)
+        update_json_locked(artifact_dir / _ARTIFACT_MANIFEST, publish)
     finally:
         temporary.unlink(missing_ok=True)
     record = {**artifact_record(path, kind=kind), "immutable": True}
     _register_task_artifact_records(artifact_dir, [record])
-    return {
-        "root": "artifact_store",
-        "path": safe_name,
-        "sha256": record["sha256"],
-        "bytes": record["size"],
-        "kind": kind,
-    }
+    return {"root": "artifact_store", "path": safe_name, "sha256": record["sha256"],
+            "bytes": record["size"], "kind": kind}
 
 
 def _register_task_artifact_records(artifact_dir: pathlib.Path, records: Iterable[Dict[str, Any]]) -> None:

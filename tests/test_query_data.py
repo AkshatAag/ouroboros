@@ -1,6 +1,7 @@
 """Typed sources, bounded reads, exact artifacts and real registry delivery."""
 from __future__ import annotations
 
+import errno
 import gzip
 import hashlib
 import json
@@ -77,7 +78,16 @@ def test_exact_whole_document_and_string_projection(ctx):
 
 
 @pytest.mark.parametrize("same_bytes", [False, True])
-def test_concurrent_exports_publish_exclusively(ctx, monkeypatch, same_bytes):
+@pytest.mark.parametrize("link_error", [None, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM,
+                                       errno.EXDEV, errno.ENOSYS, "win32"])
+def test_concurrent_exports_publish_exclusively(ctx, monkeypatch, same_bytes, link_error):
+    if link_error is not None:
+        def unsupported(*_args, **_kwargs):
+            exc = OSError(errno.EINVAL if link_error == "win32" else link_error, "fixture link unsupported")
+            if link_error == "win32":
+                exc.winerror = 50  # ERROR_NOT_SUPPORTED
+            raise exc
+        monkeypatch.setattr(artifacts.os, "link", unsupported)
     payloads = [b'{"value":"first"}', b'{"value":"first"}' if same_bytes else b'{"value":"second"}']
     for index, raw in enumerate(payloads):
         write(ctx, f"state/review_ledger/source-{index}.json", raw)
@@ -112,6 +122,17 @@ def test_concurrent_exports_publish_exclusively(ctx, monkeypatch, same_bytes):
         assert second["status"] == "error" and "collision" in second["message"], second
     assert saved(ctx, first) == payloads[0]
     artifact_dir = artifacts.task_artifact_dir_path(ctx.drive_root, ctx.task_id)
+    assert not list(artifact_dir.glob(".*.tmp"))
+
+
+def test_export_link_io_failure_preserves_absence(ctx, monkeypatch):
+    def broken(*_args, **_kwargs):
+        raise OSError(errno.EIO, "fixture link IO failure")
+    monkeypatch.setattr(artifacts.os, "link", broken)
+    with pytest.raises(OSError, match="fixture link IO failure"):
+        artifacts.store_task_artifact_bytes(ctx.drive_root, ctx.task_id, "io.json", b"{}")
+    artifact_dir = artifacts.task_artifact_dir_path(ctx.drive_root, ctx.task_id)
+    assert not (artifact_dir / "io.json").exists()
     assert not list(artifact_dir.glob(".*.tmp"))
 
 
