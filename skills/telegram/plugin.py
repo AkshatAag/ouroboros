@@ -1054,14 +1054,14 @@ def _make_outbound(api):
             if event.get("is_progress") and not _mirror_progress_enabled(local_settings):
                 return
 
-            # Routing receipts ride the outbound bus as typed annotations with
-            # suppress_bubble (no text). The only one worth a Telegram push is
-            # the actionable refusal: a numbered destination list (#198). The
-            # owner replies with a number in plain words — the LLM router reads
-            # this list from history and dispatches the choice (P5 LLM-first,
-            # no keyword gate) — or taps the picker card in the web UI.
+            # Routing receipts are typed annotations (suppress_bubble, no text). A landed act stays silent except for a
+            # file it could not attach (no message line here to carry it); an actionable refusal is a numbered list (#198)
+            # the owner answers in plain words (the LLM router reads it from history, P5) or on the web picker card.
             if str(event.get("annotation_type") or "") == "routing_ack":
                 if str(event.get("status") or "") != "needs_manual_target":
+                    names = [str(row.get("label") or "file") for row in event.get("attachment_manifest") or [] if isinstance(row, dict) and row.get("status") == "rejected"]
+                    if names:
+                        await client.send_message(chat_id, "Not attached to the task: " + ", ".join(names), parse_mode="")
                     return
                 raw_options = event.get("options") if isinstance(event.get("options"), list) else []
                 from ouroboros.project_dialogue import routing_option_label

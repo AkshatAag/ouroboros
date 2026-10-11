@@ -170,6 +170,23 @@ def test_routing_refusal_speaks_in_the_third_person(tmp_path, monkeypatch):
     assert not any(line.startswith("I ") for line in lines) and "I couldn't" not in message
 
 
+@pytest.mark.parametrize("silent", ["off", "on"])
+def test_a_landed_receipt_stays_silent_unless_a_file_was_not_attached(tmp_path, monkeypatch, silent):
+    """A landed act publishes nothing here either; only a file the host could not attach earns one
+    plain line, sent fresh: it never edits or takes over silent mode's tracked answer."""
+    plugin, api = _setup(tmp_path, monkeypatch, TELEGRAM_SILENT_MODE=silent)
+    plugin._set_silent_msg(api, 42, 555)
+    handle = plugin._make_outbound(api)
+    ack = {"annotation_type": "routing_ack", "status": "delivered", "action": "steer_task", "target": "t1",
+           "attachment_manifest": [{"ordinal": 0, "label": "a.png", "status": "staged"}]}
+    asyncio.run(handle(ack))
+    assert _Rec.sent == []
+    ack["attachment_manifest"].append({"ordinal": 1, "label": "b.pdf", "status": "rejected", "reason": "source_missing"})
+    asyncio.run(handle(ack))
+    assert [(row[1], row[2]) for row in _Rec.sent] == [("Not attached to the task: b.pdf", "")]
+    assert _Rec.edited == [] and plugin._get_silent_msg(api, 42) == 555
+
+
 def test_subagent_cards_off_hides_activity(tmp_path, monkeypatch):
     plugin, api = _setup(tmp_path, monkeypatch, TELEGRAM_SUBAGENT_CARDS="off")
     handle = plugin._make_outbound(api)
