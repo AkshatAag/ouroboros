@@ -18,7 +18,7 @@ import { createChatReadingPosition } from './chat_reading_position.js';
 import { createChatHistoryPager, historyCoverage, historyIslandAtEdge } from './chat_history.js';
 import { createProjectReadReceipt, isAtNewestMessage } from './project_read_state.js';
 import { mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
-import { apiClient, apiFetch, fetchTaskDetail, fetchTaskDetailStrict } from './api_client.js';
+import { apiClient, apiFetch, fetchTaskDetail, fetchTaskDetailStrict, isStoreMigrating } from './api_client.js';
 import { syncHistoryRetentionItem } from './history_retention.js';
 import {
     getLogTaskGroupId,
@@ -2801,11 +2801,13 @@ export function createChatInstance({
                 readReceipt.settle();
                 return messages.length > 0;
             } catch (err) {
+                if (destroyed) return false;
                 lastHistorySyncSucceeded = false;
                 emptyWelcome?.historyRead(false);
                 initialHydrationPromise = null;
-                // Never leave an empty feed blank: failure and Retry replace the loading state.
+                // Migration keeps a calm note and retries through the existing 700 ms scheduler.
                 historyControls.endRecent(err); syncLoadOlderControl();
+                if (isStoreMigrating(err)) { historyResyncScheduler.schedule(true); return false; }
                 const socketState = ws?.ws?.readyState;
                 const expectedDisconnect = socketState !== WebSocket.OPEN;
                 if (expectedDisconnect && err instanceof TypeError) {
