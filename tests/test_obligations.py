@@ -106,11 +106,11 @@ def test_custody_row_commits_before_the_chain_append_and_the_outbox_empties_afte
 
     seen = []
 
-    def append(path, row):
+    def append(path, row, **kwargs):
         held = current.held_runs(tmp_path)
         seen.append((row["type"], "run" in held, held["run"].settled if "run" in held else None,
                      current.outbox_depth(tmp_path)))
-        return current_append(path, row)
+        return current_append(path, row, **kwargs)
 
     current_append = current.append_jsonl
     monkeypatch.setattr(current, "append_jsonl", append)

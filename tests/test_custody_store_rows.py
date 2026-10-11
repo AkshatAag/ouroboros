@@ -72,6 +72,59 @@ def test_a_death_between_the_append_and_the_outbox_delete_replays_the_event_once
     assert current.fold(duplicated)["runs"]["run"][0]["settled"] is True
 
 
+def test_the_outbox_delete_follows_a_locked_fsynced_append_on_a_restored_line_boundary(tmp_path, monkeypatch):
+    """B3: the chain append the outbox delete waits for is durable — under the append lock,
+    the line boundary restored when the file ends mid-line, the file fsynced (the directory
+    on create) — and the delete comes only after; an append that is not durable keeps the
+    outbox row for the next flush, whose replay the fold dedups by ``event_id``."""
+    import os
+
+    path = c.event_log_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"ts": "2026-01-01T00:00:00+00:00", "type": "torn"}), encoding="utf-8")  # no newline: a torn tail
+    order = []
+    real_fsync, real_delete = os.fsync, store.Txn.outbox_delete
+
+    def fsync(fd):
+        real_fsync(fd)
+        order.append(("fsync", os.fstat(fd).st_ino))
+
+    def delete(self, event_id):
+        order.append("delete")
+        return real_delete(self, event_id)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(current, "append_jsonl", lambda *a, **kw: (order.append(("append", kw)), False)[1])
+        assert c.emit(tmp_path, c.STARTED, {"run_id": "run", "task_id": "task"})  # committed; the append did not confirm
+    assert order == [("append", {"ensure_record_boundary": True, "require_lock": True})]  # locked, boundary restored
+    assert current.outbox_depth(tmp_path) == 1 and path.read_text(encoding="utf-8").count("\n") == 0
+    order.clear()
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(store.Txn, "outbox_delete", delete)
+    assert current.flush_outbox(tmp_path) == 1
+    chain = ("fsync", path.stat().st_ino)
+    assert chain in order and order.index(chain) < order.index("delete")  # durable, THEN deleted
+    lines = path.read_text(encoding="utf-8").split("\n")
+    assert json.loads(lines[0])["type"] == "torn" and json.loads(lines[1])["type"] == c.STARTED and lines[2] == ""
+    assert current.outbox_depth(tmp_path) == 0
+    # the fsync fails: the line is in the file, the row stays, the next flush replays it and the fold dedups
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "fsync", lambda fd: (_ for _ in ()).throw(OSError(5, "Input/output error")))
+        assert c.emit(tmp_path, c.SETTLED, {"run_id": "run", "task_id": "task", "state": "succeeded"})
+    assert current.outbox_depth(tmp_path) == 1 and [row["type"] for row in _chain(tmp_path)][1:] == [c.STARTED, c.SETTLED]
+    assert current.flush_outbox(tmp_path) == 1 and current.outbox_depth(tmp_path) == 0
+    assert [row["type"] for row in c.custody_rows(tmp_path)] == [c.STARTED, c.SETTLED]  # one row per event id
+
+
+def test_the_first_custody_append_fsyncs_the_logs_directory(tmp_path, monkeypatch):
+    synced, logs = [], c.event_log_path(tmp_path).parent
+    monkeypatch.setattr(store, "fsync_directory", lambda directory: synced.append(directory))
+    assert c.emit(tmp_path, c.STARTED, {"run_id": "run", "task_id": "task"})
+    assert synced.count(logs) == 1
+    assert c.emit(tmp_path, c.SETTLED, {"run_id": "run", "task_id": "task", "state": "succeeded"})
+    assert synced.count(logs) == 1  # on create only
+
+
 def test_a_pending_invocation_becomes_its_run_or_its_refusal_in_one_transaction(tmp_path, monkeypatch):
     request = {"invocation_id": "inv", "task_id": "task", "route": "codex", "surface": "delegate",
                "request": {"prompt": "work"}, "billing_group": {"billing_group_id": "group-1"}}
@@ -81,11 +134,11 @@ def test_a_pending_invocation_becomes_its_run_or_its_refusal_in_one_transaction(
 
     writes, seen = _writes(monkeypatch), []
 
-    def append(path, row):  # the first observation after the reducing transaction committed
+    def append(path, row, **kwargs):  # the first observation after the reducing transaction committed
         with store.open_store(tmp_path, write=False) as txn:
             seen.append((txn.get_row("custody_open", "invocation:inv"),
                          txn.custody_rows("invocation_id=?", ("inv",))["run"]["request_event"]["request"]))
-        return real_append(path, row)
+        return real_append(path, row, **kwargs)
 
     real_append = current.append_jsonl
     monkeypatch.setattr(current, "append_jsonl", append)

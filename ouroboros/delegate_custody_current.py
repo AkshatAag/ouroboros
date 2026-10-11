@@ -16,6 +16,7 @@ confirmed. ``fold`` is the importer's single pass over the retained chain.
 from __future__ import annotations
 
 import logging
+import os
 from copy import deepcopy
 from json import loads as json_loads
 from dataclasses import fields
@@ -339,7 +340,7 @@ def flush_outbox(root) -> int:
     appended = 0
     for event in parked:
         try:
-            if not append_jsonl(event_log_path(root), event):
+            if not _append_durable(event_log_path(root), event):
                 break
             with store.open_store(root, write=True) as txn:
                 txn.outbox_delete(str(event.get("event_id") or ""))
@@ -348,6 +349,29 @@ def flush_outbox(root) -> int:
             break
         appended += 1
     return appended
+
+
+def _append_durable(path, event: Dict[str, Any]) -> bool:
+    """The chain append an outbox delete may follow: under the chain's append lock (never the
+    unlocked fallback), the line boundary restored when the file ends mid-line, the bytes
+    fsynced — and the directory on create — before ``True``. A death after ``True`` leaves at
+    most a replayed ``event_id`` the fold dedups; a death before it leaves the outbox row. The
+    general ``append_jsonl`` keeps its fast path for the observational logs."""
+    created = not path.exists()
+    if not append_jsonl(path, event, ensure_record_boundary=True, require_lock=True):
+        return False
+    try:
+        fd = os.open(str(path), os.O_RDWR | os.O_APPEND)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        log.warning("custody chain append not durable under %s", path.parent, exc_info=True)
+        return False
+    if created:
+        store.fsync_directory(path.parent)
+    return True
 
 
 def outbox_depth(root) -> int:

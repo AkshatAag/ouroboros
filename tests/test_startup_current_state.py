@@ -71,7 +71,7 @@ def test_custody_append_can_write_results_and_rows(tmp_path, monkeypatch, kind):
     from ouroboros import delegate_custody_current as current
     migrations.prepare_startup_state(tmp_path)
     assert custody.emit(tmp_path, custody.STARTED, {"run_id": "run", "task_id": "task"})
-    def append(_path, _row):
+    def append(_path, _row, **_kwargs):
         assert "run" in current.held_runs(tmp_path) or kind == custody.SETTLED
         results.write_task_result(tmp_path, "other", "running")
         o.add(tmp_path, "custody_open", "invocation:other", {"request": {"invocation_id": "other"}})
