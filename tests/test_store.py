@@ -680,10 +680,29 @@ def test_copying_a_held_store_file_onto_itself_raises_and_keeps_its_bytes(tmp_pa
     store_import.ensure_current_store(tmp_path)
     path = store.store_path(tmp_path)
     store.probe(tmp_path)
-    assert store.held_descriptor(path) is not None
+    assert (store.held_descriptor(path) is not None) == (os.name != "nt")  # Windows copies with copy2
     size = path.stat().st_size
     for destination in (path, path.parent):
         with pytest.raises(shutil.SameFileError):
             store.copy_file_bytes(path, destination)
         assert path.stat().st_size == size
     assert pathlib.Path(store.copy_file_bytes(path, tmp_path / "copy.sqlite")).stat().st_size == size
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows reads store files through ordinary handles")
+def test_a_kept_reader_reads_like_a_file_and_continues_short_reads(tmp_path, monkeypatch):
+    from ouroboros import store_import
+
+    store_import.ensure_current_store(tmp_path)
+    path = store.store_path(tmp_path)
+    store.probe(tmp_path)
+    data = path.read_bytes()
+    with store.open_for_read(path) as reader:
+        assert reader.read() == data and reader.tell() == len(data)
+        assert reader.seek(-10, os.SEEK_END) == len(data) - 10 and reader.read() == data[-10:]
+        with pytest.raises(ValueError):
+            reader.seek(-1)
+        reader.seek(5)
+        monkeypatch.setattr(store.os, "pread", lambda fd, n, at, _pread=os.pread: _pread(fd, min(n, 3), at))
+        assert reader.read(10) == data[5:15] and reader.tell() == 15
+    assert store.held_descriptor(path) is not None  # leaving the reader kept the descriptor

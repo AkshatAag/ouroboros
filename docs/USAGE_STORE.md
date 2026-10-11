@@ -107,8 +107,9 @@ read through one descriptor per file that the process never closes: closing
 any descriptor of a SQLite file releases every lock the process holds on it,
 an open transaction's on another thread included. Code that reads or copies
 arbitrary files in a process that may hold a store (the Files panel, the read
-tools) goes through `store.iter_file_bytes` / `copy_file_bytes`, which use that
-kept descriptor for a held store file. The connection, tier,
+tools, artifact capture) goes through `store.open_for_read`, `iter_file_bytes`,
+`read_file_bytes` or `copy_file_bytes`, which use that kept descriptor for a
+held store file. The connection, tier,
 file-identity and transaction core is `ouroboros/store.py`, shared with the
 current-facts store; `usage_store` keeps the money error vocabulary over it.
 

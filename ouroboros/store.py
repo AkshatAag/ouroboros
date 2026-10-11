@@ -170,16 +170,29 @@ class _KeptReader:
     def fileno(self) -> int:
         return self._fd
 
+    def tell(self) -> int:
+        return self._offset
+
     def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
-        self._offset = offset if whence == os.SEEK_SET else self._offset + offset
+        if whence not in (os.SEEK_SET, os.SEEK_CUR, os.SEEK_END):
+            raise ValueError(f"invalid whence ({whence})")
+        base = os.fstat(self._fd).st_size if whence == os.SEEK_END else (0 if whence == os.SEEK_SET else self._offset)
+        if base + offset < 0:
+            raise ValueError("negative seek position")
+        self._offset = base + offset
         return self._offset
 
     def read(self, size: Optional[int] = -1) -> bytes:
-        if size is None or size < 0:
-            size = max(0, os.fstat(self._fd).st_size - self._offset)
-        data = os.pread(self._fd, size, self._offset)
-        self._offset += len(data)
-        return data
+        """Up to ``size`` bytes (all that remain when negative); short ``pread``s are continued."""
+        wanted, parts = (-1 if size is None else size), []
+        while wanted:
+            data = os.pread(self._fd, wanted if wanted > 0 else 1 << 20, self._offset)
+            if not data:
+                break
+            parts.append(data)
+            self._offset += len(data)
+            wanted = wanted - len(data) if wanted > 0 else wanted
+        return b"".join(parts)
 
 
 def open_for_read(path: Any) -> Any:
