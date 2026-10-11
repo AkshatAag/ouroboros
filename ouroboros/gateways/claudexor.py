@@ -1071,17 +1071,15 @@ class ClaudexorGateway(ClaudexorMaintenanceGateway):
                            answers: List[Dict[str, Any]]) -> Dict[str, Any]:
         """POST /v2/runs/:id/interactions/:iid/answer — deliver one answer set.
 
-        ``answers`` rows are already in the wire shape (``questionId`` /
-        ``selectedLabels`` / ``freeText`` — the strict ``ControlInteractionAnswerRequest``);
-        this method is transport, not translation.
-
-        The engine returns ``ControlInteractionAnswerResponse`` directly on
-        success. Its error serializer moves ``accepted`` and the refusal status
-        into ``ControlProblem.context`` and keeps ``message`` at the top level.
-        Decode that envelope here, while retaining legacy top-level replies:
-        ``already_resolved`` is an answer fact, not an outage. Transport failures,
-        an untyped 404 (``no such run``), 501 (no answer service), and other
-        problems still raise ``ClaudexorUnavailable``.
+        Transport, not translation: ``answers`` rows are already the strict
+        ``ControlInteractionAnswerRequest`` wire shape (``questionId`` / ``selectedLabels`` /
+        ``freeText``). The engine returns ``ControlInteractionAnswerResponse`` directly on
+        success; at 404/409 its error serializer moves ``accepted`` and the refusal status
+        into the ``context`` of a generic ``http_<status>`` ControlProblem and keeps
+        ``message`` on top. That envelope and a legacy top-level reply both return the typed
+        answer: ``already_resolved`` is an answer fact, not an outage. Transport failures, an
+        untyped 404 (``no such run``), 501 (no answer service) and every other problem raise
+        ``ClaudexorUnavailable``.
         """
         path = (f"/v2/runs/{quote(str(run_id), safe='')}"
                 f"/interactions/{quote(str(interaction_id), safe='')}/answer")
@@ -1093,12 +1091,10 @@ class ClaudexorGateway(ClaudexorMaintenanceGateway):
                 "daemon_unreachable",
                 f"Claudexor daemon unreachable: {type(exc).__name__}: {exc}",
             ) from exc
-        body: Any = None
-        if response.content:
-            try:
-                body = response.json()
-            except ValueError:
-                body = None
+        try:
+            body = response.json() if response.content else None
+        except ValueError:
+            body = None
         if isinstance(body, dict):
             context = body.get("context")
             if (response.headers.get("content-type", "").split(";", 1)[0].strip() == "application/problem+json"
