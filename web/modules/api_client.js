@@ -340,7 +340,7 @@ export const apiClient = {
     responseLimitPreview: ({ model, local = false, account = '' }) => fetchJson(
         `/api/settings?${new URLSearchParams({ response_limit_preview: '1', model, local: String(Boolean(local)), account })}`,
         { cache: 'no-store' }),
-    /** @param {{key: string}|{mcp_server_id: string}} selector @returns {Promise<{value: string}>} */
+    /** @param {{key: string}|{mcp_server_id: string, header_name?: string}} selector @returns {Promise<{value: string}>} */
     revealSettingsSecret: (selector) => jsonPost('/api/settings/secret', selector),
     /** @returns {Promise<import('./api_types.js').UiPreferencesResponse>} */
     uiPreferences: (init = {}) => fetchJson('/api/ui/preferences', { cache: 'no-store', ...init }),
@@ -458,3 +458,15 @@ export const apiClient = {
         ...(confirmRecovery ? { confirm_recovery: true } : {}),
     }),
 };
+
+/** Read-only import preview. Values return only to this Settings draft; this never saves or connects.
+ * @param {import('./mcp_import_types.js').MCPImportPreviewRequest} payload
+ * @param {AbortSignal=} signal
+ * @returns {Promise<import('./mcp_import_types.js').MCPImportPreviewResponse>}
+ */
+export function previewMcpImport(payload, signal) {
+    return fetchJson('/api/mcp/import/preview', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload), signal,
+    });
+}

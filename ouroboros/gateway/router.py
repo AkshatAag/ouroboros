@@ -105,7 +105,7 @@ def collect_routes(
         api_onboarding_subagents_preview,
     )
     from ouroboros.gateway.settings import api_review_pool
-    from ouroboros.gateway.mcp import api_mcp_refresh, api_mcp_status, api_mcp_test
+    from ouroboros.gateway.mcp import mcp_routes
     from ouroboros.gateway.models import (
         api_local_model_install_runtime,
         api_local_model_start,
@@ -298,9 +298,7 @@ def collect_routes(
             endpoint=api_local_model_install_runtime,
             methods=["POST"],
         ),
-        Route("/api/mcp/status", endpoint=api_mcp_status, methods=["GET"]),
-        Route("/api/mcp/refresh", endpoint=api_mcp_refresh, methods=["POST"]),
-        Route("/api/mcp/test", endpoint=api_mcp_test, methods=["POST"]),
+        *mcp_routes(),
         # Agent accounts (D30): thin proxies of the owned Claudexor daemon's
         # own account surface; zero auth logic on this side.
         Route("/api/review-pool", endpoint=api_review_pool, methods=["GET"]),
