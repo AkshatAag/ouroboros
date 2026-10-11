@@ -4,8 +4,12 @@ own ``HOME`` and ``OUROBOROS_DATA_DIR``) reads the tasks, its own obligations (t
 intents and the custody chain it folds) and the money; it adds and deletes a result and
 appends money rows; the new release reconciles per row and folds the journal. A custody event
 whose process died between its COMMIT and the chain append reaches the chain at the next boot
-and is read by the old body. The chain new -> old -> new is run twice, with the two failures
-around the consume and the switch in between (the new body rebuilds from the exported files)."""
+and is read by the old body; a pending invocation the new body recorded is read by the old
+body, which binds it to a run through its own chain append (the legacy custody event the new
+body folds at its next boot); a handoff row the new body wrote after the export conflicts with
+the old body's rewrite of the same result and the file wins with the conflict recorded. The
+chain new -> old -> new is run twice, with the two failures around the consume and the switch
+in between (the new body rebuilds from the exported files)."""
 from __future__ import annotations
 
 import io
@@ -21,7 +25,7 @@ import pytest
 
 from ouroboros import delegate_custody as c
 from ouroboros import delegate_custody_current as current
-from ouroboros import store, store_boot, store_switch, usage_store
+from ouroboros import store, store_boot, store_switch, task_store, usage_store
 from ouroboros.store_import import ensure_current_store
 from tests._usage_store_testing import attempt_rows_in_start_order, seed
 from tests.test_store_import import fixture_root, load
@@ -36,16 +40,20 @@ OLD_BODY = textwrap.dedent('''
     import json, pathlib, sys
     root = pathlib.Path(sys.argv[1])
     from ouroboros import cancel_intents
-    from ouroboros.delegate_custody import replay
+    from ouroboros.delegate_custody import STARTED, emit, invocation_record, replay
     from ouroboros.task_results import list_task_results, load_task_result, task_result_path, write_task_result
     from ouroboros.usage_accounting import AttemptRequest, release_attempt, reserve_attempt, usage_projection
     out = {"ids": sorted(r.get("task_id") for r in list_task_results(root)),
            "done1": (load_task_result(root, "done1") or {}).get("status"),
            "cancel": sorted(cancel_intents.active_intents(root)),
            "runs": sorted(replay(root)),
+           "pending": (invocation_record(root, "inv-pending") or {}).get("state"),
+           "handoffs": (load_task_result(root, "root1") or {}).get("launch_handoffs"),
            "accounted_before": usage_projection(drive_root=root)["accounted_usd"]}
     if sys.argv[2] == "write":
         write_task_result(root, "by-old", "completed", description="written by v7.6.0", chat_id=1, task_type="task")
+        assert emit(root, STARTED, {"run_id": "run-old", "task_id": "root1", "root_task_id": "root1",
+                                    "invocation_id": "inv-pending"})  # the legacy append: the pending invocation starts
         task_result_path(root, "mismatch").unlink()
         write_task_result(root, "root1", "completed", old_body=True)
         res = reserve_attempt(AttemptRequest(model="stub", provider="local", reservation_usd=0.01, drive_root=root,
@@ -84,19 +92,25 @@ def old_body(v760: pathlib.Path, root: pathlib.Path, mode: str, home: pathlib.Pa
 @pytest.fixture
 def lane_root(tmp_path, monkeypatch):
     """The anonymised fixture root: three results, child drives, set files, two settled money
-    attempts; one custody event committed but never appended (the death between COMMIT and
-    the append)."""
+    attempts; a pending invocation and a launch handoff of ``root1``; one custody event
+    committed but never appended (the death between COMMIT and the append)."""
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
     root = fixture_root(tmp_path)
     ensure_current_store(root)
     seed(root, 2)
     usage_store.migrate_from_journal(root)
+    assert c.emit(root, c.START_REQUESTED, {"invocation_id": "inv-pending", "task_id": "root1", "root_task_id": "root1",
+                                            "route": "codex", "surface": "delegate", "request": {"prompt": "work"}})
+    task_store.put_handoffs(root, "root1", "launch_handoffs", {"claim-1": HANDOFF})
     with monkeypatch.context() as patched:
         patched.setattr(current, "append_jsonl", lambda *a, **kw: False)
         assert c.emit(root, c.STARTED, {"run_id": "run-dead", "task_id": "root1", "root_task_id": "root1"})
     assert current.outbox_depth(root) == 1 and "run-dead" not in _chain_text(root)
     yield root
     usage_store.forget(root)
+
+
+HANDOFF = {"state": "claimed", "claimed_at": "2026-01-01T00:00:00Z", "local_owner": "new-body"}
 
 
 def _chain_text(root: pathlib.Path) -> str:
@@ -123,6 +137,7 @@ def test_v760_reads_the_export_and_the_new_release_reconciles_its_writes(lane_ro
     read = old_body(v760, root, "write", tmp_path / "home")
     assert read["ids"] == ["child1", "done1", "other", "root1"] and read["done1"] == "failed"  # the refused file is evidence it still lists
     assert read["cancel"] == [] and read["runs"] == ["run-dead"]  # the old body's own fold of the exported chain
+    assert read["pending"] == "pending" and read["handoffs"] == {"claim-1": HANDOFF}  # the rows, as the file carries them
     assert read["ids_after"] == ["by-old", "child1", "done1", "root1"]
     assert float(read["accounted_after"]) >= float(read["accounted_before"])
 
@@ -130,7 +145,11 @@ def test_v760_reads_the_export_and_the_new_release_reconciles_its_writes(lane_ro
     assert report["status"] == "completed", report
     assert load(root, "by-old")["description"] == "written by v7.6.0"
     assert load(root, "root1")["old_body"] is True and load(root, "root1")["status"] == "completed"
+    assert load(root, "root1")["launch_handoffs"] == {"claim-1": HANDOFF}  # the old body's rewrite kept the handoff
     assert load(root, "mismatch") is None
+    started = c.invocation_record(root, "inv-pending")  # the old body's append bound the pending invocation
+    assert started["state"] == "started" and started["run_id"] == "run-old" and c.pending_invocations(root) == []
+    assert sorted(c.replay(root)) == ["run-dead", "run-old"]
     usage_store.forget(root)
     usage_store.migrate_from_journal(root)  # the journal the old body appended, folded once
     rows = [row["attempt_id"] for row in attempt_rows_in_start_order(root)]
@@ -146,13 +165,24 @@ def test_a_present_store_reconciles_the_old_body_writes_per_row(lane_root, v760,
     current.flush_outbox(root)
     assert export_facts(root)["results"] == 3
     assert store.probe(root)[0] == "present"
+    task_store.put_handoffs(root, "root1", "launch_handoffs", {"claim-2": HANDOFF})  # the new body, after the export
     read = old_body(v760, root, "write", tmp_path / "home")
-    assert read["ids_after"] == ["by-old", "child1", "done1", "root1"]
+    assert read["ids_after"] == ["by-old", "child1", "done1", "root1"] and read["pending"] == "pending"
     report = ensure_current_store(root)
     assert report["status"] == "reconciled", report
     assert (report["new"], report["changed"], report["deleted"]) == (1, 1, 1), report
+    assert (report["conflicts"], report["legacy_custody"]) == (1, 1), report
     assert load(root, "by-old")["description"] == "written by v7.6.0"
     assert load(root, "root1")["old_body"] is True and load(root, "mismatch") is None
+    # The conflicting handoff: the old body's rewrite of root1 carried the exported claim only;
+    # its file won, and the store's version with claim-2 is kept as the recorded conflict.
+    assert load(root, "root1")["launch_handoffs"] == {"claim-1": HANDOFF}
+    with store.open_store(root, write=False) as txn:
+        conflict = txn.meta("conflicts")["root1"]
+    assert "claim-2" in conflict["db_body"] and "claim-1" in conflict["db_body"]
+    started = c.invocation_record(root, "inv-pending")  # the legacy append, folded once at this boot
+    assert started["state"] == "started" and started["run_id"] == "run-old" and c.pending_invocations(root) == []
+    assert ensure_current_store(root)["status"] == "unchanged" and sorted(c.replay(root)) == ["run-dead", "run-old"]
 
 
 def test_the_chain_new_old_new_twice_with_failures_around_the_consume_and_the_switch(lane_root, target_repo, v760, tmp_path):
@@ -201,7 +231,8 @@ def test_the_chain_new_old_new_twice_with_failures_around_the_consume_and_the_sw
     third = _switch_to_old(root, repo, old)
     assert third["status"] == "switched", third
     second = old_body(v760, root, "read", tmp_path / "home")
-    assert second["ids"] == ["by-old", "child1", "done1", "root1"] and second["runs"] == ["run-dead"]
+    assert second["ids"] == ["by-old", "child1", "done1", "root1"] and second["runs"] == ["run-dead", "run-old"]
+    assert second["pending"] == "started"  # the run the old body bound in round two, read back from the chain
     git(repo, "checkout", "-q", "--detach", new)
     assert ensure_current_store(root)["status"] == "completed"
     usage_store.forget(root)
