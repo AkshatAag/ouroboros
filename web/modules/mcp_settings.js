@@ -157,9 +157,9 @@ function toolsDisclosure(toolItems) {
 
 /**
  * A status answer arrives whenever its read finishes, often while the owner is
- * typing or reading: it repaints only the badge and the tools that changed, so
- * every editable node and the Discovered tools disclosure keep their identity,
- * focus, caret, selection, open and Show state.
+ * typing or reading: repaint changed status without replacing editable fields
+ * or the disclosure summary. Unchanged tools retain text selection; changed
+ * lists replace their content. Field focus, caret and Show state stay intact.
  */
 function paintStatus() {
     for (const server of mcpServers) {

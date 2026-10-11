@@ -123,11 +123,11 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # updates the existing child result through join_ledger's lineage/hash authority.
     # It has no repo/control-plane effect, so remains valid for read-only subagents.
     "tree_note", "tree_read", "override_delegation_constraint",
-    # Nanny verbs. The child gets no shell — it gets the right to ASK the host to run a
-    # session, and the host derives the access profile from THIS task's authority, so a
-    # read-only child can only ever host a read-only session. delegate_answer and
-    # delegate_message speak only to a run this task already owns (custody-gated
-    # like cancel); a message is placed into the run's live turn, never a shell.
+    # Nanny verbs grant no native child shell. A hosted session uses captured rights
+    # in an evidence-only investigation copy when the task has no product-write
+    # authority; explicit readonly, Observe and Presence ceilings still narrow it.
+    # delegate_answer/message address only this task's owned run (like cancel);
+    # speaking to its live turn grants neither shell nor candidate-apply authority.
     "delegate_start", "delegate_wait", "delegate_cancel", "delegate_answer",
     "delegate_message",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
@@ -390,12 +390,13 @@ REVIEWED_MUTATIVE_TOOLS: frozenset[str] = frozenset({
     "vcs_commit_reviewed",
 })
 
-# Foreground mutative tools may keep editing files after Python future timeout;
-# the loop must wait for terminal completion instead of returning while they run.
-# D10 retired the SDK edit gateway; publication is now the foreground mutator
-# whose remote branch/commit/PR effects must settle before control returns.
+# Foreground mutative tools may keep mutating after their soft timeout; the loop
+# joins them to terminal completion instead of returning while they still run, so
+# a file editor settles before a later call can target the same bytes. Only a
+# worker kill (Stop now, the deadline reaper, Panic) ends a hung one.
 FOREGROUND_MUTATIVE_TOOLS: frozenset[str] = frozenset({
     "submit_skill_to_hub",
+    "write_file", "edit_text", "edit_batch", "apply_patch",
 })
 
 
@@ -432,8 +433,9 @@ def routing_action_for_tool(name: object) -> str:
 # HERE, next to the routing family it extends. The registry's own
 # ``mutates_worktree`` marker is the second source for the same fact —
 # tests/test_consciousness_authority.py pins that every entry carrying it is
-# named below, so the table cannot drift away from the catalog. Publication
-# (``FOREGROUND_MUTATIVE_TOOLS``) joins the set at the authority module.
+# named below, so the table cannot drift away from the catalog. The foreground
+# set (``FOREGROUND_MUTATIVE_TOOLS``: publication and the file editors) joins it
+# at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "maintain_harness",
     # starting or steering work (steer_task stays: the nanny of a running campaign)
