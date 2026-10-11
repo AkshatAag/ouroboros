@@ -422,7 +422,7 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
     """
     from ouroboros.task_results import (
         _TRULY_TERMINAL_STATUSES, require_writable_task_result_schema,
-        stamp_task_result_schema, task_result_path,
+        stamp_task_result_schema,
     )
 
     expected_states = (
@@ -453,8 +453,8 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
                   and (old.get("state") != STATE_PAUSED or old.get("pause_id") != row.get("pause_id")) else {})
         return stamp_task_result_schema({**current, **retained_wait, **notice, "budget_pause": dict(row)})
 
-    from ouroboros.obligations import update_result
-    update_result(task_result_path(root, task_id), update, strict_existing_dict=True)
+    from ouroboros.task_store import patch_document
+    patch_document(root, task_id, update)
     return dict(row)
 
 
@@ -1105,7 +1105,7 @@ def budget_fence_selected(task: Any, fence: Any) -> bool:
     """Whether THIS row carries an explicit selection recorded against THIS fence.
 
     A root's admission latch keeps a whole tree out of the queue and off the
-    money gate (``usage_accounting`` reads this predicate from the snapshot). The
+    money gate (``usage_accounting`` reads this predicate from queue_dispatch.json). The
     owner (or, under the root's live grant, the model) may select ONE member
     without lifting the latch for its siblings: the selection names the fence
     generation it was granted against, so a later fence — a root that paused

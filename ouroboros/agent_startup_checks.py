@@ -27,6 +27,7 @@ from ouroboros.utils import (
     utc_now_iso,
 )
 from ouroboros.config import runtime_setting
+from ouroboros.store import StoreError
 
 log = logging.getLogger(__name__)
 
@@ -169,7 +170,7 @@ def _automatic_predecessor_authority_projection(
     rides as a typed preview beside the named pull source (the same
     whole-or-pointer rule main_context_authority already applies to Main).
     Digest facts are observed at binding; the complete canonical authority
-    stays in task_results/<id>.json, pullable whole via the named source.
+    stays in the current task store, pullable whole via the named source.
     """
 
     from ouroboros.contracts.task_contract import bounded_continuation_envelope
@@ -277,12 +278,13 @@ def validate_task_authority_sources(env: Any, task: Dict[str, Any]) -> Dict[str,
             })
 
     current_id = str(task.get("id") or "").strip()
-    current_path = root / "task_results" / f"{current_id}.json"
-    if current_id and current_path.exists():
+    if current_id:
         try:
             from ouroboros.task_results import load_plan_review_state
+            from ouroboros.task_store import exists
 
-            load_plan_review_state(root, current_id)
+            if exists(root, current_id):
+                load_plan_review_state(root, current_id)
         except Exception as exc:
             return _unavailable(
                 {"kind": "plan_review_state", "task_id": current_id,
@@ -543,7 +545,7 @@ def check_review_continuations(env: Any) -> Tuple[dict, int]:
             # One row read per continuation (TZ-1 A): a startup check never walks the store.
             try:
                 return str((load_task_result(env.drive_root, task_id) or {}).get("status") or "")
-            except (OSError, ValueError):
+            except (OSError, ValueError, StoreError):
                 return ""
 
         rows = []

@@ -48,6 +48,8 @@ def test_failed_completion_promotion_retains_child_until_retry(tmp_path, monkeyp
                                              source_id="completion", data=raw, extension="json")
     write_task_result(child, "source", "completed", **_field(ref, "completion"))
     with monkeypatch.context() as patch:
+        # A failed placement must defeat both the hardlink and its copy fallback.
+        patch.setattr("ouroboros.source_retention.os.link", lambda *_a, **_k: (_ for _ in ()).throw(OSError("link unavailable")))
         patch.setattr(artifacts, "store_actor_source_bytes", lambda *_a, **_k: (_ for _ in ()).throw(OSError("copy failed")))
         copied = copy_child_task_result(parent, {"id": "source", "drive_root": str(child)})
         copied = retry_child_task_refs(parent, child, "source")
@@ -169,6 +171,7 @@ def test_nested_copy_failure_holds_child_and_rechecks_existing_checkpoint(tmp_pa
         return store(*args, **kwargs)
 
     with monkeypatch.context() as patch:
+        patch.setattr("ouroboros.source_retention.os.link", lambda *_a, **_k: (_ for _ in ()).throw(OSError("link unavailable")))
         patch.setattr(artifacts, "store_actor_source_bytes", fail_output)
         copied = copy_child_task_result(parent, {"id": "source", "drive_root": str(child)})
         copied = retry_child_task_refs(parent, child, "source")
@@ -236,6 +239,7 @@ def test_nested_trajectory_promotes_existing_call_blobs_without_crawling_prose(t
             return store(*args, **kwargs)
 
         with monkeypatch.context() as patch:
+            patch.setattr("ouroboros.source_retention.os.link", lambda *_a, **_k: (_ for _ in ()).throw(OSError("link unavailable")))
             patch.setattr(artifacts, "store_actor_source_bytes", fail_corpus)
             copied = copy_child_task_result(parent, task)
             copied = retry_child_task_refs(parent, child, task["id"])

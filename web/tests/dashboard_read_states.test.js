@@ -163,6 +163,30 @@ function emptyActivity(routes) {
     routes.set(schedulesUrl, response({ tasks: [] }));
 }
 
+test('Activity task list waits for migration and refreshes itself after publication', async t => {
+    const { mount, routes, ws, calls, toasts } = setup(t);
+    emptyActivity(routes);
+    routes.set(queueUrl, response({ reason_code: 'migrating' }, 503));
+    const activity = initActivity({ mount, ws });
+    await activity.refresh();
+    assert.equal(message(section(mount, 'queue')), 'Saved tasks are being upgraded…');
+    assert.deepEqual(toasts(), []);
+    await new Promise(resolve => setTimeout(resolve, 750));
+    assert.equal(calls.filter(url => url === queueUrl).length, 2);
+    emptyActivity(routes);
+    await new Promise(resolve => setTimeout(resolve, 750));
+    assert.equal(calls.filter(url => url === queueUrl).length, 3);
+    assert.equal(message(section(mount, 'queue')), '');
+    assert.match(section(mount, 'queue').textContent, /Nothing running or queued/);
+    await new Promise(resolve => setTimeout(resolve, 750));
+    assert.equal(calls.filter(url => url === queueUrl).length, 3);
+    routes.set(queueUrl, response({ reason_code: 'migrating' }, 503));
+    await activity.refresh();
+    activity.destroy();
+    await new Promise(resolve => setTimeout(resolve, 750));
+    assert.equal(calls.filter(url => url === queueUrl).length, 4, 'destroy cancels migration retries');
+});
+
 test('Activity names known non-Project scope waits without implying a Project', async (t) => {
     const { mount, routes, ws } = setup(t);
     emptyActivity(routes);
