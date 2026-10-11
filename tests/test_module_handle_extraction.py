@@ -72,7 +72,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     "supervisor/worker_pool_lifecycle.py": ("supervisor/workers.py", "_pool", frozenset({
         # Runtime676: execution reader/disable moved from the facade; RUNNING
         # and patched sibling calls must remain late-bound through that facade.
-        "DRIVE_ROOT", "MAX_WORKERS", "REPO_DIR", "RUNNING", "WORKERS", "Worker", "_WORKER_PIDS_FILENAME",
+        "DRIVE_ROOT", "MAX_WORKERS", "REPO_DIR", "RUNNING", "WORKERS", "Worker",
         "_WORKER_POOL_DISABLED_REASON", "_worker_pool_execution_state", "disable_exhausted_worker_pool",
         "_get_ctx",
         "_verify_worker_sha_after_spawn", "get_event_q", "kill_workers", "load_state",
@@ -94,7 +94,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # them. Sets are the tool-derived exact read sets on these bytes.
     "supervisor/queue_snapshot.py": ("supervisor/queue.py", "_queue", frozenset({
         "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "PENDING", "PRIOR_DIRECT_ROOTS",
-        "QUEUE_SEQ_COUNTER_REF", "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock",
+        "QUEUE_PUBLICATION", "QUEUE_SEQ_COUNTER_REF", "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock",
         "append_jsonl", "atomic_write_text", "enqueue_task", "parse_iso_to_ts",
         "persist_queue_snapshot", "restore_invalid_depth_admission", "sort_pending",
     })),
@@ -245,7 +245,8 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # on tip bytes). The custody reconcile set dropped the reference names the
     # tip drift stopped reading (STARTED, START_REQUESTED, _CUSTODY, _iter_rows,
     # event_log_path) and gained retire_settled_registrations (the upstream
-    # retirement-decoupling train); control_scheduling declares only
+    # retirement-decoupling train) and dropped replay once the reconcile read the
+    # store's held rows (storage on SQLite, S3); control_scheduling declares only
     # load_settings — tests rebind it on the control facade; the projection-only
     # control_subagent_spec/control_task_results leaves carry no handle reads
     # and stay off this table (D08 control-leaf precedent).
@@ -254,7 +255,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "cancel_and_verify", "close_absent_run", "daemon_says_absent", "emit",
         "is_terminal", "open_runs", "output_disposition", "pending_invocations",
         "record_containment_fault", "record_settled_unread", "record_started",
-        "replay", "retire_settled_registrations", "review_owned_source",
+        "retire_settled_registrations", "review_owned_source",
         "settle_run", "summary_of",
     })),
     "ouroboros/tools/delegate_payload_patch.py": ("ouroboros/tools/delegate_integration.py", "_di", frozenset({
@@ -365,6 +366,10 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/loop_messages.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_record_owner_directive",
+        # context-attention 5A: the per-round facts line measures through the
+        # loop's fit wrapper so the measurement is the one the round records.
+        "_measure_round_main_fit",
+        "_wrapup_global_remaining",
     })),
     "ouroboros/loop_model_call.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_RoundModelCallContext", "_account_compaction_usage", "_append_or_merge_user_message",
@@ -436,13 +441,16 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_emit_checkpoint_event", "_finalize_forced_services",
         "_forced_fallback_result", "_forced_final_answer",
         "_handle_forced_finalization", "_last_assistant_text", "_owner_marked_content",
-        "_measure_main_context_view",
+        "_measure_main_context_view", "_measure_round_main_fit",
         "_provider_unavailable_result", "_record_owner_directive",
         "_soft_land_exhausted_ceiling", "_task_deadline_epoch", "compact_tool_history_llm",
         "provider_no_call_source", "utc_now",
         # #1196: a budget-pause HOLD ended by control rejoins the model-wait rails and
         # merges its forced trace like every other controlled exit.
         "_merge_finalization_trace",
+        # context-attention 7A: the model-free refusal rungs publish their rebuilt
+        # transcript through the same seal every other sanctioned rewrite uses.
+        "seal_task_transcript",
     })),
 }
 

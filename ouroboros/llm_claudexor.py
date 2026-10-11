@@ -1,7 +1,5 @@
-"""Caller-owned physical accounting; one engine operation rejoins lost control, private CAS precedes ACK.
-Only durable dispatched results update the caller's live turn slot; unknown/no-start/legacy outcomes preserve it.
-Pre-dispatch pricing reads that slot; route changes clear it. The engine version gate reads the last successful handshake; a failed probe never un-proves an engine already observed at the minimum. Deadlines/Stop stay unchanged (ARCHITECTURE §6).
-"""
+"""Caller-owned physical accounting and engine continuation; private CAS precedes ACK.
+Dispatch, turn-slot, pricing and engine-version semantics: ARCHITECTURE §6."""
 
 from __future__ import annotations
 
@@ -17,6 +15,7 @@ import time
 from typing import Any
 
 from ouroboros import _usage_wait, config, context_fit
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
 from ouroboros._usage_response import provider_cost_value
 from ouroboros.anthropic_native_custody import scrub_native_custody
 from ouroboros.claudexor_daemon import ensure_owned_gateway, owned_engine_version, read_owned_gateway
@@ -25,8 +24,7 @@ from ouroboros.effort_evidence import model_effort_usage
 from ouroboros.gateways.claudexor import (ClaudexorUnavailable, engine_at_least, model_failure_evidence_supported,
                                           operation_query_supported, _READ_TIMEOUT_SEC)
 from ouroboros.llm_attempt import _attempt_request, _candidate_before_dispatch, effort_request_facts
-from ouroboros.llm_capability_policy import (
-    model_catalog as model_catalog, catalog_admits_model as catalog_admits_model)
+from ouroboros.llm_capability_policy import model_catalog as model_catalog, catalog_admits_model as catalog_admits_model
 from ouroboros.send_clock import stamp_clock_note
 from ouroboros.llm_substitution import (
     AccountRotation, SubstitutionBudget, substitution_fact, failed_account_preference,
@@ -36,10 +34,12 @@ from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait, prepa
 from ouroboros.observability import persist_call
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
 from ouroboros.transport_custody import ProviderNotDispatched
+from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
+from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
 from ouroboros.usage_accounting import (
     PhysicalAttemptPreparationFailed, current_physical_attempt_context, current_usage_scope,
     execute_physical_attempt, execute_physical_attempt_async, last_physical_attempt_capture)
-from ouroboros.utils import append_jsonl, sanitize_tool_result_for_log, utc_now_iso
+from ouroboros.utils import append_jsonl, read_json_dict, sanitize_tool_result_for_log, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -286,7 +286,8 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
     prepared = project_declared_system_prefix(target, scrub_native_custody(_MessageShapingMixin._normalize_system_message_placement(messages)))
     for message in prepared:
         for name in ("_context_capsule", "acceptance_observation", "_acceptance_observation", "review_feedback",
-                     "reasoning", "reasoning_details", "reasoning_content", "response_id", "stop_reason", "_stable_prefix_blocks"):
+                     "reasoning", "reasoning_details", "reasoning_content", "response_id", "stop_reason", "_stable_prefix_blocks",
+                     HOST_CONTEXT_KIND_KEY, TOOL_RESULT_RECORD_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY):
             message.pop(name, None)
         # A direct provider's refusal is assistant content, not routing metadata.
         # Preserve both text parts verbatim when a response carries both fields;
@@ -337,6 +338,13 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
         ("cache_affinity", "cacheKey"),
         ("service_tier", "serviceTier"),
     ) if parameters.get(key) is not None and parameters.get(key) != ""}
+    from ouroboros.route_spec import harness_model_named_effort
+
+    # A level in the model name is the route's identity: the wire never carries a
+    # different separate effort beside it (the host's request stays recorded as asked).
+    named_effort = harness_model_named_effort(target["source"], target["resolved_model"])
+    if named_effort:
+        options["reasoningEffort"] = named_effort
     processing = parameters.get("_processing_submission", target.get("processing_preference"))
     if processing and processing in target.get("processing_preferences", []):
         options["processingPreference"] = processing
@@ -371,6 +379,7 @@ class _ModelInvocation:
         self.detail: dict = {}
         self.poll_control = parameters.get("model_poll_control")
         self.operation_observer = parameters.get("model_operation_observer")
+        self.last_observation: dict = {}
         self.request_manifest_ref: dict = {}
         self.interrupt_reason = ""
         self.create_attempted = False
@@ -439,8 +448,13 @@ class _ModelInvocation:
         except ClaudexorUnavailable as error:
             raise ClaudexorModelError({"code": error.code, "message": str(error)}, model_role=self.role) from None
 
-    def observe_operation(self, *, accepted: bool = False) -> None:
-        """Publish custody to an optional process boundary, not provider content."""
+    def observe_operation(self, *, accepted: bool = False, phase: str = "") -> None:
+        """Publish changed custody/activity facts, never account or provider content.
+
+        Dispatch started precedes the engine's flush barrier: it proves neither
+        delivered HTTP bytes nor provider reasoning. A control hole rejoins the
+        same operation. Activity is presentation only, separate from custody.
+        """
         if accepted:
             try:
                 # Only this operational request manifest is updated. The
@@ -456,10 +470,27 @@ class _ModelInvocation:
                 self.request_manifest_ref = {}
                 log.warning("Model custody checkpoint unavailable: %s", type(error).__name__)
         if self.operation_observer is not None:
+            detail, dispatch = self.detail, (self.detail.get("dispatch") or {}).get("state")
+            if not phase:
+                phase = ("preparing" if not self.operation_id else
+                    "response_ready" if (detail.get("response") or {}).get("state") == "ready" else
+                    "queued" if detail.get("state") == "queued" and "startedAt" in detail and detail["startedAt"] is None else
+                    "dispatching" if detail.get("state") == "running" and dispatch == "not_started" else
+                    "awaiting_response" if detail.get("state") == "running" and dispatch == "started" else "unknown")
+            activity = {"phase": phase, "operation_id": self.operation_id, "invocation_id": self.invocation_id}
+            admission = detail.get("admission") or {}
+            blockers = admission.get("blockers") if isinstance(admission, dict) else None
+            if phase == "queued" and isinstance(blockers, list):
+                activity["blockers"] = [{"kind": row["kind"]} for row in blockers if isinstance(row, dict)
+                    and row.get("kind") in {"global_limit", "class_limit", "thread_busy", "stopping"}]
+            observation = {"operation_id": self.operation_id, "invocation_id": self.invocation_id,
+                           "request_ref": copy.deepcopy(self.request_ref),
+                           "request_manifest_ref": copy.deepcopy(self.request_manifest_ref), "model_activity": activity}
+            if observation == self.last_observation:
+                return
             try:
-                self.operation_observer({"operation_id": self.operation_id, "invocation_id": self.invocation_id,
-                                         "request_ref": copy.deepcopy(self.request_ref),
-                                         "request_manifest_ref": copy.deepcopy(self.request_manifest_ref)})
+                self.operation_observer(copy.deepcopy(observation))
+                self.last_observation = observation
             except Exception as error:
                 log.warning("Model custody observer unavailable: %s", type(error).__name__)
 
@@ -482,10 +513,12 @@ class _ModelInvocation:
                         **({"capture_failure_evidence": True} if self.capture_failure_evidence else {}),
                         **({"capture_effort_evidence": True} if self.capture_effort_evidence else {}))
                     self.operation_id = detail["id"]
+                    self.detail = detail
                     self.observe_operation(accepted=True)
                 else:
                     detail = self.gateway.get_model_operation(self.operation_id, timeout_sec=min(self.timeout, _READ_TIMEOUT_SEC))
                 self.detail = detail
+                self.observe_operation()
                 if self.outage_episode is not None:
                     self._control_outage(recovered=True)
                 if detail.get("state") not in {"queued", "running"}:
@@ -497,6 +530,7 @@ class _ModelInvocation:
                     raw = self.gateway.get_model_result(self.operation_id, expected_ref=self.response_ref,
                                                         timeout_sec=min(self.timeout, _READ_TIMEOUT_SEC), raw_bytes=True)
                     self.retain(raw)
+                    self.observe_operation(phase="response_received")
                     result = json.loads(raw.decode("utf-8"))
                     if (detail.get("dispatch") or {}).get("state") == "not_started":
                         error = self.error(result.get("problem"), detail)
@@ -530,6 +564,7 @@ class _ModelInvocation:
                     # non-dispatch authority for an earlier accepted request.
                     raise self.error({"code": error.code, "message": str(error),
                                       "context": {"httpStatus": error.status_code}}) from None
+                self.observe_operation(phase="rejoining")
                 # A failed read after creation is never a provider connect failure.
                 # Drop its causal HTTP chain at this boundary: even ConnectError
                 # means only the local control read failed, not inference un-sent (a refused read, 404 too).
@@ -858,10 +893,10 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
 
 
 def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
-    """Read retained receipts offline; without dispatch facts, read their exact operation.
-    Missing/live/unknown custody defers, unknown price stays unknown; never create or cancel."""
+    """Read retained receipts offline; without terminal facts (custody's ``TERMINAL_STATES``, ``interrupted`` too), read the
+    exact operation. Missing/live/unknown custody defers, unknown dispatch abandons at unknown price; never create or cancel."""
+    from ouroboros.delegate_custody import TERMINAL_STATES
     from ouroboros.observability import call_manifest_path, read_call_payload
-    from ouroboros.utils import read_json_dict
     task_id, attempt_id = str(row.get("task_id") or ""), str(row.get("attempt_id") or "")
     call_id = f"{attempt_id}_model_response"
     manifest, payload = {}, {}
@@ -881,12 +916,12 @@ def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
     raw = payload.get("result_json_utf8") if isinstance(payload, dict) else None
     gateway = None
     try:
-        if operation_state not in {"succeeded", "failed", "cancelled"} or not dispatch_state:
+        if operation_state not in TERMINAL_STATES or not dispatch_state:
             gateway = (gateway_factory or read_owned_gateway)()
             detail = gateway.get_model_operation(operation_id, timeout_sec=_READ_TIMEOUT_SEC)
             operation_state = detail.get("state")
             dispatch_state = (detail.get("dispatch") or {}).get("state")
-            if operation_state not in {"succeeded", "failed", "cancelled"}:
+            if operation_state not in TERMINAL_STATES:
                 return None
             response = detail.get("response") or {}
             response_ref = response.get("ref") or manifest.get("response_ref") or {}

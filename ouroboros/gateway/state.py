@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros import get_version
+from ouroboros.settings_scales import effort_range
 from ouroboros.gateway._helpers import json_exception, request_drive_root
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 
@@ -288,25 +289,22 @@ _FINALIZING_MEMO_MAX = 64
 
 
 def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
-    """One stat-keyed read serves outcome, finalizing, retry and question facts."""
+    """One signature-keyed read serves outcome, finalizing, retry and question facts."""
+    from ouroboros.task_store import read_document, signature
+
     memo_id = (str(pathlib.Path(drive_root).resolve()), task_id)
     try:
-        from ouroboros.task_results import task_results_dir
-
-        path = task_results_dir(pathlib.Path(drive_root), create=False) / f"{task_id}.json"
-        stat = path.stat()
+        key = signature(drive_root, task_id)
     except Exception:
+        key = None
+    if key is None:
         _FINALIZING_MEMO.pop(memo_id, None)
         return {}
-    # Atomic replacement can preserve size and mtime within one timestamp tick.
-    key = (str(path), stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size)
     memo = _FINALIZING_MEMO.get(memo_id)
     if memo is not None and memo[0] == key:
         return memo[1]
     try:
-        from ouroboros.utils import read_json_dict
-
-        data = read_json_dict(path)
+        data = read_document(drive_root, task_id)
         if not isinstance(data, dict):
             return {}
     except Exception:
@@ -395,9 +393,11 @@ def _finishing_reviews(drive_root: Any, row: Dict[str, Any], task_id: str) -> bo
 def _activity_pause_cause(row: dict, fence: dict) -> str:
     """Explain a parked census row from its existing typed control, never its phase name."""
     hold = row.get("_budget_pause_hold") or {}
-    if isinstance(hold, dict) and hold.get("reason") in {"owner_restart_hold", "saved_work_hold"}:
+    if isinstance(hold, dict) and hold.get("reason") in {"owner_restart_hold", "saved_work_hold"} \
+            and not hold.get("selected"):
         # saved_work_hold: work saved before the application stopped waits for Resume
         # after it started again (#1563); the published cause vocabulary is unchanged.
+        # A hold the owner's Resume already released explains no later pause.
         return "restart"
     if fence.get("cause") == "owner_pause":
         return "owner"
@@ -471,7 +471,8 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 (
                     str(task_id),
                     {**(meta.get("task") or {}), "_attempt": int(meta.get("attempt")
-                        or (meta.get("task") or {}).get("_attempt") or 1)} if isinstance(meta, dict) else {},
+                        or (meta.get("task") or {}).get("_attempt") or 1),
+                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity")} if isinstance(meta, dict) else {},
                     _epoch_or_zero(meta.get("started_at")) if isinstance(meta, dict) else 0.0,
                 )
                 for task_id, meta in queue_mod.RUNNING.items()
@@ -514,6 +515,8 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 "task_attempt": int(row.get("_attempt") or 1),
                 **{key: row[key] for key in ("timeout_retry_from", "original_task_id") if row.get(key)},
                 **({"model_waits": row["model_waits"]} if row.get("model_waits") else {}),
+                **({"model_activity": row["model_activity"]} if row.get("model_activity")
+                   and row["model_activity"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
                 **({"project_admission_hold": project_hold_fact(row)}
                    if row.get("_project_admission_restore_hold") else {}),
             }
@@ -697,6 +700,7 @@ async def api_state(request: Request) -> JSONResponse:
             "context_mode": get_context_mode(),
             # Frozen one-window compatibility field. Persistent auto-Low is retired.
             "context_mode_auto_low": False,
+            "effort_range": effort_range(),  # the owner's range, the tolerant read
             "safety_mode": get_safety_mode(),
             "skills_repo_configured": bool(get_skills_repo_path()),
             "github_token_configured": snap["github_token_configured"],

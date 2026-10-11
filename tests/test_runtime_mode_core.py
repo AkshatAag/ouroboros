@@ -338,7 +338,8 @@ def test_settings_js_reads_and_writes_phase2_keys():
 
 
 def test_chat_context_mode_toggle_reports_owner_endpoint_errors():
-    src = (REPO / "web" / "modules" / "chat.js").read_text(encoding="utf-8")
+    # The composer's owner controls (context mode, effort range) live in one module.
+    src = (REPO / "web" / "modules" / "composer_owner_controls.js").read_text(encoding="utf-8")
     assert "/api/owner/context-mode" in src
     assert "resp.json()" in src
     assert "showToast(message, 'error')" in src
@@ -629,7 +630,7 @@ def test_light_mode_redirects_absolute_home_path_to_user_files(tmp_path, monkeyp
     reg = _registry(tmp_path)
     home_path = str(pathlib.Path.home() / "Desktop" / "ouro_root_required_test.html")
     result = reg.execute("write_file", {"path": home_path, "content": "<html></html>"})
-    assert "ROOT_REQUIRED_USER_FILES" in result, result[:200]
+    assert result.startswith("OK: wrote user_files:"), result[:200]
     assert "user_files" in result
 
 

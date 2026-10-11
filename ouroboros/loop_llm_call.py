@@ -25,10 +25,10 @@ from ouroboros.knowledge import observed_route_stamp
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
 from ouroboros.llm_claudexor import propagate_model_error, presence_refusal_unstarted
 from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
-from ouroboros.model_wait import model_wait_reason, propagate_model_control
+from ouroboros.model_wait import current_model_wait, model_wait_reason, propagate_model_control
 from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY, pop_custom_validation_receipts
 from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal  # typed-refusal contract owner
-from ouroboros.observability import new_call_id, new_execution_id, persist_call
+from ouroboros.observability import _json_bytes, new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost_optional, infer_model_category
 from ouroboros.send_clock import main_send_scope
 from ouroboros.task_pacing import main_loop_wire_options
@@ -38,7 +38,6 @@ from ouroboros.usage_accounting import PhysicalAttemptContext, UsageAccountingEr
 from ouroboros.utils import (
     append_jsonl,
     emit_cognitive_operation_event,
-    emit_main_llm_call_state_event,
     emit_log_event,
     has_log_sink,
     sanitize_tool_result_for_log,
@@ -1134,6 +1133,8 @@ def _record_round_cache_facts(
     *,
     round_idx: int,
     round_id: str = "",
+    model: str = "",
+    provider: str = "",
 ) -> tuple:
     """Cold-restart telemetry — FACTS of this round only (no dollar counterfactuals).
 
@@ -1164,6 +1165,10 @@ def _record_round_cache_facts(
     )
     accumulated_usage["_last_llm_round_finished_monotonic"] = now
     accumulated_usage["_last_prompt_cache_ttl"] = prompt_cache_ttl
+    accumulated_usage["_last_round_cache_usage"] = {
+        "round": round_idx, "model": model, "provider": provider,
+        **{key: usage.get(key) for key in ("prompt_tokens", "cached_tokens", "cache_write_tokens")},
+    }
     return prompt_cache_ttl, cache_hit_rate, cache_cold_restart, gap_since_prev_round_sec, duration_ms
 
 
@@ -1238,26 +1243,23 @@ def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated
         accumulated_usage[CUSTOM_RECEIPTS_USAGE_KEY] = receipts
 
 
-def _emit_main_llm_call_state(
-    event_queue: Optional[queue.Queue],
-    identity: Tuple[Any, ...],
-    phase: str,
-) -> None:
+def _emit_main_llm_call_state(event_queue: Optional[queue.Queue], identity: Tuple[Any, ...],
+                              phase: str, activity: Any = None) -> None:
+    """Exact-call lifecycle and display observations; only terminal facts close the idle lease."""
     task_id, task_attempt, llm_call_id, execution_id, round_id, call_attempt = identity
-    if phase != "started":
-        # Completion closes both observations together. Start is intentionally
-        # split: preparation begins before the actual in-flight provider call.
+    if phase in {"finished", "failed"}:
         _emit_llm_operation(event_queue, task_id, llm_call_id, phase, task_attempt, execution_id, round_id)
-    emit_main_llm_call_state_event(
-        event_queue,
-        task_id=task_id,
-        task_attempt=task_attempt,
-        llm_call_id=llm_call_id,
-        execution_id=execution_id,
-        round_id=round_id,
-        call_attempt=call_attempt,
-        phase=phase,
-    )
+    if event_queue is None or (phase == "observed" and not isinstance(activity, dict)):
+        return
+    try:
+        event_queue.put({
+            "type": "main_llm_call_state", "task_id": str(task_id or ""), "task_attempt": task_attempt,
+            "llm_call_id": str(llm_call_id or ""), "execution_id": str(execution_id or ""),
+            "round_id": str(round_id or ""), "call_attempt": int(call_attempt), "phase": phase,
+            **({"model_activity": activity} if phase == "observed" else {}),
+        })
+    except Exception:
+        log.debug("Failed to emit main LLM call state event", exc_info=True)
 
 
 def _handle_main_llm_call_exception(
@@ -1355,6 +1357,8 @@ def call_llm_with_retry(
     if task_attempt is not None:
         accumulated_usage["_task_attempt"] = task_attempt
     task_attempt = accumulated_usage.get("_task_attempt")
+    owner = current_model_wait()
+    activity_attempt = task_attempt if task_attempt is not None or not owner or owner.task_id != task_id else owner.attempt
     response_cache_bypass_requested = False
     for attempt in range(transient_budget):
         if _deadline_not_dispatched(
@@ -1363,7 +1367,7 @@ def call_llm_with_retry(
         ):
             return None, None
         llm_call_id = new_call_id("llm")
-        call_identity = (task_id, task_attempt, llm_call_id, execution_id, round_id, attempt + 1)
+        call_identity = (task_id, activity_attempt, llm_call_id, execution_id, round_id, attempt + 1)
         request_ref: Dict[str, Any] = {}
         try:
             _emit_llm_operation(event_queue, task_id, llm_call_id, "started", task_attempt, execution_id, round_id)
@@ -1382,6 +1386,8 @@ def call_llm_with_retry(
             kwargs = {
                 "messages": send_messages, "tools": tools, "model": model,
                 "model_role": model_role, "model_turn_state": model_turn_state,
+                "model_operation_observer": lambda fact, identity=call_identity: _emit_main_llm_call_state(
+                    event_queue, identity, "observed", fact.get("model_activity")),
                 "model_account_override": model_account_override,
                 "processing_preference": processing_preference,
                 "reasoning_effort": effort,
@@ -1400,7 +1406,7 @@ def call_llm_with_retry(
                 call_type="llm_request",
                 payload={
                     "messages": messages,
-                    "send_messages": send_messages,
+                    **({"send_messages": send_messages} if _json_bytes(send_messages) != _json_bytes(messages) else {}),
                     "tools": tools or [],
                     "model": model,
                     "reasoning_effort": effort,
@@ -1526,7 +1532,8 @@ def call_llm_with_retry(
             accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
             cached_tokens = int(usage.get("cached_tokens") or 0)
             prompt_cache_ttl, cache_hit_rate, cache_cold_restart, gap_since_prev_round_sec, duration_ms = (
-                _record_round_cache_facts(accumulated_usage, usage, round_idx=round_idx, round_id=round_id))
+                _record_round_cache_facts(accumulated_usage, usage, round_idx=round_idx, round_id=round_id,
+                                          model=display_model, provider=provider))
             ledger_ids = list(usage.get("ledger_attempt_ids") or [])  # the last one carried this response (#807)
             _round_event = {
                 "ts": utc_now_iso(), "type": "llm_round",

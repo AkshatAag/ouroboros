@@ -50,6 +50,21 @@ def disclosable_capability_delta(data: Dict[str, Any]) -> Dict[str, Any]:
     return delta if (delta.get("reduced") or delta.get("legacy_note")) else {}
 
 
+def disclosable_effort_fact(data: Dict[str, Any]) -> Dict[str, str]:
+    """The child's effort decision when it has something to SAY — the parent's request was
+    moved into the range or set aside by a pin or a model name (``effort_fact_says``) —
+    else ``{}``. The same predicate on both parent surfaces (``[SUBTASK_OUTCOME]`` and the
+    compact batch projection); a request that simply applied, or the plain default, is noise."""
+    from ouroboros.settings_scales import effort_fact_says
+
+    fact = {"requested": data.get("effort_requested"), "applied": data.get("effort_level"),
+            "source": data.get("effort_source")}
+    if not effort_fact_says(fact):
+        return {}
+    return {"level": str(fact["applied"] or ""), "requested": str(fact["requested"] or ""),
+            "source": str(fact["source"] or "")}
+
+
 def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None) -> str:
     ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
     summary: Dict[str, Any] = {
@@ -98,18 +113,16 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None)
             origin = str(
                 data.get("original_task_id") or data.get("timeout_retry_from") or ""
             )
-            paths = [f"task_results/{tid}.json"]
-            if origin and origin != tid:
-                paths.append(f"task_results/{origin}.json")
-            custody["full_source"] = [
-                f"read_file(root='runtime_data', path='{p}')" for p in paths
-            ]
+            ids = [tid] + ([origin] if origin and origin != tid else [])
+            custody["full_source"] = [f"get_task_result(task_id='{task_id}')" for task_id in ids]
         summary["delegated_custody"] = custody
     if isinstance(data.get("task_contract"), dict):
         summary["task_contract"] = data.get("task_contract")
     _delta = disclosable_capability_delta(data)
     if _delta:
         summary["capability_delta"] = _delta
+    if _effort := disclosable_effort_fact(data):
+        summary["effort"] = _effort
     if isinstance(data.get("artifact_bundle"), dict):
         summary["artifact_bundle"] = data.get("artifact_bundle")
     if ledger:
@@ -206,6 +219,8 @@ def get_task_result_entry() -> ToolEntry:
             "source_start_char": {"type": "integer", "description": "Inclusive character offset for the requested canonical source range."},
             "source_end_char": {"type": "integer", "description": "Exclusive character offset for the requested canonical source range. A range outside the source returns no text: the answer names complete_chars and the range received, and is an argument error."},
             "presence_scope": {"type": "string", "enum": ["own_binding"], "description": "Presence tasks only: read just independent work started from this Presence binding (any of its conversations) or this task's own tree."},
+            "view_head_chars": {"type": "integer", "minimum": 0, "description": "Chars of this answer's head to show in this turn when the complete answer cannot be delivered whole (pair with view_tail_chars). The complete answer is kept as an exact, readable source either way; this only shapes the first view and never changes source_start_char/source_end_char selection."},
+            "view_tail_chars": {"type": "integer", "minimum": 0, "description": "Chars of this answer's tail to show in this turn (see view_head_chars)."},
         }},
     }, _get_task_result)
 
@@ -218,8 +233,14 @@ def _get_task_result(
     known_result_sha256: str = "", include_focus_source: bool = False, focus_source_sha256: str = "",
     presence_scope: str = "", review_source_sha256: str = "",
     presence_reentry_sha256: str = "", presence_reentry_offset: Any = None,
+    view_head_chars: Any = None, view_tail_chars: Any = None,
 ) -> str:
-    """Read a task result, or a bounded canonical work-order/completion source range."""
+    """Read a task result, or a bounded canonical work-order/completion source range.
+
+    ``view_head_chars``/``view_tail_chars`` are accepted here so the declared
+    parameters bind; the loop's delivery honors them when it shapes the first
+    view of this answer. They select nothing in the source arithmetic below.
+    """
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
     scoped = bool(str(presence_scope or "").strip())
@@ -1101,6 +1122,8 @@ def _compact_child_projection(tid: str, data: Dict[str, Any], known_hash: Any) -
     _delta = disclosable_capability_delta(data)
     if _delta:
         projected["capability_delta"] = _delta
+    if _effort := disclosable_effort_fact(data):
+        projected["effort"] = _effort
     # Delegation honesty (Q1A, 2026-08-10 amendments): whether a
     # harness-dispatched child ACTUALLY delegated is a handoff fact the
     # fan-out parent absorbs here — the e9108a09 incident hid nine
@@ -1264,7 +1287,7 @@ def _wait_for_tasks(
         # envelope duplicated forensics (trace_refs, loop_outcome internals,
         # verification_ledger) into the parent context on every batch absorb.
         # The parent decision needs the semantic handoff only; the full envelope
-        # stays on disk in task_results/<id>.json, addressable by
+        # stays in the current task store, addressable by
         # child_result_sha256 (the join-ledger SSOT hash), and is fetched with
         # get_task_result — a DISCLOSED omission (BIBLE P1), not silent
         # truncation. get_task_result and a SETTLED wait_task stay full; an
@@ -1294,8 +1317,8 @@ def _wait_for_tasks(
         waited["tasks"] = public_tasks
         waited["tasks_note"] = (
             "Compact per-child projection. The full result envelope (trace_refs, "
-            "loop_outcome, verification_ledger) remains on disk in task_results/"
-            "<task_id>.json, addressable by child_result_sha256; get_task_result "
+            "loop_outcome, verification_ledger) remains in the task store, "
+            "addressable by child_result_sha256; get_task_result "
             "returns the full result text plus trace/outcome summaries."
         )
         if unknown_ids:

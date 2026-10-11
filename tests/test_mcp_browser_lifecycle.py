@@ -158,6 +158,72 @@ def test_stop_before_start_never_launches_the_published_session(bridge, monkeypa
     assert not _live(seen["session"].token)
 
 
+def test_pause_stop_before_start_allows_same_attempt_to_resume(bridge, monkeypatch):
+    """A serialized Pause closes a published session without poisoning its attempt."""
+    session_type = mcp_task_sessions.TaskBrowserSession
+    real_start = session_type.start
+
+    def pause_before_start(self, timeout):
+        monkeypatch.setattr(session_type, "start", real_start)
+        assert mcp_task_sessions.stop_task(bridge.ctx, end_attempt=False) == [
+            {"server": "browser", "closure": "confirmed"}]
+        return real_start(self, timeout)
+
+    monkeypatch.setattr(session_type, "start", pause_before_start)
+    with pytest.raises(RuntimeError, match="revoked before it started"):
+        mcp_task_sessions.discover(bridge.cfg, bridge.ctx, 15)
+    assert _lines(bridge.launches) == []
+    assert "browser_tabs" in {
+        tool["name"] for tool in mcp_task_sessions.discover(bridge.cfg, bridge.ctx, 15)}
+    assert len(_lines(bridge.launches)) == 1
+
+
+def test_worker_exit_between_stop_collection_and_close_keeps_the_attempt_resumable(bridge, monkeypatch):
+    """Stop clears failed opens and collects under ``_lock``, then closes outside it.
+
+    A worker that exits in that gap ended under the Stop: it must find its session
+    already revoked, or it records a failed open that refuses the paused attempt's
+    resume. An exit no Stop owns still records one.
+    """
+    from ouroboros import platform_layer
+
+    session_type = mcp_task_sessions.TaskBrowserSession
+    real_close, real_exit = mcp_task_sessions._close, session_type._ended_unexpectedly
+    exits = []
+
+    def recorded_exit(self):
+        revoked = self.revoked
+        real_exit(self)
+        exits.append((revoked, dict(mcp_task_sessions._failed_opens)))
+
+    def worker_exits_first(held):
+        for pid in _live(held.token):  # The server dies; its worker unwinds on its own.
+            platform_layer.force_kill_pid(pid)
+        held.thread.join(timeout=20)
+        assert not held.thread.is_alive()
+        return real_close(held)
+
+    monkeypatch.setattr(session_type, "_ended_unexpectedly", recorded_exit)
+    mcp_task_sessions.discover(bridge.cfg, bridge.ctx, 15)
+    monkeypatch.setattr(mcp_task_sessions, "_close", worker_exits_first)
+    assert mcp_task_sessions.stop_task(bridge.ctx, end_attempt=False) == [
+        {"server": "browser", "closure": "confirmed"}]
+    assert exits == [(True, {})]
+    monkeypatch.setattr(mcp_task_sessions, "_close", real_close)
+
+    assert "browser_tabs" in {
+        tool["name"] for tool in mcp_task_sessions.discover(bridge.cfg, bridge.ctx, 15)}
+    assert len(_lines(bridge.launches)) == 2
+    resumed = mcp_task_sessions._sessions[(bridge.ctx.task_id, "browser")]
+    for pid in _live(resumed.token):  # Now the server quits with no Stop behind it.
+        platform_layer.force_kill_pid(pid)
+    resumed.thread.join(timeout=20)
+    assert exits[1][0] is False and list(exits[1][1]) == [(bridge.ctx.task_id, "1", "browser")]
+    with pytest.raises(RuntimeError, match="did not open in this task attempt"):
+        mcp_task_sessions.discover(bridge.cfg, bridge.ctx, 15)
+    assert len(_lines(bridge.launches)) == 2
+
+
 def test_stop_during_launch_confirms_only_after_the_worker_unwinds(bridge, monkeypatch):
     """A launch admitted before Stop is scanned again, on its own marker, once it has unwound."""
     real_factory = mcp_client._transport_factory
@@ -196,6 +262,43 @@ def test_stop_during_launch_confirms_only_after_the_worker_unwinds(bridge, monke
     retry = _ctx(bridge.root, attempt=2)  # The confirmed closure no longer blocks a later attempt.
     assert "browser_tabs" in {tool["name"] for tool in mcp_task_sessions.discover(bridge.cfg, retry, 15)}
     mcp_task_sessions.stop_task(retry)
+
+
+def test_stop_while_the_worker_is_held_before_launch_confirms_only_after_it_exits(bridge, monkeypatch):
+    """Revocation stops the launch, not a started worker: closure waits for that worker's exit."""
+    import asyncio
+
+    real_listen = asyncio.start_unix_server
+    entered, release = threading.Event(), threading.Event()
+
+    async def held_before_launch(*args, **kwargs):  # The guard socket comes before the launch decision.
+        entered.set()
+        await asyncio.to_thread(release.wait, 30)
+        return await real_listen(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "start_unix_server", held_before_launch)
+    monkeypatch.setattr(mcp_task_sessions, "_CLOSE_GRACE_SEC", 0.2)
+    monkeypatch.setattr(mcp_task_sessions, "_EXIT_GRACE_SEC", 0.2)
+    opened = {}
+    discovery = threading.Thread(target=lambda: opened.setdefault("error", _raises(
+        lambda: mcp_task_sessions.discover(bridge.cfg, bridge.ctx, 30))), daemon=True)
+    discovery.start()
+    assert entered.wait(15)
+    session = mcp_task_sessions._sessions[(bridge.ctx.task_id, "browser")]
+    assert session._started and session.thread.is_alive()
+
+    assert mcp_task_sessions.stop_task(bridge.ctx, end_attempt=False) == [
+        {"server": "browser", "closure": "unconfirmed: session worker did not exit"}]
+    assert mcp_task_sessions._sessions.get(session.key) is session
+    with pytest.raises(RuntimeError, match="before its earlier closure is confirmed"):
+        mcp_task_sessions.discover(bridge.cfg, _ctx(bridge.root, attempt=2), 15)
+
+    release.set()  # The worker reaches its launch decision, sees the revocation and unwinds.
+    session.thread.join(timeout=20)
+    discovery.join(timeout=20)
+    assert not session.thread.is_alive() and "revoked before its server launched" in repr(opened["error"])
+    assert session.close_outcome == "confirmed"
+    assert _lines(bridge.launches) == [] and not _live(session.token)
 
 
 def _raises(fn):
@@ -372,9 +475,9 @@ def test_refresh_opened_after_reconfigure_closes_exactly_its_stale_session(bridg
     }[change]
     opened = {}
 
-    def settings_saved_first(cfg, ctx, timeout):
+    def settings_saved_first(cfg, ctx, timeout, **kwargs):
         bridge.instance.reconfigure(settings)
-        tools = real_discover(cfg, ctx, timeout)
+        tools = real_discover(cfg, ctx, timeout, **kwargs)
         opened["token"] = mcp_task_sessions._sessions[(ctx.task_id, cfg.id)].token
         return tools
 
@@ -390,6 +493,66 @@ def test_refresh_opened_after_reconfigure_closes_exactly_its_stale_session(bridg
         held = mcp_task_sessions._sessions[(bridge.ctx.task_id, "browser")]
         assert held.cfg.args[-1] == "--replacement"
     assert len(_lines(bridge.launches)) == (2 if change == "changed" else 1)
+
+
+@pytest.mark.parametrize("hold", ["publication", "release"])
+def test_old_refresh_across_a_restored_equal_entry_spares_its_session_and_catalog(bridge, monkeypatch, hold):
+    """Settings go A→B→A while a refresh of the first A is out; the restored A opens S2 and lists.
+
+    ``publication``: the old listing resumes after S2 published and must not overwrite it.
+    ``release``: the old refresh judged itself stale under B and closes after S2 opened; it
+    must close the session it borrowed, not the equal-keyed, equal-configured S2.
+    """
+    import asyncio
+
+    real_listing, real_release = mcp_task_sessions.listing, mcp_task_sessions.release_stale
+    listed, resume, releasing, proceed = (threading.Event() for _ in range(4))
+    borrowed = []
+
+    async def first_listing_waits(*args, **kwargs):
+        tools = await real_listing(*args, **kwargs)
+        if not borrowed:
+            borrowed.append(mcp_task_sessions._sessions[(bridge.ctx.task_id, "browser")])
+            listed.set()
+            await asyncio.to_thread(resume.wait, 30)
+        return tools
+
+    def release_waits(*args, **kwargs):
+        releasing.set()
+        assert proceed.wait(30)
+        return real_release(*args, **kwargs)
+
+    monkeypatch.setattr(mcp_task_sessions, "listing", first_listing_waits)
+    if hold == "release":
+        monkeypatch.setattr(mcp_task_sessions, "release_stale", release_waits)
+    outcome = {}
+    old = threading.Thread(target=lambda: outcome.setdefault(
+        "result", bridge.instance.refresh_server("browser", authority=bridge.ctx)), daemon=True)
+    old.start()
+    assert listed.wait(15)
+    bridge.instance.reconfigure({"MCP_ENABLED": True, "MCP_SERVERS": [_entry(bridge.script, "--replacement")]})
+    if hold == "release":
+        resume.set()  # The old refresh finds B current, is stale and reaches its close.
+        assert releasing.wait(15)
+    bridge.instance.reconfigure({"MCP_ENABLED": True, "MCP_SERVERS": [_entry(bridge.script)]})
+    assert bridge.instance.refresh_server("browser", authority=bridge.ctx)["ok"] is True
+    restored = bridge.instance._servers["browser"]
+    published = restored.tools, restored.last_refreshed
+    key = (bridge.ctx.task_id, "browser")
+    s2 = mcp_task_sessions._sessions[key]
+    assert s2 is not borrowed[0] and s2.cfg == borrowed[0].cfg and len(_lines(bridge.launches)) == 2
+
+    resume.set()
+    proceed.set()
+    old.join(timeout=30)
+    assert not old.is_alive()
+    assert outcome["result"]["ok"] is False and "stale MCP refresh discarded" in outcome["result"]["error"]
+    assert outcome["result"]["bridge_closure"] == "confirmed" and borrowed[0].revoked
+    assert bridge.instance._servers["browser"] is restored and restored.tools is published[0]
+    assert restored.last_refreshed == published[1]
+    assert mcp_task_sessions._sessions.get(key) is s2 and not s2.revoked and _live(s2.token)
+    assert _dispatch(bridge.ctx, "browser_click", {"target": "after"}).status == "ok"
+    assert _lines(bridge.effects) == ["after"] and len(_lines(bridge.launches)) == 2
 
 
 def test_stale_refresh_failure_keeps_the_replacement_catalog():

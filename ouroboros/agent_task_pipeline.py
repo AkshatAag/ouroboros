@@ -26,6 +26,7 @@ import time
 from dataclasses import replace
 from typing import Any, Callable, Dict, List
 
+from ouroboros.finalization_timing import finalization_child_scope
 from ouroboros.observability import timed_phase
 from ouroboros.settings_integrity import copy_task_settings_context
 from ouroboros.cost_projection import cost_projection, resolve_cost_pair
@@ -52,7 +53,7 @@ from ouroboros.outcomes import (
 )
 from ouroboros.outcome_receipt_store import task_verification_receipts
 from ouroboros.contracts.task_contract import build_task_contract
-from ouroboros.subagents import envelope_from_task, substrate_result_fields
+from ouroboros.subagents import effort_result_fields, envelope_from_task, substrate_result_fields
 from ouroboros.subagent_messages import initiator_meta, subagent_message_meta
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_review_artifact as _truncate_with_notice
 from ouroboros.utils import in_worker_process
@@ -671,6 +672,7 @@ def _stamp_presence_terminal_facts(
         task["metadata"] = {**metadata, "presence_unknown_outcome": unknown}
 
 
+@finalization_child_scope()
 def emit_task_results(
     env: Any, memory: Any, llm: Any,
     pending_events: List[Dict[str, Any]],
@@ -1193,7 +1195,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         from ouroboros.acceptance_history import retain_acceptance_history
         history_fields = retain_acceptance_history(
             env.drive_root, task, text, llm_trace, review_evidence or {},
-            observations, artifacts, final_delivery,
+            observations, artifacts, final_delivery, usage=usage,
         )
         write_task_result(
             env.drive_root,
@@ -1243,6 +1245,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             capability_delta=subagent_envelope.get("capability_delta") or task.get("capability_delta"),  # Q1A: envelope copy carries the native_only amendment
             **substrate_result_fields(subagent_envelope),  # Q1A: substrate FACT + raw counts
             reasoning_effort=task.get("reasoning_effort"),
+            **effort_result_fields(task),
             task_group_id=task.get("task_group_id"),
             task_group=task.get("task_group"),
             subagent_envelope=subagent_envelope,

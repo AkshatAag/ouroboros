@@ -508,6 +508,10 @@ def _finish_task_done_dispatch(
                 # rebuilt on replay, and the completion-seam EVIDENCE (below) so the chip
                 # upgrades from the neutral "dispatched" decision to what actually ran.
                 "executor_route": str(effective_result.get("executor_route") or ""),
+                # The effort decision survives the terminal card and its replay (empty = unknown).
+                "effort_level": str(effective_result.get("effort_level") or ""),
+                "effort_requested": str(effective_result.get("effort_requested") or ""),
+                "effort_source": str(effective_result.get("effort_source") or ""),
             }
             if isinstance(_envelope.get("execution_evidence"), dict):
                 progress_meta["execution_evidence"] = _envelope["execution_evidence"]
@@ -621,10 +625,9 @@ def _finish_task_done_dispatch(
 
     _events()._maybe_notify_provider_death(ctx, task_id, task, final_task_result, task_done_event)
     try:
-        results_dir = pathlib.Path(ctx.DRIVE_ROOT) / "task_results"
-        results_dir.mkdir(parents=True, exist_ok=True)
-        result_file = results_dir / f"{task_id}.json"
-        if not result_file.exists():
+        from ouroboros.task_store import exists
+
+        if not exists(ctx.DRIVE_ROOT, str(task_id or "")):
             write_task_result(
                 ctx.DRIVE_ROOT,
                 str(task_id or ""),

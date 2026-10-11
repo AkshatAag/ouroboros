@@ -27,22 +27,26 @@ PAGE_DIR = Path(__file__).parent / "fixtures" / "browser_focus"
 MARKER = "POINTER_PROBE_JSON:"
 
 
-def test_extension_recipe_rejects_temporary_or_mismatched_live_root(tmp_path, monkeypatch):
-    common = ["--source-root", str(Path(__file__).resolve().parents[1]),
-              "--cli", "/pinned/cli.js", "--owner-ready", "--extension",
-              "--task-id", "live-task", "--task-attempt", "2"]
-    with pytest.raises(SystemExit):
-        probe._validated_args([*common, "--data-root", str(tmp_path)])
-    with pytest.raises(SystemExit):
-        probe._validated_args([*common, "--data-root", str(tmp_path),
-                               "--live-data-root", "/different/live/data"])
-    with pytest.raises(SystemExit):
-        probe._validated_args([*common, "--data-root", str(tmp_path),
-                               "--live-data-root", str(tmp_path)])
-    with pytest.raises(SystemExit):
-        probe._validated_args(["--source-root", str(Path(__file__).resolve().parents[1]),
-                               "--data-root", str(tmp_path), "--owner-ready"])
-    valid_root = Path("/non-temporary/canonical-data")
+def test_extension_recipe_rejects_temporary_or_mismatched_live_root(tmp_path, monkeypatch, capsys):
+    anchor = Path(tmp_path.anchor)  # A native absolute root: "/" on POSIX, the drive on Windows.
+    source = str(Path(__file__).resolve().parents[1])
+    common = ["--source-root", source, "--cli", str(anchor / "pinned" / "cli.js"), "--owner-ready",
+              "--extension", "--task-id", "live-task", "--task-attempt", "2"]
+
+    def refused(argv, reason):
+        with pytest.raises(SystemExit) as exited:
+            probe._validated_args(argv)
+        assert exited.value.code == 2 and f": error: {reason}\n" in capsys.readouterr().err
+
+    refused([*common, "--data-root", str(tmp_path)],
+            "--extension requires an absolute --live-data-root supplied by the owner")
+    refused([*common, "--data-root", str(tmp_path), "--live-data-root", str(anchor / "different" / "live")],
+            "--data-root must match --live-data-root for Extension custody")
+    refused([*common, "--data-root", str(tmp_path), "--live-data-root", str(tmp_path)],
+            "--extension refuses a temporary data root; use the canonical live root")
+    refused(["--source-root", source, "--data-root", str(tmp_path), "--owner-ready"],
+            "--owner-ready applies only to --extension")
+    valid_root = anchor / "non-temporary" / "canonical-data"
     monkeypatch.setattr(Path, "is_dir", lambda self: self == valid_root)
     args = probe._validated_args([*common, "--data-root", str(valid_root),
                                   "--live-data-root", str(valid_root)])
@@ -50,21 +54,18 @@ def test_extension_recipe_rejects_temporary_or_mismatched_live_root(tmp_path, mo
 
 
 def test_extension_recipe_requires_existing_running_task_without_overwrite(tmp_path):
-    task_id = "live-task"
-    from ouroboros.task_results import stamp_task_result_schema, task_result_path
+    from ouroboros import task_store
 
-    path = task_result_path(tmp_path, task_id, create=False)
+    task_id = "live-task"
     with pytest.raises(RuntimeError, match="matching current running task"):
         probe._require_running_task(tmp_path, task_id, 2)
-    path.parent.mkdir()
-    row = stamp_task_result_schema({"task_id": task_id, "status": "running", "task_attempt": 2})
-    path.write_text(json.dumps(row))
-    original = path.read_bytes()
+    write_task_result(tmp_path, task_id, "running", task_attempt=2)
+    revision = task_store.signature(tmp_path, task_id)
     probe._require_running_task(tmp_path, task_id, 2)
-    assert path.read_bytes() == original
+    assert task_store.signature(tmp_path, task_id) == revision  # The store's change key: a read wrote nothing.
     with pytest.raises(RuntimeError, match="matching current running task"):
         probe._require_running_task(tmp_path, task_id, 3)
-    path.write_text(json.dumps({**row, "status": "completed"}))
+    write_task_result(tmp_path, task_id, "completed")
     with pytest.raises(RuntimeError, match="matching current running task"):
         probe._require_running_task(tmp_path, task_id, 2)
 

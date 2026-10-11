@@ -326,11 +326,6 @@ body.resizing-panels { user-select: none; }
     cursor: default;
 }
 
-/* HQ1 compact card status: hurry applied — a phase chip, never a chat bubble. */
-.chat-live-card[data-owner-hurry] [data-live-phase]::after {
-    content: ' ⏩';
-}
-
 /* Layout-only composition for the row under a question, a Project lifecycle row or a
    routed message, with room for keyboard focus above and below. What sits in it is a
    reference (`project_reference.js`) or the shared `.btn.btn-default.btn-sm` verb. */
@@ -396,15 +391,6 @@ body.resizing-panels { user-select: none; }
 
 .chat-live-actions:empty {
     display: none;
-}
-
-/* P3 — a converted card becomes a calm "project identity" chip. The whole card
-   recolors from the red task accent to the project fuchsia over ~250ms; the live
-   timeline is gone (the project panel owns it now), so the main chat is freed. */
-.chat-live-card.is-project {
-    border-color: var(--project-18);
-    background: var(--project-08);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(240, 171, 252, 0.05);
 }
 
 .chat-live-project-card-btn {
@@ -473,38 +459,6 @@ body.resizing-panels { user-select: none; }
     font-weight: 500;
     color: var(--text-meta);
 }
-
-.project-handoff-heading {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-3);
-}
-
-.project-handoff-phase { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-2); }
-.project-handoff .chat-quiz-project { margin-top: var(--space-3); }
-
-.project-handoff-title {
-    min-width: 0;
-    overflow-wrap: anywhere;
-    font-size: var(--type-section);
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-.chat-bubble.system.project-handoff {
-    border-color: var(--project-18);
-    background: var(--project-08);
-}
-
-/* A converted card whose Main history receipt is not durable: the binding
-   holds, the anchor does not survive a reload — say so with the border. */
-.chat-bubble.system.project-handoff--unsaved,
-.project-handoff--unsaved { border-style: dashed; }
-
-.project-handoff > .sender { display: none; }
-.project-handoff .message { padding: 0; }
-.chat-bubble.system.project-handoff .msg-time { color: var(--text-meta); }
 
 .nav-section {
     display: flex;
@@ -1238,6 +1192,11 @@ body.resizing-panels { user-select: none; }
 .status-badge.starting { color: var(--status-warn-fg); }
 .status-badge.error { color: var(--status-error-fg); }
 .status-badge.offline { color: var(--text-muted); }
+.chat-page-header .status-badge,
+.chat-panel-statusbar .status-badge {
+    max-width: 100%;
+    white-space: normal;
+}
 .status-badge.thinking {
     color: var(--accent);
     animation: thinking-pulse 1.5s ease-in-out infinite;
@@ -1625,26 +1584,26 @@ body.resizing-panels { user-select: none; }
 .ui-rich-content p:first-child { margin-block-start: 0; }
 .ui-rich-content p:last-child { margin-block-end: 0; }
 
-.chat-bubble.system[data-system-type="skill_review"] {
+.chat-bubble.system.chat-skill-review {
     padding: 0;
     overflow: hidden;
 }
 
-.chat-bubble.system[data-system-type="skill_review"] .sender,
-.chat-bubble.system[data-system-type="skill_review"] .msg-time {
+.chat-bubble.system.chat-skill-review .sender,
+.chat-bubble.system.chat-skill-review .msg-time {
     margin-left: 14px;
     margin-right: 14px;
 }
 
-.chat-bubble.system[data-system-type="skill_review"] .sender {
+.chat-bubble.system.chat-skill-review .sender {
     margin-top: 10px;
 }
 
-.chat-bubble.system[data-system-type="skill_review"] .msg-time {
+.chat-bubble.system.chat-skill-review .msg-time {
     margin-bottom: 10px;
 }
 
-.chat-bubble.system[data-system-type="skill_review"] .message {
+.chat-bubble.system.chat-skill-review .message {
     white-space: normal;
 }
 
@@ -1756,6 +1715,15 @@ body.resizing-panels { user-select: none; }
     color: var(--status-error-fg);
 }
 
+/* A file the host could not attach to the task: wraps (names must stay readable on a phone). */
+.msg-attachment-outcome {
+    margin-top: 6px;
+    color: var(--status-warn-fg);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    overflow-wrap: anywhere;
+}
+
 .msg-time {
     font-size: var(--type-meta);
     color: var(--text-secondary);
@@ -1821,7 +1789,7 @@ body.resizing-panels { user-select: none; }
     overflow: hidden;
     container-type: inline-size;
     container-name: livecard;
-    /* So the convert-to-project recolor (.is-project) fades in calmly (P3). */
+    /* Conversion to the shared Project entry fades in calmly (P3). */
     transition: border-color 250ms ease, background-color 250ms ease, box-shadow 250ms ease;
 }
 
@@ -1889,6 +1857,8 @@ body.resizing-panels { user-select: none; }
     align-items: center;
     gap: 8px;
     flex: 0 0 auto;
+    max-width: 100%;
+    min-width: 0;
 }
 
 .chat-live-summary-side {
@@ -2082,6 +2052,14 @@ body.resizing-panels { user-select: none; }
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     white-space: nowrap;
+}
+
+/* HQ1: an applied owner hurry, never a chat bubble — the house fast-forward vector
+   beside the chip, named by its aria-label (task_phase_chip.markOwnerHurry). */
+.chat-live-hurry {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-meta);
 }
 
 .chat-live-meta-text {
@@ -3279,6 +3257,9 @@ body.resizing-panels { user-select: none; }
     gap: var(--space-2);
     min-width: 0;
     padding: 0 var(--space-2);
+    /* Size containment: the row's width never depends on what it holds, so the open effort
+       strip's measured fit (composer_owner_controls.js) cannot feed back into it. */
+    container: composer / inline-size;
 }
 
 #chat-input-area.drag-active .chat-input-wrap,
@@ -3387,10 +3368,19 @@ textarea.chat-input {
     font-family: inherit;
     outline: none;
     resize: none;
+    /* Grows with its text or placeholder to this one cap, then scrolls;
+       chat_input_sizing.js picks content sizing, else writes the measured height. */
+    height: var(--chat-input-height, auto);
     min-height: 32px;
     max-height: 140px;
     line-height: 1.45;
 }
+#chat-input[data-sizing="content"],
+textarea.chat-input[data-sizing="content"] { field-sizing: content; }
+/* A measured box below the cap holds its whole text: a rounded scrollHeight must not
+   leave a sub-pixel scrollbar. */
+#chat-input[data-sizing="fit"],
+textarea.chat-input[data-sizing="fit"] { overflow-y: hidden; }
 #chat-input::placeholder,
 textarea.chat-input::placeholder { color: var(--text-muted); }
 
@@ -3525,6 +3515,268 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .chat-send-inline:active {
     background: var(--accent-18);
     opacity: 1;
+}
+
+/* Effort range (variant D): a round glass button with the ring glyph (band = min..max,
+   dot = recommended) that opens inline into the strip. A sibling of the pills,
+   never inside the phone swipe scroller; the same vocabulary as Swarm and Nano/Low/Max.
+   The open strip never takes a second line: beside the pills when it fits, alone while
+   the pills step aside, scrolling inside itself only when nothing else fits
+   (composer_owner_controls.js sets data-fit, data-tight and --effort-seg-pad from measurement). */
+.chat-effort-range {
+    --effort-cap-width: var(--space-2);
+    --effort-band-inset: var(--space-1);
+    --effort-seg-pad: var(--space-2);
+    --effort-glyph-size: 22px;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+    box-sizing: border-box;
+    height: var(--composer-control-height);
+    max-width: 100%;
+    min-width: 0;
+    border: 1px solid rgba(var(--neutral-rgb), 0.12);
+    border-radius: 999px;
+    background: rgba(var(--composer-rgb), 0.38);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    box-shadow: var(--composer-control-shadow);
+    color: var(--text-secondary);
+    font-size: var(--composer-control-font-size);
+    font-weight: 700;
+    letter-spacing: 0;
+    white-space: nowrap;
+    transition: border-color 0.18s, background 0.18s, box-shadow 0.18s;
+}
+.chat-effort-range[data-open="true"] {
+    border-color: var(--accent-35);
+}
+.chat-effort-range[data-known="false"] {
+    opacity: 0.6;
+}
+.chat-effort-range[data-saving="true"] {
+    box-shadow: var(--composer-control-shadow), 0 0 0 3px var(--accent-10);
+}
+.chat-effort-head {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: calc(var(--composer-control-height) - 2px);
+    height: calc(var(--composer-control-height) - 2px);
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-meta);
+    cursor: pointer;
+    transition: background 0.18s;
+}
+.chat-effort-head:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: -2px;
+}
+@media (hover: hover) {
+    .chat-effort-head:hover {
+        background: var(--accent-10);
+    }
+}
+.chat-effort-glyph {
+    display: inline-flex;
+    width: var(--effort-glyph-size);
+    height: var(--effort-glyph-size);
+}
+.chat-effort-glyph svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+.chat-effort-glyph-rail {
+    stroke: rgba(var(--neutral-rgb), 0.28);
+}
+.chat-effort-glyph-band {
+    stroke: var(--accent-55);
+}
+.chat-effort-glyph-dot {
+    fill: var(--accent);
+}
+.chat-effort-body {
+    display: flex;
+    align-items: center;
+    align-self: stretch;
+    max-width: 0;
+    overflow: hidden;
+    opacity: 0;
+    transition: max-width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.22s;
+}
+.chat-effort-range[data-open="true"] .chat-effort-body {
+    max-width: 640px;
+    opacity: 1;
+}
+/* Alone, the strip appears and disappears at once, together with the pills it replaces. */
+.chat-effort-range[data-fit="solo"] .chat-effort-body,
+.chat-effort-range[data-fit="overflow"] .chat-effort-body {
+    transition: none;
+}
+.chat-toolbar-row[data-effort-solo="true"] .chat-composer-pills {
+    display: none;
+}
+/* The strip: one segment per level, as wide as its word plus the padding; the band and the
+   three handles sit over it and share one vertical inset, so their edges meet exactly. */
+.chat-effort-strip {
+    position: relative;
+    flex: 0 0 auto;
+    display: flex;
+    align-self: stretch;
+    margin-right: var(--space-1);
+    touch-action: none;
+    cursor: pointer;
+}
+.chat-effort-band {
+    position: absolute;
+    top: var(--effort-band-inset);
+    bottom: var(--effort-band-inset);
+    border-radius: 4px;
+    background: var(--accent-10);
+    pointer-events: none;
+    transition: left 0.15s, width 0.15s;
+}
+.chat-effort-seg {
+    position: relative;
+    z-index: 2;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 var(--effort-seg-pad);
+    color: var(--text-secondary);
+    pointer-events: none;
+    transition: color 0.15s;
+}
+.chat-effort-seg[data-in="true"] {
+    color: var(--text-primary);
+}
+.chat-effort-seg[data-rec="true"] {
+    color: var(--accent-light);
+}
+.chat-effort-seg-text {
+    display: block;
+}
+/* Handles: the pill is the recommended level, the brackets are min and max. A tap or a key
+   moves every handle with the same short transition, so a pushed bracket keeps pace. */
+.chat-effort-handle {
+    position: absolute;
+    top: var(--effort-band-inset);
+    bottom: var(--effort-band-inset);
+    box-sizing: border-box;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: grab;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    z-index: 3;
+    transition: left 0.15s, width 0.15s, box-shadow 0.15s;
+}
+.chat-effort-handle::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+}
+.chat-effort-handle:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 2px;
+}
+.chat-effort-handle[data-dragging="true"] {
+    cursor: grabbing;
+    z-index: 4;
+}
+/* While a drag runs, and when the layout itself changes (opening, a resize, a new padding),
+   the marks land with the words at once, so the pill never trails behind the word it names. */
+.chat-effort-range:is([data-dragging="true"], [data-settling="true"]) :is(.chat-effort-band, .chat-effort-handle, .chat-effort-seg) {
+    transition: none;
+}
+/* The pill covers its whole segment; the word sits centred inside it. */
+.chat-effort-rec {
+    z-index: 1;
+    border: 1px solid var(--accent-55);
+    border-radius: 999px;
+    background: var(--accent-22);
+}
+.chat-effort-rec[data-dragging="true"] {
+    box-shadow: 0 0 0 4px var(--accent-18);
+}
+/* At var(--space-1) of padding and below, a full capsule would cut the corners of the word's box. */
+.chat-effort-range[data-tight="true"] .chat-effort-rec {
+    border-radius: calc(var(--effort-seg-pad) + var(--space-1));
+}
+.chat-effort-cap {
+    width: var(--effort-cap-width);
+    border: 2px solid var(--accent);
+    background: transparent;
+}
+/* A finger-sized hit area that grows outward, never over the pill or the round button. */
+.chat-effort-min {
+    border-right: 0;
+    border-radius: 4px 0 0 4px;
+}
+.chat-effort-min::before {
+    inset: -10px 0 -10px -12px;
+}
+.chat-effort-max {
+    border-left: 0;
+    border-radius: 0 4px 4px 0;
+    transform: translateX(-100%);
+}
+.chat-effort-max::before {
+    inset: -10px -12px -10px 0;
+}
+.chat-effort-cap[data-dragging="true"] {
+    box-shadow: 0 0 0 4px var(--accent-22);
+}
+@media (hover: hover) {
+    .chat-effort-rec:hover {
+        box-shadow: 0 0 0 4px var(--accent-18);
+    }
+    .chat-effort-cap:hover {
+        box-shadow: 0 0 0 3px var(--accent-18);
+    }
+}
+/* Nothing fits even at the tightest padding (a 320 px phone, a pane dragged very narrow):
+   the strip scrolls inside the control and fades on the side that hides levels. A swipe on
+   a word scrolls, a handle still drags, the round button stays put. */
+.chat-effort-range[data-fit="overflow"] {
+    flex: 1 1 auto;
+}
+.chat-effort-range[data-fit="overflow"][data-open="true"] .chat-effort-body {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
+}
+.chat-effort-range[data-fit="overflow"] .chat-effort-strip {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    touch-action: pan-x;
+}
+.chat-effort-range[data-fit="overflow"] .chat-effort-strip::-webkit-scrollbar {
+    display: none;
+}
+.chat-effort-range[data-fit="overflow"] .chat-effort-strip[data-scroll="start"] {
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - var(--space-3)), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - var(--space-3)), transparent);
+}
+.chat-effort-range[data-fit="overflow"] .chat-effort-strip[data-scroll="middle"] {
+    -webkit-mask-image: linear-gradient(to right, transparent, black var(--space-3), black calc(100% - var(--space-3)), transparent);
+    mask-image: linear-gradient(to right, transparent, black var(--space-3), black calc(100% - var(--space-3)), transparent);
+}
+.chat-effort-range[data-fit="overflow"] .chat-effort-strip[data-scroll="end"] {
+    -webkit-mask-image: linear-gradient(to right, transparent, black var(--space-3));
+    mask-image: linear-gradient(to right, transparent, black var(--space-3));
 }
 
 /* === design-system:migrated-end === */
@@ -4121,6 +4373,104 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .cost-bar::-moz-progress-bar { background: var(--accent); }
 .cost-empty-cell { color: var(--text-muted); text-align: center; }
 
+/* === design-system:migrated-begin (Dashboard Storage tab) === */
+/* Dashboard Storage (the passive, owner-triggered measurement view): shared card, type,
+   spacing and tone tokens; only the bar's measured share arrives at runtime (--storage-share). */
+.storage-root { min-height: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.storage-summary, .storage-panel { padding: var(--space-4); }
+.storage-summary-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
+.storage-summary-text { min-width: 0; }
+.storage-total {
+    color: var(--text-primary);
+    font-size: var(--type-page);
+    line-height: var(--line-title);
+    font-weight: 650;
+    overflow-wrap: anywhere;
+}
+.storage-total.is-unknown,
+.storage-row-size.is-unknown,
+.storage-group-size.is-unknown { color: var(--text-meta); }
+.storage-kicker,
+.storage-meta,
+.storage-coverage,
+.storage-footnote,
+.storage-group-why,
+.storage-group-note,
+.storage-row-why { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.storage-meta { margin-top: var(--space-1); }
+.storage-notes { margin-top: var(--space-3); }
+.storage-notes:empty { display: none; }
+.storage-coverage { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; }
+.storage-status { margin: 0; }
+.storage-icon { display: inline-flex; flex: 0 0 auto; margin-top: 1px; }
+.storage-body { min-height: 0; }
+.storage-panel > .storage-meta { margin: 0 0 var(--space-2); }
+.storage-bar {
+    display: flex;
+    width: 100%;
+    min-height: 14px;
+    overflow: hidden;
+    border-radius: var(--radius-sm);
+    background: var(--surface-control);
+    border: 1px solid var(--surface-border);
+}
+/* Counted segments shrink in proportion so the fixed unknown marker is never clipped. */
+.storage-bar-seg {
+    flex: 0 1 calc(var(--storage-share, 0) * 1%);
+    min-width: 2px;
+    background: var(--accent);
+    border-inline-end: 1px solid var(--ui-card-bg);
+}
+.storage-bar-seg.is-unmeasured {
+    flex: 0 0 12px;
+    min-width: 12px;
+    background: repeating-linear-gradient(135deg, transparent 0 4px, var(--text-disabled) 4px 6px);
+    border-inline: 1px dashed var(--text-meta);
+}
+.storage-key { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.storage-key.is-unmeasured { border: 1px dashed var(--text-meta); border-radius: 1px; background: transparent; }
+:is(.storage-bar-seg, .storage-key)[data-group="exact"] { background: var(--project); }
+:is(.storage-bar-seg, .storage-key)[data-group="kept"] { background: var(--accent-light); }
+:is(.storage-bar-seg, .storage-key)[data-group="temporary"] { background: var(--status-warn-fg); }
+:is(.storage-bar-seg, .storage-key)[data-group="other"] { background: var(--text-secondary); }
+.storage-groups { display: grid; gap: var(--space-4); margin-top: var(--space-4); }
+.storage-group { min-width: 0; }
+.storage-group-head { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
+.storage-group-title {
+    min-width: 0;
+    margin: 0;
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    font-weight: 650;
+}
+.storage-group-size { margin-inline-start: auto; color: var(--text-meta); font-size: var(--type-body); white-space: nowrap; }
+.storage-group-count { margin-inline-start: var(--space-2); color: var(--text-meta); font-size: var(--type-meta); font-weight: 400; }
+.storage-group-why { margin: var(--space-1) 0 var(--space-2); }
+.storage-group-note { margin: var(--space-2) 0 0; }
+.storage-list { display: grid; gap: var(--space-1); margin: 0; padding: 0 0 0 var(--space-4); list-style: none; }
+.storage-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+    align-items: baseline;
+    gap: var(--space-2);
+    padding-block: var(--space-1);
+    border-top: 1px solid var(--surface-border-soft);
+}
+.storage-row-label { min-width: 0; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
+.storage-row-why { min-width: 0; }
+.storage-row-size { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); text-align: end; white-space: nowrap; }
+.storage-footnote { margin: 0; padding-inline: var(--space-1); }
+
+@media (max-width: 640px) {
+    .storage-summary-head { align-items: stretch; flex-direction: column; }
+    .storage-refresh { align-self: flex-start; }
+    .storage-row { grid-template-columns: minmax(0, 1fr) auto; }
+    .storage-row-why { grid-column: 1 / -1; grid-row: 2; }
+    .storage-row-size { grid-column: 2; grid-row: 1; }
+}
+/* === design-system:migrated-end === */
+
 #page-dashboard {
     min-height: 0;
 }
@@ -4539,12 +4889,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .skills-status-chip[role="button"]:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: 2px;
-}
-
-.skills-lock-hint::before {
-    content: '\1F512';
-    font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif;
-    font-size: 11px;
 }
 
 .skills-review-progress {
@@ -7204,6 +7548,17 @@ textarea.chat-input {
 /* === design-system:migrated-end === */
 
 /* === design-system:migrated-begin (chat: executor chip, structured delivery, quiz card) === */
+/* The child card's effort chip: one text part of the meta line; a pinned level wears the pin glyph. */
+.chat-live-effort {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+.chat-live-effort-pin {
+    flex: 0 0 auto;
+    width: 11px;
+    height: 11px;
+}
 
 /* Phase 6: per-bubble/subagent executor chip (owner directive: a small chip
    like Claudexor's, never a promotional badge). Reuses .harness-chip, sized on
@@ -7723,6 +8078,11 @@ textarea.chat-input {
     padding: 4px 7px;
 }
 
+.chat-media-controls button > svg {
+    display: block;
+    margin: 0 auto;
+}
+
 .chat-media-progress {
     --media-progress: 0%;
     flex: 1 1 120px;
@@ -7982,6 +8342,67 @@ textarea.chat-input {
    (the button spans ~30px from the bubble's right edge). */
 .chat-bubble.has-copy .msg-time { margin-right: 28px; }
 
+/* One Project entry surface, independent of the task or history shell it
+   replaced. This follows the base shells and their copy/time recipes. */
+.chat-live-card.project-handoff,
+.chat-bubble.project-handoff {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    align-self: flex-start;
+    width: min(100%, 760px);
+    max-width: max(80%, min(100%, 620px));
+    min-width: 0;
+    margin: 0;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid var(--project-18);
+    border-radius: var(--radius-lg);
+    background: var(--project-08);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 var(--project-08);
+    backdrop-filter: blur(12px);
+    overflow: hidden;
+    container-type: inline-size;
+    container-name: projectcard;
+    transition: border-color 250ms ease, background-color 250ms ease, box-shadow 250ms ease;
+}
+
+.project-handoff-heading {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-3);
+    white-space: normal;
+}
+.project-handoff-title {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: var(--type-section);
+    line-height: var(--line-title);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.project-handoff-phase {
+    display: flex;
+    align-items: baseline;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    max-width: 100%;
+    line-height: var(--line-meta);
+}
+.project-handoff .chat-quiz-project { align-self: flex-start; max-width: 100%; margin: 0; }
+.project-handoff-footer { display: flex; align-items: center; gap: var(--space-2); min-height: var(--space-5); }
+.project-handoff .project-handoff-footer .msg-time { margin: 0; opacity: 1; color: var(--text-meta); }
+.project-handoff .chat-message-copy { position: static; margin-inline-start: auto; flex: 0 0 auto; }
+
+/* A saved binding with no durable Main receipt retains its visible gap mark. */
+.project-handoff.project-handoff--unsaved { border-style: dashed; }
+
+@container projectcard (max-width: 560px) {
+    .project-handoff-heading { flex-direction: column; align-items: flex-start; }
+    .project-handoff-phase { order: -1; justify-content: flex-start; }
+}
+
 .chat-copy-fallback {
     position: fixed;
     left: -10000px;
@@ -8078,6 +8499,9 @@ textarea.chat-input {
 .skills-card-menu-dialog:not(.ui-popup) .skills-menu-item:hover {
     background: var(--menu-item-hover);
     color: var(--text-primary);
+}
+.skills-card-menu-dialog .skills-menu-item.skills-attest-warn {
+    color: var(--status-warn-fg);
 }
 
 

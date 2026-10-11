@@ -42,13 +42,13 @@ in the process table without a ledger row having been written first.
 
 A session is published before its worker starts, so Stop can meet it unstarted
 or mid-launch. Revocation and the launch decision share ``_lock``: a revoked
-session never launches, and a launch already admitted is scanned again once
-its worker has unwound. Only that later scan, over a fresh container on the
-original marker, may report the closure ``confirmed``; a scan while the worker
-still runs is provisional. A call whose connection closes before any answer
-was possibly submitted: its effect is unknown, nothing resends it, and the
-session closes. A tool error the server answers is an ordinary result over a
-live session.
+session never launches, but revocation stops a launch, not a running worker, so
+a started worker is scanned again once it has unwound. Only that later scan,
+over a fresh container on the original marker, may report the closure
+``confirmed``; a scan while the worker still runs is provisional. A call whose
+connection closes before any answer was possibly submitted: its effect is
+unknown, nothing resends it, and the session closes. A tool error the server
+answers is an ordinary result over a live session.
 """
 
 from __future__ import annotations
@@ -183,6 +183,28 @@ class BrowserBridgeBroken(RuntimeError):
         super().__init__(text)
         self.submitted = submitted
         self.closure = closure
+
+
+CALL_FAILURES = (BrowserBridgeRefusal, BrowserBridgeTimeout, BrowserBridgeBroken)
+
+
+def failure_result(exc: BaseException, redact: Any) -> ToolResult:
+    """The typed result of a call that ended in one of ``CALL_FAILURES``; ``redact`` masks the entry's secrets."""
+    if isinstance(exc, BrowserBridgeTimeout):
+        return ToolResult(status="timeout", code="MCP_TIMEOUT", text=f"⚠️ MCP_TOOL_TIMEOUT: {redact(exc)}",
+                          meta={"dynamic_provider": True})
+    if isinstance(exc, BrowserBridgeBroken):
+        # The action's own connection closed before any answer (a broken observation
+        # refuses before dispatch instead): possibly submitted, never resent.
+        broken = (f"⚠️ MCP_TOOL_ERROR: BROWSER_ACTION_OUTCOME_UNKNOWN — {redact(exc)} "
+                  "Read the current page state before any retry.")
+        return ToolResult(status="error", code="MCP_ERROR", text=broken, meta={
+            "dynamic_provider": True, "host_verdict": True, "transport": "closed",
+            "dispatch": "possible" if exc.submitted else "none",
+            "effect": "unknown" if exc.submitted else "none", "bridge_closure": exc.closure})
+    refusal = redact(exc)  # Policy or Safety; nothing was dispatched. Safety's verdict carries its own marker.
+    return ToolResult(status="blocked", code=exc.code, meta={"dynamic_provider": True},
+                      text=refusal if exc.code == "SAFETY_VIOLATION" else f"⚠️ {refusal}")
 
 
 def _owner(ctx: Any) -> tuple[str, str]:
@@ -330,7 +352,6 @@ class TaskBrowserSession:
         self._call_lock = threading.Lock()
         self._reap_lock = threading.Lock()
         self._started = False
-        self._launched = False  # The worker passed its launch admission (under ``_lock``).
         self._served_out = False  # The worker's loop is closed: it can launch nothing more.
         self.scratch: tempfile.TemporaryDirectory | None = None
         self.guard_dir = _private_socket_dir()
@@ -380,7 +401,7 @@ class TaskBrowserSession:
             self.revoked = True
 
     def _reap(self) -> str:
-        """Scan the marked tree; only a scan once the worker can launch nothing more confirms.
+        """Scan the marked tree; only a scan once the worker has exited, or never started, confirms.
 
         ``ProcessContainer.reap`` consumes the marker it scans, and the same object
         scanned again sees nothing and answers "" — so every later scan gets a fresh
@@ -389,7 +410,9 @@ class TaskBrowserSession:
         with self._reap_lock:
             if self.close_outcome != "confirmed":
                 with _lock:
-                    final = (self._served_out or (self.revoked and not self._launched)
+                    # A started worker held before its launch decision launches nothing
+                    # once revoked, but it still runs: only its exit is final.
+                    final = (self._served_out or (self.revoked and not self._started)
                              or (self._started and not self.thread.is_alive()))
                 container = self.container
                 self.container = ProcessContainer.for_scope(self.token[len(CONTAINMENT_ENV_PREFIX):])
@@ -462,7 +485,6 @@ class TaskBrowserSession:
             if self.revoked:
                 server.close()
                 raise RuntimeError("MCP browser task session was revoked before its server launched")
-            self._launched = True
         async with server, _transport_factory(cfg) as streams:
             pids = pids_with_env_marker(self.token)
             if not pids:
@@ -623,6 +645,11 @@ class TaskBrowserSession:
                 note += f"\nEarlier blocked-request diagnostics omitted: {self._blocked_omitted}."
             return result, advice, note
 
+    def is_current(self) -> bool:
+        """Still its attempt's cached, unrevoked session: a listing it served may publish."""
+        with _lock:
+            return _sessions.get(self.key) is self and not self.revoked
+
     def stop(self) -> str:
         """Revoke new calls and launches, close the connection, then scan the marked tree.
 
@@ -659,7 +686,8 @@ def _foreign_live_members(data_root: pathlib.Path, task_id: str) -> str:
     return f"earlier bridge processes are still live: {foreign}" if foreign else ""
 
 
-def discover(cfg: Any, ctx: Any, timeout: int) -> list[dict]:
+def discover(cfg: Any, ctx: Any, timeout: int, *, session_out: list | None = None) -> list[dict]:
+    """The attempt's tools from its one session; ``session_out`` receives that exact session."""
     task, attempt = _owner(ctx)
     with _lock:
         if (task, attempt) in _ended_attempts:
@@ -680,13 +708,24 @@ def discover(cfg: Any, ctx: Any, timeout: int) -> list[dict]:
                 raise RuntimeError(f"MCP browser session of this task cannot reopen: {blocker}")
             session = TaskBrowserSession(cfg, ctx)
             _sessions[session.key] = session
+    if session_out is not None:
+        session_out.append(session)
     try:
         return session.start(timeout)
     except BaseException as exc:
         with _lock:
-            _failed_opens[(task, attempt, cfg.id)] = (cfg, f"{type(exc).__name__}: {exc}")
+            if not session.revoked:
+                _failed_opens[(task, attempt, cfg.id)] = (cfg, f"{type(exc).__name__}: {exc}")
         _close(session)
         raise
+
+
+async def listing(cfg: Any, ctx: Any, timeout: int, session_out: list | None = None) -> list[dict]:
+    """``discover`` off the event loop; opening the server is a preparation Pause admits."""
+    from ouroboros.owner_pause import submit_async_preparation
+
+    return await submit_async_preparation(
+        lambda: asyncio.to_thread(discover, cfg, ctx, timeout, session_out=session_out), source=ctx)
 
 
 def call(cfg: Any, prefixed: str, name: str, args: dict, ctx: Any, timeout: int) -> tuple[ToolResult, str, str]:
@@ -726,21 +765,21 @@ def stop_task(ctx: Any, *, end_attempt: bool = True) -> list[dict]:
         for key in [key for key in _failed_opens if key[0] == owner[0]]:
             _failed_opens.pop(key, None)
         found = [session for key, session in _sessions.items() if key[0] == owner[0]]
+        for session in found:
+            # Revoked with the clearing above: a worker that exits before its close
+            # below ended under this Stop, not as a failed open of the attempt.
+            session.revoked = True
     return [_close(session) for session in found]
 
 
-def release_stale(cfg: Any, ctx: Any) -> dict | None:
-    """Close this attempt's session opened with ``cfg`` once that entry is no longer current.
+def release_stale(session: TaskBrowserSession) -> dict:
+    """Close the session a discarded listing borrowed: that object, never a later lookup.
 
-    A discovery captures its configuration before it opens; a Settings change
-    in between finds nothing to revoke yet, so the refresh that sees its own
-    listing discarded disposes of exactly the session it opened.
+    A discovery captures its configuration before it opens; a Settings change in
+    between finds nothing to revoke yet, and an equal entry restored afterwards
+    opens its own session under the same key and configuration. So the refresh
+    that sees its own listing discarded disposes of exactly the session it read.
     """
-    task, attempt = _owner(ctx)
-    with _lock:
-        session = _sessions.get((task, cfg.id))
-    if session is None or session.attempt != attempt or session.cfg != cfg:
-        return None
     return _close(session)
 
 

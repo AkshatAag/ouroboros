@@ -4,7 +4,7 @@ Registry of the browser, CLI and Host Service routes, with non-loopback authenti
 
 With `OUROBOROS_NETWORK_PASSWORD` configured, non-loopback HTTP and WebSocket access requires authentication; loopback clients bypass the gate, and `/api/health` plus the middleware-owned login/logout paths stay reachable. Browser sessions use a server-keyed, expiring HttpOnly HMAC cookie, `Secure` only under TLS, so a plain-HTTP LAN session does not enter a login loop. An unauthenticated WebSocket is closed with code 4401 before `ws_endpoint` accepts it. Without a password, non-loopback access stays open by explicit operator choice.
 
-File-browser routes are contributed by `gateway/files.py::file_browser_routes()`. `gateway/contracts.py` is the frozen descriptive envelope and endpoint index mirrored by `web/modules/api_types.js` and parity tests; its `TypedDict` classes perform no runtime JSON validation. The loopback Host Service is a separate token-authenticated app assembled by `gateway/host_service.py::create_host_service_app`, not a second public owner API (§12).
+File-browser routes are contributed by `gateway/files.py::file_browser_routes()`; envelopes and their parity: §11. The loopback Host Service is a separate token-authenticated app assembled by `gateway/host_service.py::create_host_service_app`, not a second public owner API (§12).
 
 Every path-addressed `/api/files/*` operation resolves its requested `path` and refuses when the resolution leaves the configured file root. In-root symlinks stay usable; out-of-root symlinks may be listed with `is_symlink: true` but cannot be read, written, downloaded, deleted or traversed. A chat attachment (`/api/files/download?upload=<id>`) names no path: a separate confined authority opens it by stored upload id through `chat_uploads.open_upload` inside `data/uploads`, independent of the Files root.
 
@@ -60,7 +60,7 @@ Every path-addressed `/api/files/*` operation resolves its requested `path` and 
 | POST | `/api/settings` | |
 | POST | `/api/settings/secret` | |
 | GET | `/api/review-pool` | |
-| GET | `/api/claudexor/status` | `last_exit`/`memory` (§9), resource-catalog read evidence (§3); never wakes |
+| GET | `/api/claudexor/status` | `last_exit`/`memory` (§9), resource-catalog evidence (§3); `?view=quota`: roster/quota only; never wakes |
 | POST | `/api/claudexor/quota/refresh` | full or exact account (§3) |
 | POST | `/api/claudexor/account-resets` | exact request and Idempotency-Key (§3) |
 | GET | `/api/claudexor/account-resets/{operation_id}` | receipt inspection (§3) |
@@ -79,6 +79,7 @@ Every path-addressed `/api/files/*` operation resolves its requested `path` and 
 | POST | `/api/owner/runtime-mode` | |
 | POST | `/api/owner/auto-grant` | |
 | POST | `/api/owner/context-mode` | |
+| POST | `/api/owner/effort-range` | |
 | POST | `/api/owner/safety-mode` | |
 | POST | `/api/owner/skills/{skill}/presence-runtime` | |
 | POST | `/api/owner/capability-ack` | |
@@ -123,6 +124,8 @@ Every path-addressed `/api/files/*` operation resolves its requested `path` and 
 | POST | `/api/update/preflight` | |
 | POST | `/api/update/apply` | |
 | GET | `/api/cost-breakdown` | |
+| GET | `/api/storage` | passive |
+| POST | `/api/storage/measure` | starts or joins the walk |
 | GET | `/api/evolution-data` | |
 | GET | `/api/projects` | |
 | POST | `/api/projects` | |
@@ -142,6 +145,7 @@ Every path-addressed `/api/files/*` operation resolves its requested `path` and 
 | GET | `/api/mcp/status` | |
 | POST | `/api/mcp/refresh` | |
 | POST | `/api/mcp/test` | |
+| POST | `/api/mcp/import/preview` | |
 | WS | `/ws` | |
 | STATIC | `/static/*` | |
 | GET | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/identity` | |
@@ -160,11 +164,11 @@ Every path-addressed `/api/files/*` operation resolves its requested `path` and 
 | POST | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/notify` | `notify_owner` grant: one signed `skill_notice` System row, no model turn |
 | WS | `127.0.0.1:${OUROBOROS_HOST_SERVICE_PORT:-8767}/events` | |
 
-`server.py` owns startup, lifespan and static files; `gateway/*` owns HTTP and WebSocket. Update-status, log-tail and schedule-list reads run off the event loop.
+Update-status, log-tail and schedule-list reads run off the event loop.
 
 ### WebSocket protocol
 
-`/ws` delivers live browser events; the queue, task, Project, review, skill, settings, cost and update owners persist the truth a reconnecting client rebuilds through REST and history. `gateway/contracts.py` owns the frozen envelopes and Python/JS parity; `gateway/ws.py` admits JSON objects, owned extension namespaces and `command` text and `chat` text/attachments. Chat acceptance (row → queue → echo) runs off the ASGI loop through `gateway._helpers.run_sync_to_completion`. Each socket chains its chats in receive order without awaiting them, so Panic and Restart stay responsive behind a held chat (§5 Bridge intake and commands); disconnect waits for received chats to settle (`settle_to_completion`). Authentication above governs admission; public sockets never carry Host Service or owned-daemon tokens.
+`/ws` delivers live browser events; the queue, task, Project, review, skill, settings, cost and update owners persist the truth a reconnecting client rebuilds through REST and history. `gateway/ws.py` admits JSON objects, owned extension namespaces and `command` text and `chat` text/attachments. Chat acceptance (row → queue → echo) runs off the ASGI loop through `gateway._helpers.run_sync_to_completion`. Each socket chains its chats in receive order without awaiting them, so Panic and Restart stay responsive behind a held chat (§5 Bridge intake and commands); disconnect waits for received chats to settle (`settle_to_completion`). Authentication above governs admission; public sockets never carry Host Service or owned-daemon tokens.
 
 The browser opens one socket for the whole SPA. Feature modules subscribe, and the complete Project chat-id set is fetched, before the first open, so an early Project frame cannot pass for Main traffic. Every decoded frame reaches the generic `message` event and then its type-specific event, so Widgets consume reviewed namespaced events without a second socket.
 

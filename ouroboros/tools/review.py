@@ -744,8 +744,7 @@ def _collect_review_findings(ctx: ToolContext, model_results: list, row_plan: Op
     from ouroboros.triad_review import parse_seat_answers
 
     plan = row_plan or {}
-    slot_ids, parts_vec = list(plan.get("slot_ids") or []), list(plan.get("parts") or [])
-    row_parts = {str(slot_ids[i]): tuple(parts_vec[i]) for i in range(min(len(slot_ids), len(parts_vec)))}
+    row_parts = {str(slot): tuple(parts) for slot, parts in zip(plan.get("slot_ids") or [], plan.get("parts") or [])}
     parsed = parse_seat_answers({"results": model_results}, row_parts)
     critical_fails: List[str] = []
     advisory_warns: List[str] = []
@@ -859,8 +858,6 @@ def _build_critical_block_message(
         "advisory": advisory_entries,
     })
 
-    iteration_note = f" (attempt {ctx._review_iteration_count})"
-
     retry_coaching = build_self_verification_template(
         critical_entries,
         attempt_idx=ctx._review_iteration_count,
@@ -869,7 +866,7 @@ def _build_critical_block_message(
     )
 
     return (
-        f"⚠️ REVIEW_BLOCKED{iteration_note}: Critical issues found by reviewers.\n"
+        f"⚠️ REVIEW_BLOCKED (attempt {ctx._review_iteration_count}): Critical issues found by reviewers.\n"
         "Commit has NOT been created. Fix the issues and try again. review_rebuttal is\n"
         "legitimate when a finding is factually incorrect, when its evidence does not\n"
         "support the claimed severity, or when the requested remedy is disproportionate —\n"
@@ -1015,15 +1012,14 @@ def _subject_changed_paths(frozen: Any, target_repo) -> tuple[str, str]:
     return changed, _build_preflight_staged(target_repo, fallback=changed)
 
 
-def _review_history_with_open_obligations(ctx: ToolContext, frozen: Any) -> str:
-    """The prior-rounds section with the subject root's durable open obligations
-    (``review_helpers.review_history_with_obligations``, the one owner the public
-    brief builder shares)."""
+def _review_history_with_open_obligations(ctx: ToolContext, frozen: Any, rebuttal: str = "") -> str:
+    """Bind the shared cold dispute before any seat is prepared."""
+    from ouroboros.review_history import prepare_history
     from ouroboros.tools.review_helpers import review_history_with_obligations
 
     return review_history_with_obligations(
-        ctx._review_history, drive_root=getattr(ctx, "drive_root", None),
-        repo_root=frozen.spec.root if frozen is not None else getattr(ctx, "repo_dir", None))
+        prepare_history(ctx, frozen, rebuttal), drive_root=getattr(ctx, "drive_root", None),
+        repo_root=frozen.spec.root if frozen is not None else getattr(ctx, "repo_dir", None), task_id=str(ctx.task_id or ""))
 
 
 def _gate_governance_root(ctx: ToolContext) -> pathlib.Path:
@@ -1065,19 +1061,21 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     subject_root = pathlib.Path(target_repo) if layer != "body" else None
     ctx._review_iteration_count += 1
     ctx._last_review_block_reason = ""  # reset per attempt
-    ctx._last_triad_models = []  # reset forensic field so stale values never persist on early exit
-    ctx._last_review_critical_findings = []  # reset to avoid stale findings from previous attempts
-    ctx._last_triad_raw_results = []  # reset per-model actor records
-    ctx._triad_withheld_seat_records = []  # reset Q28-dropped seat records
-    ctx._review_degraded_reasons = []  # reset degraded participation markers
-    review_enforcement = _cfg.get_review_enforcement()
-    blocking_review = review_enforcement_blocks(review_enforcement)
+    # Each attempt owns its forensic model IDs, findings, actors, Q28 omissions
+    # and degraded-participation markers, including an early assembly exit.
+    for field in ("_last_triad_models", "_last_review_critical_findings", "_last_triad_raw_results",
+                  "_triad_withheld_seat_records", "_review_degraded_reasons"):
+        setattr(ctx, field, [])
+    blocking_review = review_enforcement_blocks(_cfg.get_review_enforcement())
+
+    if bool(getattr(ctx, "_review_reconcile_only", False)):
+        from ouroboros.tools.review_change_custody import prepare_recorded_commit_review
+        return prepare_recorded_commit_review(ctx, target_repo=target_repo, blocking_review=blocking_review, layer=layer,
+                                              frozen=frozen, review_rebuttal=review_rebuttal)
 
     diff_text, subject, capture_block = _capture_triad_staged_diff(ctx, target_repo, blocking_review, frozen=frozen)
-    if diff_text is None:  # capture failed: block (blocking) or advisory-skip (None)
+    if diff_text is None or not diff_text.strip():  # capture block, advisory skip, or empty diff
         return None, capture_block, True
-    if not diff_text.strip():
-        return None, None, True
 
     changed, preflight_staged = _subject_changed_paths(frozen, target_repo)
     # Reviewers of a managed resolution read the RESOLUTION path set (delta ∪
@@ -1116,7 +1114,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
             "Review enforcement=Advisory: review checklist failed to load; commit proceeding anyway. ",
         ), True
 
-    review_history_section = _review_history_with_open_obligations(ctx, frozen)
+    review_history_section = _review_history_with_open_obligations(ctx, frozen, review_rebuttal)
 
     touched_paths = [f.strip() for f in review_changed.strip().splitlines() if f.strip()]
 
@@ -1307,13 +1305,14 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     # prepared packet so the durable prompt record and the api rows' actor
     # records can carry it.
     ctx._last_triad_governance_manifest = list(governance.manifest)
+    from ouroboros.tools.review_admission import commit_checking_source
     return {
         "prompt": prompt, "stable_prefix_len": stable_prefix_len,
         "models": models, "routes": row_routes, "row_plan": row_plan,
         "session_task": "", "target_repo": target_repo,
         "blocking_review": blocking_review, "task_evidence": task_evidence,
         "layer": layer,
-        "governance_manifest": list(governance.manifest),
+        "governance_manifest": list(governance.manifest), "checking_source": commit_checking_source(ctx, row_plan, target_repo, frozen),
         "governance_packet_slots": [slot.slot_id for slot in api_slots],
         "retrieving_manifests": retrieving_manifests,
         "brief_texts": brief_texts,
@@ -1371,6 +1370,7 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
             retry_key=str(prepared.get("retry_key") or ""),
             task_evidence=prepared.get("task_evidence"),
             layer=str(prepared.get("layer") or "body"),
+            checking_source=prepared.get("checking_source"),
         )
         result = json.loads(result_json)
     except Exception as e:
@@ -1572,18 +1572,18 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
                         repo_dir=None,
                         goal: str = "",
                         scope: str = "") -> Optional[str]:
-    """Run triad pre-commit review; return a block message or ``None``.
-
-    Assembly and dispatch are two phases (Q25=A): callers that need admission
-    (``run_parallel_review``) prepare BOTH gate packets before dispatching
-    either; this wrapper keeps the single-call contract for everyone else."""
+    """Prepare both question packets before dispatch; return a block or ``None``."""
     prepared, early_result, exited = _prepare_unified_review(
         ctx, commit_message, review_rebuttal=review_rebuttal,
         repo_dir=repo_dir, goal=goal, scope=scope,
     )
     if exited:
         return early_result
-    return _dispatch_unified_review(ctx, commit_message, prepared)
+    from ouroboros.review_history_view import queue_review_history_context
+    try:
+        return _dispatch_unified_review(ctx, commit_message, prepared)
+    finally:
+        queue_review_history_context(ctx, family="commit", repo_root=repo_dir or ctx.repo_dir)
 
 
 # v7next F2.3a (D06): moved spans live in their owner leaves; re-exported

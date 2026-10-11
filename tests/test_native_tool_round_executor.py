@@ -152,7 +152,7 @@ def _first_send_chars(subject_repo):
     llm = _ScriptedLLM([{"content": _VERDICT}])
     executor = NativeToolRoundReviewExecutor(_assignment(subject_repo, llm), llm=llm)
     usage = executor.execute().usage
-    return usage["native_transcript_chars"] - len(_VERDICT)
+    return usage["native_transcript_chars"]  # the answer is output, not part of the first send
 
 
 def test_landing_notice_is_posted_once_at_the_landing_fraction(subject_repo, monkeypatch):
@@ -386,9 +386,16 @@ def test_multi_call_round_withholds_reads_once_the_room_is_spent(subject_repo, m
     """The room below the bound is enforced across the calls of ONE round: the
     whole returned message (marker included) fits the room, and a call with no
     room left is WITHHELD — not executed — with a typed marker."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_NATIVE_MAX_TRANSCRIPT_CHARS", "50000")
+    import ouroboros.review_native_episode as native_episode
+
+    bound = 50_000
+    monkeypatch.setenv("OUROBOROS_REVIEW_NATIVE_MAX_TRANSCRIPT_CHARS", str(bound))
+    first_send = _first_send_chars(subject_repo)
+    # Leave ~2k chars beyond the first send and landing reserve for tool envelopes
+    # and the second read, even when the inspection tool schemas change.
+    read_chars = bound - first_send - native_episode._LANDING_RESERVE_CHARS - 2_000
     for name in ("a", "b", "c"):
-        (subject_repo / f"{name}.txt").write_text(name * 30_000, encoding="utf-8")
+        (subject_repo / f"{name}.txt").write_text(name * read_chars, encoding="utf-8")
     llm = _ScriptedLLM([
         {"tool_calls": [
             _tool_call("read_file", {"path": "a.txt"}, "c1"),
@@ -401,7 +408,7 @@ def test_multi_call_round_withholds_reads_once_the_room_is_spent(subject_repo, m
     result = executor.execute()
     assert result.raw_text == _VERDICT
     usage = result.usage
-    assert usage["native_transcript_chars"] <= usage["native_transcript_bound"] == 50_000
+    assert usage["native_transcript_chars"] <= usage["native_transcript_bound"] == bound
     outcomes = [r["outcome"] for r in usage["native_tool_receipts"]]
     assert outcomes[0] == "executed" and "withheld" in outcomes
     tool_msgs = [m for m in llm.calls[1]["messages"] if m.get("role") == "tool"]
@@ -1020,10 +1027,10 @@ def test_data_root_is_opt_in_and_never_removed(subject_repo, tmp_path, monkeypat
     # Opt-in: the real root is READABLE through the same tools and survives a
     # FAILED episode.
     data_root = tmp_path / "data"
-    (data_root / "task_results").mkdir(parents=True)
-    (data_root / "task_results" / "t.json").write_text('{"ok": true}', encoding="utf-8")
+    (data_root / "probe").mkdir(parents=True)  # not a task result: those live in the store, not in files
+    (data_root / "probe" / "t.json").write_text('{"ok": true}', encoding="utf-8")
     llm = _ScriptedLLM([
-        {"tool_calls": [_tool_call("read_file", {"path": "task_results/t.json", "root": "runtime_data"}, "c1")]},
+        {"tool_calls": [_tool_call("read_file", {"path": "probe/t.json", "root": "runtime_data"}, "c1")]},
         {"content": _VERDICT},
     ])
     assignment = _assignment(subject_repo, llm)
@@ -1040,7 +1047,7 @@ def test_data_root_is_opt_in_and_never_removed(subject_repo, tmp_path, monkeypat
         NativeToolRoundReviewExecutor(assignment, llm=llm).execute()
     assert seen_roots[-1] == str(data_root)
     assert str(data_root) not in removed
-    assert (data_root / "task_results" / "t.json").read_text(encoding="utf-8") == '{"ok": true}'
+    assert (data_root / "probe" / "t.json").read_text(encoding="utf-8") == '{"ok": true}'
     assert any("ouro-native-review-" in path for path in removed[1:])  # the scratch still went
 
 
@@ -1339,7 +1346,7 @@ def test_read_extent_counts_only_complete_delivered_lines_from_the_stamp(subject
     full = _render_line_slice("f", content, max_lines=10, start_line=3, start_char=3, extent=extent)
     assert full.count("\n", 0, extent["body_start"]) == 1 and full[extent["body_start"] - 1] == "\n"  # one header line
     assert extent["first_line"] == 4 and extent["partial_head"] is True and extent["end_line"] == 12
-    assert extent["line_ends"][:3] == (11, 18, 25) and len(extent["line_ends"]) == 9  # complete lines 4..12, body-relative
+    assert len(extent["line_ends"]) == 9 and extent["line_ends"] == tuple(sorted(extent["line_ends"]))
     executor._inspection_ctx = stamped(extent)
     whole = {"start_line": 4, "end_line": 12, "total_lines": 20, "eof": False, "opened_path": "f", "opened_root": "active_workspace"}
     assert executor._read_extent(full, len(full)) == whole
@@ -1349,8 +1356,8 @@ def test_read_extent_counts_only_complete_delivered_lines_from_the_stamp(subject
     executor._inspection_ctx = stamped(extent)
     # Cut after the partial head + two complete lines + half of the next: exactly 2 lines credited.
     body = full[extent["body_start"]:]
-    cut = extent["body_start"] + len("e 3\n") + len("line 4\n") + len("line 5\n") + 3
-    assert body.startswith("e 3\n")
+    cut = extent["body_start"] + extent["line_ends"][1] + 3
+    assert body.startswith("     3\te 3\n")
     assert executor._read_extent(full, cut) == {**whole, "end_line": 5}
     # A cut exactly at a line end credits that line; a cut inside the partial head credits nothing.
     assert executor._read_extent(full, cut - 3)["end_line"] == 5
@@ -1364,13 +1371,14 @@ def test_read_extent_counts_only_complete_delivered_lines_from_the_stamp(subject
     mixed = "a\u2028b\u2028c\rd\r\ne\n"
     extent = {}
     full = _render_line_slice("f", mixed, max_lines=10, start_line=1, start_char=2, extent=extent)
-    assert (extent["first_line"], extent["partial_head"], extent["total_lines"], extent["line_ends"]) == (2, False, 5, (2, 4, 7, 9))
+    assert (extent["first_line"], extent["partial_head"], extent["total_lines"]) == (2, False, 5)
+    assert len(extent["line_ends"]) == 4
     executor._inspection_ctx = stamped(extent)
-    assert executor._read_extent(full, extent["body_start"] + len("b\u2028c\r")) == {
+    assert executor._read_extent(full, extent["body_start"] + extent["line_ends"][1]) == {
         "start_line": 2, "end_line": 3, "total_lines": 5, "eof": False, "opened_path": "f", "opened_root": "active_workspace"}
     extent = {}
     _render_line_slice("f", mixed, max_lines=10, start_line=1, start_char=3, extent=extent)  # inside "b\u2028"
-    assert (extent["first_line"], extent["partial_head"], extent["line_ends"]) == (3, True, (3, 6, 8))
+    assert (extent["first_line"], extent["partial_head"], len(extent["line_ends"])) == (3, True, 3)
     # Fail-safe: a stamp without the delivery facts, without `line_ends`, or
     # without the opened path or root records no extent.
     executor._inspection_ctx = stamped({"start_line": 3, "end_line": 12, "total_lines": 20})

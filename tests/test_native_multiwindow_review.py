@@ -41,7 +41,14 @@ class ContractReviewer:
         tools = [m for m in messages if m.get("role") == "tool"]
         response = tools[-1]["content"] if tools else None
         if self.stage in {"writer", "reader"} and response is not None and self.cursor:
-            body = response.partition("\n")[2].partition("\n⚠️ RESULT TRUNCATED:")[0]
+            from ouroboros.tools.core_file_tools import _render_line_slice, delivered_source_prefix
+
+            view = {}
+            _render_line_slice("source", (self.repo / f"{self.stage}.py").read_text(),
+                               start_line=1, max_lines=3, start_char=len(self.buffer), extent=view)
+            view["body_start"] = response.find("\n") + 1
+            visible = response.partition("\n⚠️ RESULT TRUNCATED:")[0]
+            body = delivered_source_prefix(view, visible, len(visible))
             assert body
             self.buffer += body
             if "RESULT TRUNCATED:" not in response:
@@ -71,10 +78,15 @@ class ContractReviewer:
                             "recommendation": "Use matching producer and consumer units."})
                 return {"content": json.dumps(self.findings)}, {"cost": 0.0}
         if self.stage == "inspect":
-            inspected = json.loads(response)
+            # This actor only needs the revision to replace all completed units.
+            # The richer unit/source inventory may be a disclosed partial JSON
+            # view under this deliberately tiny 8K result cap. Decode the exact
+            # visible revision field, not the incomplete object or unseen units.
+            revision, _ = json.JSONDecoder().raw_decode(
+                response.split('"view_revision":', 1)[1].lstrip())
             self.stage = "apply"
             note, self.note = self.note, None
-            return self._call("compact_context", {"expected_view_revision": inspected["view_revision"],
+            return self._call("compact_context", {"expected_view_revision": revision,
                                                     "working_note": note, "keep_unit_ids": []})
         if self.stage == "apply":
             # No producer source, table or witness remains in the fake model.
@@ -102,11 +114,13 @@ def test_native_review_reads_beyond_one_window_and_computes_cross_file_finding(t
     reader = "FROM_WIRE = " + repr(table) + "\ndef decode(message): return message['ttl'] / FROM_WIRE[message['route']]\n"
     (repo / "writer.py").write_text(writer)
     (repo / "reader.py").write_text(reader)
-    bound = 120_000
+    # Include the expanded inspection schemas; the corpus still needs two views.
+    bound = 140_000
     assert len(writer) + len(reader) > bound
     monkeypatch.setattr(native, "review_native_transcript_bound", lambda *a, **k: bound)
     monkeypatch.setattr(native, "_EPISODE_TOOL_RESULT_CHAR_CAP", 8000)
     llm = ContractReviewer()
+    llm.repo = repo
     executor = _native(repo, data, llm, [_source(repo / "writer.py"), _source(repo / "reader.py")])
     result = executor.execute()
     findings = json.loads(result.raw_text)

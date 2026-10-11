@@ -268,13 +268,16 @@ class ComposedPanel:
 
 
 def _effort_facts(order: str, seats: Sequence[Any], own: Dict[str, str]) -> Dict[str, Any]:
-    """``reviewer_effort`` as this wave's ORDER (``plan_task``'s rule): it outranks every
-    seat's own effort but a compound route's, which keeps the effort it encodes
-    (``declared_effort`` names where the order applied)."""
+    """``reviewer_effort`` as this wave's ORDER (``plan_task``'s rule, ``row_effort``): it
+    decides every Auto seat, clamped into the owner's effort range; a pinned seat keeps its
+    pin outside Cyber Pro and a model-named seat always keeps its level (``declared_effort``
+    names where the order applied; ``weaker_than_configured`` compares the EFFECTIVE level)."""
+    by_id = {slot.slot_id: slot for slot, _parts, _extra in seats}
     applied = [slot.slot_id for slot, _parts, _extra in seats if order and slot.declared_effort]
     return {"order": order, "applied": applied,
             "not_applied": [slot.slot_id for slot, _parts, _extra in seats if order and not slot.declared_effort],
-            "weaker_than_configured": [seat for seat in applied if effort_rank(order) < effort_rank(own.get(seat, ""))]}
+            "weaker_than_configured": [seat for seat in applied
+                                       if effort_rank(by_id[seat].effort) < effort_rank(own.get(seat, ""))]}
 
 
 def compose_panel(request: ReviewChangeRequest, *, adds_only: bool) -> ComposedPanel:
@@ -404,13 +407,13 @@ def _wave_label(request: ReviewChangeRequest, root: pathlib.Path) -> str:
 
 
 def _prepare_wave(ctx: ToolContext, request: ReviewChangeRequest, frozen: Any, panel: ComposedPanel, *,
-                  root: pathlib.Path, fact: Any, layer: str) -> _Wave:
+                  root: pathlib.Path, fact: Any, layer: str, rejoin: Any = None) -> _Wave:
     """Every identity of this wave, computed under its own panel."""
     from ouroboros.tools.commit_gate import commit_review_contract_fingerprint, compute_rebuttal_sha256, resolve_root_task_id
 
     rules = checklist_fingerprint(layer)
     enforcement = str(get_review_enforcement() or "")
-    contract_fp = str(commit_review_contract_fingerprint() or "")
+    contract_fp = str(rejoin.review_contract_fingerprint or "") if rejoin is not None else str(commit_review_contract_fingerprint() or "")
     rebuttal_sha = str(compute_rebuttal_sha256(request.review_rebuttal) or "")
     # Identity (b), the logical round, enters both the reuse key (a) and the custody
     # retry key (c): a new rebuttal/question/brief/revision pair is a new wave and a
@@ -442,6 +445,7 @@ _CTX_FIELDS = (
     "_review_paid_stamp", "_review_reserved_roster", "_review_reserved_operations",
     "_review_pending_invocation_checkpoint", "_last_review_slot_executions", "_pending_review_attempt",
     "_commit_preflight", "_commit_review_panel",
+    "_review_dispute_history", "_review_dispute_input",
 )
 
 
@@ -459,6 +463,7 @@ def _wave_context(ctx: ToolContext, wave: _Wave) -> Iterator[None]:
         ctx._current_review_rebuttal_sha256 = wave.rebuttal_sha
         ctx._current_review_contract_fingerprint = wave.contract_fp
         ctx._review_history, ctx._review_iteration_count, ctx._coupling_review_history = [], 0, {}
+        ctx._review_dispute_history, ctx._review_dispute_input = None, None
         yield
     finally:
         for name, value in saved.items():
@@ -499,6 +504,7 @@ def _dispatch(ctx: ToolContext, wave: _Wave) -> Dict[str, Any]:
 
 def _forensic(ctx: ToolContext) -> Dict[str, Any]:
     return {
+        "dispute_input": getattr(ctx, "_review_dispute_input", None),
         "structured": dict(getattr(ctx, "_last_review_structured", {}) or {}),
         "triad_raw": [row for row in (getattr(ctx, "_last_triad_raw_results", []) or []) if isinstance(row, dict)],
         "degraded_reasons": [str(item) for item in (getattr(ctx, "_review_degraded_reasons", []) or [])],
@@ -595,6 +601,7 @@ def wave_facts(ctx: ToolContext, wave: _Wave, *, outcome: Dict[str, Any], forens
         "goal": wave.request.goal, "scope": wave.request.scope, "author_questions": list(wave.request.author_questions),
         "binding_fingerprint": str(wave.frozen.diff_sha), "review_contract_fingerprint": wave.contract_fp,
         "rebuttal_sha256": wave.rebuttal_sha, "enforcement": wave.enforcement, "mode": mode,
+        "dispute_input": forensic.get("dispute_input"),
         "enforcement_blocks": wave.layer == "body" and bool(review_enforcement_blocks(wave.enforcement)),
         "structured": structured, "slot_executions": executions, "triad_raw": triad_raw,
         "blocked": bool(outcome.get("blocked")), "block_reason": str(outcome.get("block_reason") or ""),
@@ -693,6 +700,8 @@ def _settle(ctx: ToolContext, wave: _Wave, facts: Dict[str, Any], outcome: Dict[
     settle_attempt(ctx, wave, outcome, payload, facts)
     result = review_result(payload, reused=False)
     result["durable"] = durable
+    from ouroboros.review_history_view import queue_review_history_context
+    queue_review_history_context(ctx, family="commit", repo_root=wave.root)
     return result
 
 
@@ -899,8 +908,6 @@ def run_review_change(ctx: ToolContext, **args: Any) -> Dict[str, Any]:
     governance = _governance_repo(ctx)
     fact = body_fact(root, system_repo=governance, data_dir=ledger_root(ctx), treat_as_body=request.treat_as_body)
     layer = layer_for(fact)
-    panel = compose_panel(request, adds_only=request.surface == SURFACE and layer == "body"
-                          and not runtime_mode_at_least(get_runtime_mode(), "cyber_pro"))
     spec = ReviewSubjectSpec(root_kind=root_kind, root=str(root), kind=request.subject, base=request.base,
                              head=request.head, governance_root=str(governance), surface=request.surface,
                              body_fact=str(fact.body), body_how=str(fact.how), layer=layer)
@@ -916,29 +923,35 @@ def run_review_change(ctx: ToolContext, **args: Any) -> Dict[str, Any]:
     frozen_subject = (contextlib.nullcontext(freeze_subject(ctx, spec)) if is_gate_subject(spec)
                       else isolated_checkout(ctx, spec, retain=lambda: retention, token=lambda identity: checkout_token(
                           review_retry_key(identity, round_sha=_round_sha(request, identity)), task_id=task_id)))
-    with frozen_subject as frozen, _panel_in_force(panel):
+    with frozen_subject as frozen:
         if not str(getattr(frozen, "diff_text", "") or "").strip():
             raise ReviewChangeArgumentError(f"subject={request.subject} of {root} has no change to review")
-        wave = _prepare_wave(ctx, request, frozen, panel, root=root, fact=fact, layer=layer)
-        # This task's open operation of the round is collected first, not paid for again
-        # and not answered by another task's settled record of the same round: its paid
-        # seats settle into its own record. Only then may a settled record be reused, and
-        # the cycle ceiling meets only a NEW paid wave, so it never strands an answer.
-        rejoin = pending_round_attempt(ctx, root=wave.root, retry_key=wave.retry_key)
+        # Locate an already-paid round before consulting mutable pool settings.
+        # An absent or changed row cannot substitute a new operation for this one.
+        rejoin = pending_round_attempt(ctx, root=root,
+            retry_key=review_retry_key(frozen, round_sha=_round_sha(request, frozen)))
         if rejoin is not None:
-            wave = dataclasses.replace(wave, rejoin=rejoin, record_id=str(rejoin.review_record_id or wave.record_id))
+            from ouroboros.tools.review_change_custody import recorded_change_panel
+            panel = recorded_change_panel(ctx, rejoin)
         else:
-            prior = reuse_or_none(ledger_root(ctx), wave.reuse_key, questions=request.author_questions)
-            if prior is not None:
-                return review_result(prior["record"], reused=True)
-            exhausted = _cycles_exhausted(ctx, wave)
-            if exhausted is not None:
-                return _refuse_exhausted(ctx, wave, exhausted)
-        with _wave_context(ctx, wave):
-            outcome = _dispatch(ctx, wave)
-            forensic = _forensic(ctx)
-            retention.update(_checkout_custody(ctx, forensic))
-        return _settle(ctx, wave, wave_facts(ctx, wave, outcome=outcome, forensic=forensic), outcome, retention)
+            panel = compose_panel(request, adds_only=request.surface == SURFACE and layer == "body"
+                                  and not runtime_mode_at_least(get_runtime_mode(), "cyber_pro"))
+        with _panel_in_force(panel):
+            wave = _prepare_wave(ctx, request, frozen, panel, root=root, fact=fact, layer=layer, rejoin=rejoin)
+            if rejoin is not None:
+                wave = dataclasses.replace(wave, rejoin=rejoin, record_id=str(rejoin.review_record_id or wave.record_id))
+            else:
+                prior = reuse_or_none(ledger_root(ctx), wave.reuse_key, questions=request.author_questions)
+                if prior is not None:
+                    return review_result(prior["record"], reused=True)
+                exhausted = _cycles_exhausted(ctx, wave)
+                if exhausted is not None:
+                    return _refuse_exhausted(ctx, wave, exhausted)
+            with _wave_context(ctx, wave):
+                outcome = _dispatch(ctx, wave)
+                forensic = _forensic(ctx)
+                retention.update(_checkout_custody(ctx, forensic))
+            return _settle(ctx, wave, wave_facts(ctx, wave, outcome=outcome, forensic=forensic), outcome, retention)
 
 
 def _handle_review_change(

@@ -219,7 +219,7 @@ def test_data_read_supports_line_ranges(tmp_path):
     result = _data_read(ctx, "skills/external/demo/notes.txt", start_line=2, max_lines=2)
 
     assert "lines 2–3 of 4" in result
-    assert "two\nthree\n" in result
+    assert "     2\ttwo\n     3\tthree\n" in result
     assert "one" not in result
 
 
@@ -897,6 +897,9 @@ def test_every_settings_writer_routes_through_the_shared_prologue():
 
     # (module, function) -> why it may write settings.json without the prologue
     exempt = {
+        ("ouroboros/utils.py", "atomic_write_json"):
+            "generic atomic serializer: the settings filename selects indentation only; "
+            "semantic settings writers enforce the prologue before calling this primitive.",
         ("ouroboros/context_mode_compat.py", "normalize_and_persist_context_mode_compat"):
             "one-window startup migration: while the settings lock is held, atomically rewrites "
             "the raw document with only its context compatibility pair changed, in serializer "

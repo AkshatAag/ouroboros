@@ -651,7 +651,10 @@ def test_frontend_evolution_and_consciousness_controls_are_present():
     assert consciousness["settingsToggleId"] == "s-local-consciousness"
     assert "modelRolesHost('settings-model-roles')" in settings_ui
     assert "modelRoles.load(s," in settings
-    assert "OUROBOROS_EFFORT_CONSCIOUSNESS', ''" in settings  # empty = the Task / Chat effort
+    # The role effort keys are retired: evolution and wakes start at the top of the owner's
+    # effort range, which only the composer's Effort control shows and edits.
+    assert "OUROBOROS_EFFORT_CONSCIOUSNESS" not in settings and "OUROBOROS_EFFORT_EVOLUTION" not in settings
+    assert "data-effort-range-summary" not in settings_ui and "Reasoning Effort" not in settings_ui
 
 
 def test_evolution_checkpoint_records_and_reads(tmp_path):
@@ -1056,8 +1059,8 @@ def test_enqueue_evolution_omits_duplicate_cycle_message(tmp_path, monkeypatch):
 
     assert len(pending) == 1
     assert pending[0]["type"] == "evolution"
-    # The generic "... task started." lifecycle message is the only start bubble;
-    # the redundant "Evolution #N: <id>" enqueue bubble is gone.
+    # The task's own card is its start (no standalone bubble); the redundant
+    # "Evolution #N: <id>" enqueue bubble is gone.
     assert not any("Evolution #" in m for m in sent)
 
 

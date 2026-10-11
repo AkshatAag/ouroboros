@@ -13,6 +13,7 @@ import pytest
 import ouroboros.tools.plan_review as pr
 from tests.test_plan_review_engine import CLEAN, DECK_SPEC, _call, _control, _finding, _slots, _state, _user_text
 from tests.test_plan_review_engine import harness as _engine_harness  # the shared fixture, re-exported below
+from tests._store_shared import seed_result, unreadable_result
 
 harness = _engine_harness  # noqa: F811 - pytest registers the fixture under this module's namespace
 
@@ -280,14 +281,12 @@ def test_need_evidence_memory_is_bounded_per_task(harness):
 
 
 
-def test_unreadable_state_refuses_the_wave_instead_of_dropping_reviewer_requests(harness):
+def test_unreadable_state_refuses_the_wave_instead_of_dropping_reviewer_requests(harness, monkeypatch):
     """W3 (delta review S-4): the reviewers' recorded requests live in the durable state; if it
     cannot be read the wave is REFUSED (typed, no reviewer called) — never paid without them."""
-    from ouroboros.task_results import task_result_path
-
     sub = harness.install({"s1": CLEAN, "s2": CLEAN, "s3": CLEAN})
-    path = task_result_path(harness.drive, "task-1", create=True)
-    path.write_text("{not json", encoding="utf-8")
+    seed_result(harness.drive, "task-1", {"task_id": "task-1", "status": "running"})
+    unreadable_result(monkeypatch, "task-1")
     out = _call(harness.make_ctx())
     assert out.startswith("ERROR: PLAN_REVIEW_STATE_INVALID")
     assert sub.calls == []
@@ -508,9 +507,8 @@ def test_worst_case_state_successor_receives_the_current_decision_core(tmp_path)
         assert decision_fact in preview
 
 
-def test_disposition_inputs_are_bounded_at_entry(harness):
-    """R9-4: a disposition is bounded like the findings it answers — the rationale text and the
-    item count — so a $0 closure can always be persisted."""
+def test_disposition_identity_and_count_are_bounded_but_rationale_is_exact(harness):
+    """Identity/count bounds stay; the full authored rationale survives free closure."""
     from ouroboros.tools import plan_spec
 
     note = json.dumps([_finding("n1", "need_evidence", locator="notes.md")])
@@ -526,7 +524,10 @@ def test_disposition_inputs_are_bounded_at_entry(harness):
         {"finding_id": "s1:n1", "decision": "accept", "rationale": huge}]})
     assert _control(out) == {"outcome": "GREEN", "closed": True}
     stored = _state(harness)["waves"][-1]["dispositions"][0]
-    assert len(stored["rationale"]) < plan_spec.MAX_FINDING_TEXT_CHARS + 200 and "truncat" in stored["rationale"].lower()
+    assert stored["rationale"] == huge
+    from ouroboros.tools.plan_review_artifacts import read_wave
+    exact = read_wave(harness.drive, ctx.task_id, _state(harness)["waves"][-1]["wave_artifact"])
+    assert exact["dispositions"][0]["rationale"] == huge
     # R10-1: `decision` is enum-like and bounded at entry — identity keys are never wide carriers
     huge_decision = pr._handle_plan_task(ctx, review_disposition={"review_fingerprint": fp, "items": [
         {"finding_id": "s1:n1", "decision": "accept" + "x" * 5_000, "rationale": "ok"}]})
@@ -839,7 +840,11 @@ def test_reviewer_question_holds_the_wave_until_a_free_disposition_and_its_answe
     assert len(sub.calls) == 2
     user2 = _user_text(sub.calls[1]["request"].messages[1]["content"])
     assert "The board asked for five." in user2 and "s1:q1" in user2
-    assert "summaries bounded to 400 chars" in user2  # the carry-forward cut is named where it applies
+    assert "complete recorded dispute" in user2
+    assert "summaries bounded to 400 chars" not in user2
+    history = json.loads(user2.split("### Dispute history\n\n```json\n", 1)[1].split("\n```", 1)[0])
+    assert any(row["finding_id"] == "s1:q1" and "The board asked for five." in str(row["reason"])
+               for row in history["decision_rows"])
 
 
 def test_escalate_is_available_wherever_planning_runs():

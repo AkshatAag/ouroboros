@@ -384,8 +384,8 @@ def build_coupling_part(
 
 ### Your role in this part
 
-You are the whole-repository reviewer, and you REACH the repository with your own
-read-only tools. Part 1 covers the change itself line by line; this part covers
+You are the whole-repository reviewer: REACH the subject through your available
+tools, using the assigned checking copy if your seat can write. Part 1 covers the change; this part covers
 what the change is COUPLED to: cross-module contracts, forgotten touchpoints,
 hidden regressions, prompt/doc sync, architecture fit, and end-to-end intent
 completeness. For each finding name the exact file, symbol, test, prompt, doc,
@@ -407,8 +407,7 @@ A missing entry means the question was not reviewed.
 - Do not return duplicate PASS entries, and never PASS a question that also has a
   FAIL — the concrete FAIL is authoritative.
 - Severity: critical requires a concrete current artifact and a required change to
-  this diff; otherwise advisory. Coupling affects only unchanged code outside the
-  diff. {body_note}
+  this diff; otherwise advisory. {body_note}
 - If an open obligation in the coupling history below already names an
   `obligation_id` for a root cause, reuse that exact id; never invent a new id for
   the same root cause.

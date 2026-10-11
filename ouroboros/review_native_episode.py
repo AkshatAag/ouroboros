@@ -199,7 +199,7 @@ def native_or_packet_attempt_rail(slot: Any, two_send_surface: bool) -> Any:
 # ---------------------------------------------------------------------------
 
 _INSPECTION_TOOL_NAMES = (
-    "read_file", "list_files", "search_code", "query_code",
+    "read_file", "list_files", "search_code", "query_code", "query_data",
     "vcs_status", "vcs_diff", "compact_context",
 )
 
@@ -207,7 +207,7 @@ _NATIVE_REVIEW_INSTRUCTIONS = (
     "You are an independent Ouroboros reviewer running a bounded read-only "
     "inspection episode. Retrieve the evidence yourself with the tools you are "
     "given inside the repository root — read_file, list_files, search_code, "
-    "query_code, vcs_status, vcs_diff and compact_context. You cannot "
+    "query_code, query_data, vcs_status, vcs_diff and compact_context. You cannot "
     "modify anything and have no shell. Read LARGE files in bounded chunks "
     "(read_file supports start_line/max_lines and start_char for long lines) instead of requesting a whole large "
     "document at once. The working window has a measured send bound; the full "
@@ -306,7 +306,7 @@ def inspection_registry(root: str, drive_root: Any, task_id: str = "") -> tuple[
     Reuses the existing capability machinery wholesale instead of a new
     allowlist mechanism: the ``local_readonly_subagent`` constraint gives
     the read-only operation/root matrix, ``disabled_tools`` trims its
-    broader name allowlist down to the inspection six, and the resource
+    broader name allowlist down to inspection tools, and the resource
     contract keeps extension/MCP discovery off. ``registry._ctx`` is
     per-instance, so the worker's own registry/context is never touched.
     ``drive_root`` is the data plane the inspection tools may read: an
@@ -344,6 +344,7 @@ def inspection_registry(root: str, drive_root: Any, task_id: str = "") -> tuple[
         ctx.task_metadata = {"root_task_id": scope.root_task_id or scope.task_id,
                              "budget_drive_root": str(scope.drive_root or drive_root)}
         ctx.task_lifecycle_bound = True
+    ctx.task_metadata["native_data_root"] = str(drive_root)
     registry.set_context(ctx)
     schemas = [schema for schema in (registry.get_schema_by_name(name) for name in _INSPECTION_TOOL_NAMES) if schema]
     if not any(s["function"]["name"] == "compact_context" for s in schemas):
@@ -402,6 +403,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         self._raw_transcript: Optional[str] = None
         self._episode_usage: Dict[str, Any] = {}
         self._tool_receipts: List[Dict[str, Any]] = []
+        self._pending_staged_reads: list = []
         self._inspection_ctx: Any = None  # the registry's context: the reader stamps `last_read_view` on it
         self._tool_calls_total = 0
         self._rounds_used = 0
@@ -462,6 +464,10 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         record_context_view(self._inspection_ctx, messages, schemas)
         for receipt in self._tool_receipts:
             receipt["delivered"] = True
+        from ouroboros.delegate_output import acknowledge_staged_output_delivery
+        for execution, projected, shown in self._pending_staged_reads:
+            acknowledge_staged_output_delivery(self._inspection_ctx, execution, projected, shown_ranges=shown)
+        self._pending_staged_reads.clear()
 
     def _apply_working_view(self, messages: list, schemas: list, round_idx: int) -> bool:
         from ouroboros.context_budget import ContextReclaimRequest
@@ -1063,8 +1069,13 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         remaining = dispatch_deadline_remaining_sec()
         if remaining is not None:
             timeout = min(timeout, max(0.0, remaining))
+        def execute():
+            from ouroboros.delegate_output import staged_read_delivery_scope
+            with staged_read_delivery_scope():
+                return registry.execute_result(name, args)
+
         with abandoned_on_timeout(timeout) as submit:
-            future = submit(registry.execute, name, args)
+            future = submit(execute)
             try:
                 return future_result(future, timeout)
             except (TimeoutError, concurrent.futures.TimeoutError):
@@ -1099,6 +1110,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         args: Optional[Dict[str, Any]] = None
         outcome = "executed"
         extent: Dict[str, Any] = {}
+        typed_result = None
         source_gap = ""
         source_ref = {}
         verdict = validation_by_id.get(call_id)
@@ -1149,7 +1161,10 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                         else:
                             result = _compact_context(self._inspection_ctx, **args)
                     else:
-                        result = str(self._execute_bounded(registry, name, args))
+                        from ouroboros.tools.tool_result import ToolResult
+                        returned = self._execute_bounded(registry, name, args)
+                        typed_result = returned if isinstance(returned, ToolResult) else None
+                        result = typed_result.text if typed_result is not None else str(returned)
                 except _ToolAbandoned as exc:
                     # The worker may still settle; its value is never read. The
                     # receipt names the gap, the reviewer gets the host's own
@@ -1199,6 +1214,9 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                     # loop reduced after the last build: the receipt credits
                     # exactly what the reviewer received.
                     extent = self._read_extent(full, sent)
+                    if typed_result is not None and typed_result.meta.get("read_view"):
+                        self._pending_staged_reads.append(({"result": full, "tool_result": typed_result},
+                                                           {"result": result}, [[0, sent]]))
         # Host-observed evidence (bounded): which artifacts THIS episode
         # actually opened — disclosure, never a claim of full-surface coverage.
         self._tool_calls_total += 1
@@ -1283,11 +1301,14 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 or type(view["body_start"]) is not int or not 0 <= body_start <= len(full)
                 or not view["opened_path"] or not view["opened_root"]
                 or not 0 <= view["source_start_char"] <= view["source_end_char"] <= view["complete_chars"]
-                or view["source_end_char"] - view["source_start_char"] != view["body_chars"]
-                or body_start + view["body_chars"] > len(full)):
+                or view["source_end_char"] - view["source_start_char"] != view["body_chars"]):
             return result
-        delivered_chars = min(view["body_chars"], max(0, shown - body_start))
-        delivered = full[body_start:body_start + delivered_chars]
+        from ouroboros.tools.core_file_tools import delivered_source_prefix, display_source_segments
+
+        if display_source_segments(view, full) is None:  # not this read's numbered display
+            return result
+        delivered = delivered_source_prefix(view, full, shown)
+        delivered_chars = len(delivered)
         result.update({k: view[k] for k in (*source_hashes, "source_bytes", "complete_chars", "range_basis")})
         result.update({"source_start_char": view["source_start_char"],
                        "source_end_char": view["source_start_char"] + delivered_chars,

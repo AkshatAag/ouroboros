@@ -12,7 +12,7 @@ it navigates with, and the coupling history of this subject), closed by
 A ``coupling_only`` seat receives the same brief and is told to answer Part 2
 alone. The transport decides only how the seat reads what the brief does not
 carry: an ``api_chat`` row runs a bounded native inspection episode, an
-``agent_session`` row a delegated read-only session.
+``agent_session`` row a delegated session with its configured technical rights.
 
 The brief carries
 
@@ -52,6 +52,7 @@ from ouroboros.tools.review_helpers import (
     build_goal_section,
     build_rebuttal_section,
     build_scope_section,
+    format_prompt_code_block,
     format_review_history_entry,
     load_checklist_section,
     review_history_with_obligations,
@@ -105,7 +106,7 @@ class BriefIntent:
     goal: str = ""
     scope: str = ""
     review_rebuttal: str = ""
-    review_history: Optional[list] = None
+    review_history: Optional[list | dict] = None
     coupling_history: Optional[list] = None
     owner_words: str = ""
 
@@ -355,7 +356,7 @@ def _retrieval_slot(brief: BriefInputs, reason: str) -> str:
     subject = brief.managed_subject
     lead = (
         "(not inlined — retrieve the staged change in this repository root yourself, "
-        "with `git diff --cached` when your read-only mode permits commands and by "
+        "with `git diff --cached` when your access permits commands and by "
         f"reading the files when it does not. Host disclosure: {reason})"
     )
     if subject is not None:
@@ -458,8 +459,12 @@ def build_coupling_history_section(coupling_history: Optional[list], history_sec
             parts.append("Advisory findings:")
             for finding in advisory_findings:
                 parts.append(f"- {format_review_history_entry(finding)}")
-        if not critical_findings and not advisory_findings:
+        if entry.get("summary") or not critical_findings and not advisory_findings:
             parts.append(str(entry.get("summary") or "(no summary)"))
+        details = {key: value for key, value in entry.items()
+                   if key not in {"critical_findings", "advisory_findings", "summary"}}
+        if details:
+            parts.append(format_prompt_code_block(json.dumps(details, ensure_ascii=False, indent=2, default=str), "json"))
         rounds.append("\n".join(parts))
     section = (
         "### Prior coupling rounds (your previous Part-2 answers for this subject)\n\n"
@@ -531,7 +536,7 @@ def build_retrieving_brief(
     scope_section = build_scope_section(intent.scope)
     rebuttal_section = build_rebuttal_section(intent.review_rebuttal)
     history_section = review_history_with_obligations(intent.review_history, drive_root=brief.drive_root,
-                                                      repo_root=repo_dir)
+                                                      repo_root=repo_dir, task_id=brief.task_id)
     coupling_history_section = build_coupling_history_section(intent.coupling_history, history_section)
 
     bound = first_send_bound(brief)

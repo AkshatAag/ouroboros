@@ -79,7 +79,7 @@ def owner_paused_only(root: Any, purpose: dict, blocked: list) -> bool:
 
 
 def _receipt(root: Path, debt: dict) -> dict | None:
-    from ouroboros.acceptance_history import historical_receipt_matches
+    from ouroboros.acceptance_history import historical_receipt_matches, host_incident_receipt
     from ouroboros.artifacts import read_actor_source_bytes
     from supervisor.terminal_delivery import terminal_answer_receipts
     import json
@@ -98,7 +98,9 @@ def _receipt(root: Path, debt: dict) -> dict | None:
         if (addressed and all(captured.get(key) == receipt.get(key) for key in ('task_id', 'delivery_id', 'chat_id'))
                 and captured.get('basis') == 'send_handler_returned'
                 and hashlib.sha256(captured['text'].encode()).hexdigest() == delivery['text_sha256']):
-            return receipt
+            # The captured record also proves WHAT was emitted: a host incident
+            # receipt is source-qualified here for legacy debts, never guessed.
+            return {**receipt, 'emitted_host_incident': host_incident_receipt(captured)}
     return None
 
 
@@ -181,6 +183,11 @@ def run_historical_acceptance(ctx: Any, *, task_id: str, debt_id: str,
     receipt = _receipt(root, debt)
     if not receipt:
         return refused('exact_delivery_unconfirmed')
+    if receipt.get('emitted_host_incident'):
+        # A debt recorded before the producer learned this rule: the exact bytes
+        # the owner received are the host's incident receipt, so there is nothing
+        # to accept — automatic and explicit alike, with no history rewrite (#1572).
+        return refused('host_incident_receipt_not_a_delivery')
     purpose = {key: debt[key] for key in ('task_id', 'task_attempt', 'debt_id', 'source_ref', 'delivery', 'accounting_root_task_id')}
     purpose.update(confirmed_delivery={key: receipt[key] for key in ('task_id', 'delivery_id', 'chat_id', 'text_sha256', 'source_ref')},
                    schema_version=1, automatic=automatic, caller_task_id='' if automatic else str(ctx.task_id),
@@ -231,7 +238,8 @@ def _historical_writer_live(root: Path, task_id: str, operation_id: str) -> bool
     from ouroboros.review_operation import task_has_live_review_operation
     from ouroboros.task_results import load_task_result
     from ouroboros.task_status import task_has_live_queue_ownership, queue_snapshot_observation
-    from ouroboros.utils import in_worker_process, read_json_dict
+    from ouroboros.utils import in_worker_process
+    from ouroboros.queue_observation import load_queue_document
     from supervisor import queue as task_queue
     from supervisor.direct_roots import FRAGMENT_NAME
 
@@ -249,7 +257,7 @@ def _historical_writer_live(root: Path, task_id: str, operation_id: str) -> bool
             return False
         # Direct turns do not enter the pooled snapshot. Their existing fragment
         # omits postwork, so absence also needs its terminal phase checkpoint.
-        fragment = read_json_dict(root / FRAGMENT_NAME) or {}
+        fragment = load_queue_document(root, FRAGMENT_NAME.name)
         roots = fragment.get('roots')
         if (not queue_snapshot_observation(fragment)['fresh'] or fragment.get('incomplete') is not False
                 or not isinstance(roots, list) or any(not isinstance(item, dict) for item in roots)):

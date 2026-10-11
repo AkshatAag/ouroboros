@@ -133,14 +133,15 @@ _ROUTE_TO_PROJECT_DESCRIPTION = (
 )
 
 # The new root's starting effort: one optional choice shared by both verbs that mint a
-# root from a conversation. Child actors keep their configured profiles (schedule_subagent).
+# root from a conversation; applied in Cyber Pro only (a root starts at the owner's
+# recommended level otherwise). Child actors decide theirs in schedule_subagent(effort=…).
 _ROOT_EFFORT_PARAM = {"type": "string", "enum": list(EFFORT_SCALE), "description": (
-    "Optional: the reasoning effort the NEW task starts on, chosen for this work (it can still "
-    "switch_model later). Omit for the configured Task default. A request: the route may adapt it.")}
+    "Optional: the reasoning effort the NEW task starts on; applied in Cyber Pro only — otherwise the "
+    "task starts at my human's recommended level and the result says so. Omit for that level.")}
 
 
 _SCHEDULE_SUBAGENT_DESCRIPTION = (
-    "Schedule a live child of Ouroboros; returns task_id. Default READ-ONLY children inspect "
+    "Schedule a live child of Ouroboros; returns task_id. Default native READ-ONLY children inspect "
     "local repo/data/history and web/browser. Each returns findings; apart from knowledge notes, memory marks "
     "and chronicle drafts in its own name, it cannot write local state, commit, enable tools, or run "
     "shell/review/runtime/skills. write_surface selects a MUTATIVE (acting) child; you alone commit "
@@ -153,7 +154,10 @@ _SCHEDULE_SUBAGENT_DESCRIPTION = (
     "tree, inherited by descendants; integrate_subagent_patch verifies their combined files. "
     "genesis gives EACH child a separate empty Git repo under the durable projects root, for a new "
     "game/site/app/Ouroboros or independent best-of-N builds; the project directory IS the deliverable, "
-    "never integrated into this repo. Harness-delegated work uses a private snapshot and integrate_delegated_patch. "
+    "never integrated into this repo. Acting harness work uses a private snapshot and integrate_delegated_patch. "
+    "A non-acting Agent session keeps configured access in an evidence-only private checking copy; "
+    "access='readonly' selects read-only session execution. Its captured changes are retained as evidence, "
+    "not product patches: do not call integrate_delegated_patch to apply or reject them. "
     "Runtime data, including installed skill payloads, is never a write_surface. For skill mutation, "
     "call delegate_start(subagent_id=..., prompt=..., root='skill_payload', bucket=..., skill_name=...) "
     "yourself; children cannot open payload delegation and may only design/review it read-only. "
@@ -307,7 +311,7 @@ def get_tools() -> List[ToolEntry]:
         # cancel_task + peek_task + discard_child_result are registered by ouroboros/tools/join_ledger.py.
         ToolEntry("request_deep_self_review", {
             "name": "request_deep_self_review",
-            "description": "Request a deep self-review of the entire Ouroboros project against the Constitution: review_change(subject=system, surface=system) with one seat — the enabled catalog row you name in `reviewer` (review pool member or not), else the Main model. An API row runs a bounded read-only inspection episode, an agent-session row reads the repository itself; both receive the core memory whitelist inline byte-exact (memory is never receipt-checked). The report goes to chat and memory/deep_review.md, with the surface=system review record linked.",
+            "description": "Request a deep self-review of the entire Ouroboros project against the Constitution: review_change(subject=system, surface=system) with one seat — the enabled catalog row you name in `reviewer` (review pool member or not), else the Main model. An API row runs a bounded read-only inspection episode, an agent-session row uses its configured access (writable sessions run in a private checking copy and retain evidence without applying changes); both receive the core memory whitelist inline byte-exact (memory is never receipt-checked). The report goes to chat and memory/deep_review.md, with the surface=system review record linked.",
             "parameters": {"type": "object", "properties": {
                 "reason": {"type": "string", "description": "Why you want a review (context for the reviewer)"},
                 "reviewer": {"type": "string", "description": "One enabled catalog row by id or handle; empty = the Main model"},
@@ -412,7 +416,7 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4). Leave empty to keep current."},
                 "effort": {"type": "string", "enum": list(EFFORT_SCALE),
-                           "description": "Reasoning effort level (adapted down per route when a model tops out lower). Leave empty to keep current."},
+                           "description": "Reasoning effort for the next round, inside my human's effort range. Main keeps its level outside Cyber Pro (delegate deeper thinking: schedule_subagent(effort=…)); a child, an evolution task or a wake moves inside the range; a pinned or model-named focus keeps its level. Leave empty to keep current."},
                 "primary": {"type": "string", "enum": ["return", "wait"],
                             "description": ("Omit to keep the current route. Return to this turn's primary route: its model, role and account policy "
                                             "(Auto stays Auto) plus the owner's wait-card choice; effort stays. 'return': "
@@ -436,7 +440,7 @@ def get_tools() -> List[ToolEntry]:
         }, _wait_for_task, timeout_sec=7200),
         ToolEntry("wait_tasks", {
             "name": "wait_tasks",
-            "description": "Wait for MULTIPLE subtasks at once and return a compact structural projection per child (task_id, status, accounted_upper_bound_usd, cost_final, child_result_sha256, outcome_axes, result, trace_summary, capability_delta when the child has something to disclose, duplicate_of) — the right tool to ABSORB a batch of independent children you scheduled in one burst. The full per-child envelope stays on disk in task_results/<task_id>.json (child_result_sha256 pins the exact result you saw; get_task_result returns the full result text plus trace/outcome summaries). With mode=any_terminal it returns as soon as the FIRST child finishes (handle it, then call again for the rest) instead of blocking serially. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon so you can steer, review, or override mid-flight, or on an unread message in your own mailbox (reason=owner_mailbox_pending); the ordinary loop then handles delivery and acknowledgement. An id no surface of this tree ever minted (no task result, no queue row, no tree-ledger row) is flagged unknown_task_id — 'not yet registered or never scheduled' — and unknown_task_ids + a compact children_roster of your ACTUAL direct children are attached so you can repair the wait set instead of re-polling phantoms.",
+            "description": "Wait for MULTIPLE subtasks at once and return a compact structural projection per child (task_id, status, accounted_upper_bound_usd, cost_final, child_result_sha256, outcome_axes, result, trace_summary, capability_delta when the child has something to disclose, duplicate_of) — the right tool to ABSORB a batch of independent children you scheduled in one burst. The full per-child envelope stays in the task store (child_result_sha256 pins the exact result you saw; get_task_result returns the full result text plus trace/outcome summaries). With mode=any_terminal it returns as soon as the FIRST child finishes (handle it, then call again for the rest) instead of blocking serially. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon so you can steer, review, or override mid-flight, or on an unread message in your own mailbox (reason=owner_mailbox_pending); the ordinary loop then handles delivery and acknowledgement. An id no surface of this tree ever minted (no task result, no queue row, no tree-ledger row) is flagged unknown_task_id — 'not yet registered or never scheduled' — and unknown_task_ids + a compact children_roster of your ACTUAL direct children are attached so you can repair the wait set instead of re-polling phantoms.",
             "parameters": {"type": "object", "required": ["task_ids"], "properties": {
                 "task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs returned by schedule_subagent."},
                 "known_result_sha256_by_task": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Optional task_id to previously obtained child_result_sha256 map. Matching children omit only result/trace and return result_unchanged plus a full-read reference. Missing or different hashes return the usual complete body/trace. Current status/cost/outcome/capability facts remain; wait timing is unchanged."},
@@ -499,10 +503,10 @@ from ouroboros.tools.control_runtime import (  # noqa: E402, F401 -- intentional
 # v7next F2 (D07): moved spans live in their owner leaves; re-exported here
 # so this facade stays the single import surface for callers and tests.
 from ouroboros.tools.control_subagent_spec import (  # noqa: E402, F401 -- intentional public re-exports
-    RETIRED_SCHEDULE_PARAMS,
     VALID_SUBTASK_MEMORY_MODES,
     _INTERNAL_SCHEDULE_OPTIONS,
     _validated_schedule_fields,
+    requested_child_effort,
     schedule_subagent_param_names,
     schedule_subagent_properties,
 )

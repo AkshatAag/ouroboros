@@ -5,7 +5,7 @@ import { mountDesktopShell } from './desktop_shell.js';
 import { bindEffortSegments, syncEffortSegments, readCustomSecretDraft, collectCustomSecretDraft, paintSettingsFieldErrors, settingsWriteFailure } from './settings_controls.js';
 import { bindLocalModelControls } from './settings_local_model.js';
 import { bindAutostartControl } from './settings_autostart.js';
-import { applyMcpSettings, collectMcpSettings, initMcpSettings, validateMcpSettings } from './mcp_settings.js';
+import { applyMcpSettings, collectMcpSettings, initMcpSettings, mcpDraftSnapshot, validateMcpSettings } from './mcp_settings.js';
 import {
     applySubagentsSettings,
     availableSubagentsPreviewPayload,
@@ -59,9 +59,7 @@ const INPUT_FIELDS = [
     ['s-max-rounds', 'OUROBOROS_MAX_ROUNDS', 'unlimited'], ['s-task-lifetime', 'OUROBOROS_TASK_ABS_CEILING_SEC', 'unlimited'],
 ];
 const VALUE_FIELDS = [
-    // A review's effort is its catalog row's effort; no global review effort is UI-authored.
-    ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'],
-    ['s-effort-consciousness', 'OUROBOROS_EFFORT_CONSCIOUSNESS', ''],
+    // Effort is not a Settings draft: the range is edited in the chat composer alone, and Settings has no effort section.
     ['s-consciousness-autonomy', 'OUROBOROS_CONSCIOUSNESS_AUTONOMY', 'act'],
     ['s-review-enforcement', 'OUROBOROS_REVIEW_ENFORCEMENT', 'advisory'], ['s-task-review-mode', 'OUROBOROS_TASK_REVIEW_MODE', 'auto'], ['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced'],
     // Shared paid-review-cycle cap (plan review / task acceptance / commit gate);
@@ -594,6 +592,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             controls: Array.from(page.querySelectorAll('input[id^="s-"], select[id^="s-"], textarea[id^="s-"], [data-secret-setting], [data-model-role-context]'),
                 (input) => [input.id, input.value, input.checked, input.validity?.badInput || false, input.dataset.forceClear || '']),
             customSecrets: readCustomSecretDraft(page),
+            // MCP header rows, including exact duplicates the saved map would collapse.
+            mcpHeaderRows: mcpDraftSnapshot(),
         });
     }
 
@@ -1442,7 +1442,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                     + 'the current task keeps its existing routes';
             }
             if (data.warnings && data.warnings.length) {
-                statusMsg += ' ⚠️ ' + data.warnings.join(' | ');
+                statusMsg += '. Warnings: ' + data.warnings.join(' | ');
                 statusType = 'warn';
             }
             if (runtimeModeResult?.restart_required) {

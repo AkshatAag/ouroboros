@@ -29,7 +29,7 @@ can run.
 **Owner attestation (skip review for your own or verified official skill).** For
 an external or self-authored skill, and for a hash-verified official
 OuroborosHub payload, the OWNER may skip the expensive LLM review via the
-**⚠️ Skip review** action on the skill card (owner-only
+**Skip review** action on the skill card (owner-only
 `POST /api/owner/skills/{skill}/attest-review`). The deterministic preflight +
 manifest-validation floor STILL runs (an invalid or unsafe payload is refused),
 and official-hub payloads are freshly rechecked against the live catalog before
@@ -1160,7 +1160,12 @@ guidance, not a restriction: legal width-sensitive CSS remains supported by the
 host-owned resize contract. For auto-height modules, the host bootstrap
 suppresses only document-viewport `overflow-y` below the ceiling and releases
 it at the ceiling; horizontal document overflow remains author-controlled and
-reachable.
+reachable. After a `ResizeObserver` notice the bootstrap re-measures and
+toggles in the next animation frame, never inside observer delivery: a layout
+write there can leave a size change undelivered, and the browser's loop error
+would reach the fault channel as a widget script error (WebKit reports
+`Script error.`). An author observer that writes layout in its own callback
+can raise the same error.
 
 #### The in-frame bridge (`window.OuroborosWidget`)
 
