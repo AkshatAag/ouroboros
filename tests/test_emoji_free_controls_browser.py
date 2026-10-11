@@ -194,6 +194,9 @@ def test_settings_cost_warnings_skip_review_and_authored_widget(direct_server_wi
         page.screenshot(path=str(evidence / 'costs-warning.png'))
         page.locator('[data-nav-page="skills"]').click()
         card = page.locator('.skills-card[data-skill="emoji-own"]')
+        hint = card.locator('.skills-lock-hint')
+        assert hint.inner_text().startswith('Locked:')
+        assert hint.evaluate("n => getComputedStyle(n, '::before').content") in ('none', 'normal', '""')
         card.locator('[data-skill-menu-trigger]').click()
         skip = page.locator('.skills-card-menu-dialog[open] .skills-attest-review')
         assert skip.inner_text().strip() == 'Skip review'
@@ -259,4 +262,26 @@ def test_child_progress_uses_actual_producer_live_and_history(
                 assert text not in body, body
             page.screenshot(path=str(evidence / f"child-{phase}.png"))
         (evidence / "producer-frames.json").write_text(json.dumps(frames, ensure_ascii=False, indent=2), encoding="utf-8")
+        assert not errors, errors
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_incident_toast_uses_host_display_without_changing_tone_or_authored_text(direct_server_with_data, request, engine):
+    server = direct_server_with_data
+    with _browser(server, request, engine) as (page, evidence, errors):
+        _open(page, server["url"])
+        raw = "❌ worker process crashed — retained details"
+        for index, (role, narration) in enumerate((("system", False), ("assistant", False), ("system", True))):
+            row = {"type": "chat", "role": role, "narration": narration, "system_type": "worker_failure",
+                   "task_incident": "worker_crash", "toast_once": f"emoji-incident-{index}", "toast_tone": "error",
+                   "content": raw, "chat_id": 1, "ts": f"2026-10-10T18:00:0{index}+00:00"}
+            _emit_ws_frame(page, row)
+            toast = page.locator('#toast-stack .toast').last
+            assert toast.inner_text() == (raw.split(" ", 1)[1] if index == 0 else raw)
+            assert toast.get_attribute('role') == 'alert'
+            assert 'toast-danger' in toast.get_attribute('class')
+            count = page.locator('#toast-stack .toast').count()
+            _emit_ws_frame(page, row)
+            assert page.locator('#toast-stack .toast').count() == count
+        page.screenshot(path=str(evidence / 'host-and-authored-toasts.png'))
         assert not errors, errors

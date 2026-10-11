@@ -4768,12 +4768,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     outline-offset: 2px;
 }
 
-.skills-lock-hint::before {
-    content: '\1F512';
-    font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif;
-    font-size: 11px;
-}
-
 .skills-review-progress {
     display: inline-flex;
     align-items: center;

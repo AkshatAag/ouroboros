@@ -356,3 +356,13 @@ test('a failed exact read is a provisional window that folds once the exact even
     const legacy = { items: [{ activity: windowRow }, { activity: { ...windowRow } }] };
     assert.deepEqual(visible(legacy), [[['same'], 0], [['same'], 0]]);
 });
+
+test('the host problem label translates and escapes without rewriting executor evidence', async () => {
+    const { applyPayload, currentPayload, CODE_PREFIX } = await import('../modules/i18n.js');
+    const prior = currentPayload();
+    try {
+        applyPayload({ language: 'ru', english: false, entries: { [CODE_PREFIX + 'task.delegated.problem']: { text: '<Проблема>' } } });
+        const html = delegatedActivityBodyHtml(delegatedLineView({ activity: burst }));
+        assert.match(html, /chat-delegated-problem">&lt;Проблема&gt;: claude · a01 · Bash: exit 1: 2 failed/);
+    } finally { applyPayload(prior); }
+});

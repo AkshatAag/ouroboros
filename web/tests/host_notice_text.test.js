@@ -56,7 +56,12 @@ test('every table entry names a mark and words a backend producer actually write
             const cut = prefix.indexOf(' ') + 1;
             assert.ok(cut > 1, prefix);
             assert.ok(backend.includes(prefix.slice(0, cut)), `mark of ${JSON.stringify(prefix)}`);
-            assert.ok(backend.includes(prefix.slice(cut).trimEnd()), `words of ${JSON.stringify(prefix)}`);
+            if (type === 'task_started') {
+                const producer = readFileSync(new URL('supervisor/worker_assignment.py', root), 'utf8');
+                assert.ok(producer.includes("emoji = '🧬' if task_type == 'evolution' else '🔎'"));
+                assert.ok(producer.includes('f"{emoji} {task_type.capitalize()} task'));
+                assert.ok(['🧬 Evolution task ', '🔎 Review task '].includes(prefix));
+            } else assert.ok(backend.includes(prefix.slice(cut).trimEnd()), `words of ${JSON.stringify(prefix)}`);
         }
     }
 });
@@ -228,4 +233,15 @@ test('child host progress shares root presentation without changing its raw dedu
         assert.equal(row.fullBody, '⚡ Fallback: host route');
         assert.equal(row.dedupeKey, host.dedupeKey);
     }
+});
+
+test('new warning words use the installed translation memory without translating quoted text', async () => {
+    const { applyPayload, currentPayload, CODE_PREFIX } = await import('../modules/i18n.js');
+    const prior = currentPayload();
+    try {
+        applyPayload({ language: 'ru', english: false, entries: { [CODE_PREFIX + 'task.host.warning']: { text: 'Внимание' } } });
+        const raw = '⚠️ PR #12 merge: quoted 🎉 evidence';
+        assert.equal(hostNoticeDisplayText(raw, 'host_progress'), 'Внимание: PR #12 merge: quoted 🎉 evidence');
+        assert.equal(hostNoticeDisplayText(raw, 'reminder'), raw);
+    } finally { applyPayload(prior); }
 });

@@ -8,6 +8,8 @@
 // mark and its space. Every other row renders as stored: another type, an untyped or
 // pre-typing row, authored words (reminder, skill notice, Project mirrors), a prefix
 // not listed here. Future producer changes must keep this display mapping in sync.
+import { tr } from './i18n.js';
+
 export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     startup_notice: ['♻️ Restored pending queue from snapshot: ', '♻️ Cancelling '],
     command_reply: ['⚠️ Command ignored: ', '✅ Owner chat registered.', '♻️ Restarting.', '⚠️ Restart cancelled: ',
@@ -42,6 +44,8 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     worker_readiness_notice: ['⚠️ Worker checkout sampled after initialization ', '⚠️ Worker slot '],
     // Progress rows: a task card's timeline line (`log_events.summarizeChatLiveEvent`).
     task_scheduled: ['🗓️ Scheduled subagent ', '🗓️ Scheduled task '],
+    task_started: ['🧬 Evolution task ', '🔎 Review task '],
+    task_error: ['⚠️ Error: '],
     cancellation_notice: ['❌ cancel '],
     finalization_notice: ['⏳ Task ', '▶️ Task '],
     skill_review: ['✅ Skill review round ', '⚠️ Skill review round ', '❌ Skill review round ', '⏳ Skill review round '],
@@ -60,7 +64,7 @@ export function hostNoticeDisplayText(text, systemType, shown = text) {
     if (!prefix) return display;
     const mark = prefix.slice(0, prefix.indexOf(' ') + 1);
     // The receipt's leading mark also carries severity; keep that meaning in words.
-    if (prefix === '⚠️ PR #' && display.startsWith(mark)) return `Warning: ${display.slice(mark.length)}`;
+    if (prefix === '⚠️ PR #' && display.startsWith(mark)) return `${tr('task.host.warning', 'Warning')}: ${display.slice(mark.length)}`;
     return display.startsWith(mark) ? display.slice(mark.length) : display;
 }
 
