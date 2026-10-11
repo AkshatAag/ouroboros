@@ -3352,8 +3352,8 @@ textarea.chat-input {
     font-family: inherit;
     outline: none;
     resize: none;
-    /* Grows with its text to this one cap, then scrolls; chat_input_sizing.js picks
-       content sizing, else writes the measured height. */
+    /* Grows with its text or placeholder to this one cap, then scrolls;
+       chat_input_sizing.js picks content sizing, else writes the measured height. */
     height: var(--chat-input-height, auto);
     min-height: 32px;
     max-height: 140px;
@@ -3362,12 +3362,9 @@ textarea.chat-input {
 #chat-input[data-sizing="content"],
 textarea.chat-input[data-sizing="content"] { field-sizing: content; }
 /* A measured box below the cap holds its whole text: a rounded scrollHeight must not
-   leave a sub-pixel scrollbar. An empty field has nothing to scroll either, though
-   WebKit's content sizing leaves the padding out of a wrapped placeholder. */
+   leave a sub-pixel scrollbar. */
 #chat-input[data-sizing="fit"],
-textarea.chat-input[data-sizing="fit"],
-#chat-input:placeholder-shown,
-textarea.chat-input:placeholder-shown { overflow-y: hidden; }
+textarea.chat-input[data-sizing="fit"] { overflow-y: hidden; }
 #chat-input::placeholder,
 textarea.chat-input::placeholder { color: var(--text-muted); }
 

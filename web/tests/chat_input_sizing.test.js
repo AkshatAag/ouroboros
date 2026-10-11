@@ -1,7 +1,8 @@
 // The message field's sizing contract (chat_input_sizing.js): one selected mode for CSS
-// and script, content sizing without height writes, and the measured fallback's cap,
-// box conversion, hidden/reveal, width-only observation, scroll rules and disposal.
-// Real engines, wrapping and scrollbars are checked in tests/test_chat_input_sizing_browser.py.
+// and script, chosen by what the engine's content sizing does with a placeholder; content
+// sizing without height writes; and the measured fallback's cap, box conversion,
+// hidden/reveal, re-measure triggers (unrounded width, fonts, placeholder), scroll rules
+// and disposal. Real engines, wrapping and scrollbars: tests/test_chat_input_sizing_browser.py.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -19,6 +20,8 @@ class Field {
         this.charWidth = CHAR;  // the face's advance; a wider face wraps sooner
         this.computed = { maxHeight: '140px', minHeight: '32px', boxSizing: 'border-box', paddingTop: '5px',
             paddingBottom: '5px', borderTopWidth: '0px', borderBottomWidth: '0px', ...style };
+        // The used border-box width, unrounded; `auto` when the field is not rendered.
+        Object.defineProperty(this.computed, 'width', { get: () => (this.width ? `${this.width}px` : 'auto') });
         this.dataset = {};
         this.value = '';
         this.selectionStart = 0;
@@ -35,9 +38,11 @@ class Field {
     type(value, caret = value.length) { this.value = value; this.selectionStart = this.selectionEnd = caret; }
     get pad() { return parseFloat(this.computed.paddingTop) + parseFloat(this.computed.paddingBottom); }
     get frame() { return parseFloat(this.computed.borderTopWidth) + parseFloat(this.computed.borderBottomWidth); }
-    get clientWidth() { return this.width ? this.width - (this.dataset.sizing === 'capped' ? SCROLLBAR : 0) : 0; }
+    // A whole-pixel clientWidth over a layout width that may be fractional.
+    get innerWidth() { return this.width ? this.width - (this.dataset.sizing === 'capped' ? SCROLLBAR : 0) : 0; }
+    get clientWidth() { return Math.round(this.innerWidth); }
     get rows() {
-        const perLine = Math.max(1, Math.floor((this.clientWidth - 8) / this.charWidth));
+        const perLine = Math.max(1, Math.floor((this.innerWidth - 8) / this.charWidth));
         return this.value.split('\n').reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / perLine)), 0);
     }
     get borderBox() {
@@ -54,16 +59,45 @@ class Field {
     set scrollTop(value) { this._scrollTop = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight)); }
 }
 
-function installEngine({ fieldSizing = false } = {}) {
+/* A probe textarea laid out like an engine's content sizing: `a a` is two 10px lines
+   with 2px padding at either edge. `placeholder` says what that engine does with a
+   placeholder-only field: `text` sizes it like the same text; `webkit` (26) to its lines
+   alone, without padding or max-height. */
+function probeDocument(placeholder = 'text') {
+    const doc = { probes: [], body: { children: new Set(), append: (el) => doc.body.children.add(el) } };
+    doc.createElement = (tag) => {
+        const probe = { tag, value: '', placeholder: '', style: { cssText: '', maxHeight: '' },
+            remove: () => doc.body.children.delete(probe) };
+        Object.defineProperty(probe, 'offsetHeight', { get: () => {
+            assert.ok(doc.body.children.has(probe), 'measured only while in the document');
+            const lines = 2 * 10;
+            const max = parseFloat(probe.style.maxHeight) || Infinity;
+            if (!probe.value && placeholder === 'webkit') return lines;
+            return Math.min(max, lines + 4);
+        } });
+        doc.probes.push(probe);
+        return probe;
+    };
+    return doc;
+}
+
+function installEngine({ fieldSizing = false, placeholder = 'text', fontsStatus = 'loaded' } = {}) {
     const prior = { CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver, getComputedStyle: globalThis.getComputedStyle,
         requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame,
-        document: globalThis.document };
+        document: globalThis.document, MutationObserver: globalThis.MutationObserver };
     const fontListeners = new Set();
-    globalThis.document = { fonts: {
+    globalThis.document = Object.assign(probeDocument(placeholder), { fonts: {
+        status: fontsStatus,
         ready: Promise.resolve(),
         addEventListener: (type, fn) => type === 'loading' && fontListeners.add(fn),
         removeEventListener: (type, fn) => type === 'loading' && fontListeners.delete(fn),
-    } };
+    } });
+    const mutations = [];
+    globalThis.MutationObserver = class {
+        constructor(callback) { this.callback = callback; this.targets = []; mutations.push(this); }
+        observe(target, options) { this.targets.push([target, options]); }
+        disconnect() { this.targets = []; this.disconnected = true; }
+    };
     const observers = [];
     const frames = new Map();
     let nextFrame = 1;
@@ -78,6 +112,10 @@ function installEngine({ fieldSizing = false } = {}) {
     globalThis.cancelAnimationFrame = (id) => frames.delete(id);
     return {
         observers,
+        mutations,
+        // The field's placeholder attribute is rewritten (the language dictionary arriving).
+        rewritePlaceholder: () => mutations.forEach((o) => o.targets.some(([, options]) =>
+            options.attributeFilter?.includes('placeholder')) && o.callback([{ attributeName: 'placeholder' }])),
         report: () => observers.forEach((o) => o.targets.length && o.callback([])),
         // A loading period: `loading`, then `ready` settles.
         fontsLoaded: async () => { fontListeners.forEach((fn) => fn()); await globalThis.document.fonts.ready; await null; },
@@ -90,10 +128,24 @@ function installEngine({ fieldSizing = false } = {}) {
 
 const lines = (count, word = 'line') => Array.from({ length: count }, (_, n) => `${word} ${n + 1}`).join('\n');
 
-test('the mode is selected once from CSS.supports and is what the stylesheet keys on', (t) => {
-    assert.equal(chatInputSizingMode({ supports: () => true }), 'content');
-    assert.equal(chatInputSizingMode({ supports: () => false }), 'measured');
-    assert.equal(chatInputSizingMode(undefined), 'measured');
+test('content sizing is chosen only where it sizes a placeholder like the same text', () => {
+    const supports = { supports: () => true };
+    assert.equal(chatInputSizingMode(supports, probeDocument('text')), 'content');
+    // WebKit 26: a wrapped placeholder is sized without its padding and past max-height.
+    assert.equal(chatInputSizingMode(supports, probeDocument('webkit')), 'measured');
+    const unsupported = probeDocument();
+    assert.equal(chatInputSizingMode({ supports: () => false }, unsupported), 'measured');
+    assert.equal(unsupported.probes.length, 0, 'no probe without field-sizing');
+    assert.equal(chatInputSizingMode(undefined, probeDocument()), 'measured');
+    assert.equal(chatInputSizingMode(supports, {}), 'measured', 'no body to lay a probe out in');
+    const doc = probeDocument();
+    chatInputSizingMode(supports, doc);
+    chatInputSizingMode(supports, doc);
+    assert.equal(doc.probes.length, 1, 'one probe per document: an engine fact');
+    assert.equal(doc.body.children.size, 0, 'the probe is removed');
+});
+
+test('the selected mode is what the stylesheet keys on', (t) => {
     for (const fieldSizing of [true, false]) {
         const engine = installEngine({ fieldSizing });
         t.after(engine.restore);
@@ -237,11 +289,76 @@ test('a loading period that settles after dispose schedules nothing', async (t) 
 });
 
 test('content sizing adds no font listener or observer', (t) => {
-    const engine = installEngine({ fieldSizing: true });
+    const engine = installEngine({ fieldSizing: true, fontsStatus: 'loading' });
     t.after(engine.restore);
     attachChatInputSizing(new Field());
     assert.equal(engine.fontListeners.size, 0);
     assert.equal(engine.observers.length, 0);
+    assert.equal(engine.mutations.length, 0);
+});
+
+test('an engine whose content sizing cuts a placeholder measures', (t) => {
+    const engine = installEngine({ fieldSizing: true, placeholder: 'webkit' });
+    t.after(engine.restore);
+    const field = new Field();
+    const sizing = attachChatInputSizing(field);
+    assert.equal(sizing.mode, 'measured');
+    assert.equal(field.dataset.sizing, 'fit');
+    field.type(lines(3));
+    sizing.sync();
+    assert.equal(field.style.getPropertyValue('--chat-input-height'), `${Math.round(3 * LINE + 10)}px`);
+});
+
+test('a font loading period already running when the field attaches re-measures as it settles', async (t) => {
+    const engine = installEngine({ fontsStatus: 'loading' });
+    t.after(engine.restore);
+    let settle;
+    globalThis.document.fonts.ready = new Promise((resolve) => { settle = resolve; });
+    const field = new Field();
+    const sizing = attachChatInputSizing(field);
+    field.type('a line that fits the proportional face');
+    sizing.sync();
+    assert.equal(field.style.getPropertyValue('--chat-input-height'), '33px');
+    field.charWidth = 3 * CHAR;  // the face that was loading is wider
+    settle();
+    await null;
+    await null;
+    assert.equal(engine.pending(), 1);
+    engine.flush();
+    assert.equal(field.style.getPropertyValue('--chat-input-height'), `${Math.round(3 * LINE + 10)}px`);
+});
+
+test('a placeholder rewritten in place re-measures in a frame; dispose stops it', (t) => {
+    const engine = installEngine();
+    t.after(engine.restore);
+    const field = new Field();
+    const sizing = attachChatInputSizing(field);
+    sizing.sync();
+    engine.flush();
+    const written = field.writes.length;
+    engine.rewritePlaceholder();
+    assert.equal(engine.pending(), 1, 'the write waits for the next frame');
+    engine.flush();
+    assert.equal(field.writes.length, written + 1, 'the same width, measured again');
+    sizing.dispose();
+    assert.ok(engine.mutations[0].disconnected);
+    engine.rewritePlaceholder();
+    assert.equal(engine.pending(), 0);
+});
+
+test('a sub-pixel width change that keeps clientWidth still rewraps', (t) => {
+    const engine = installEngine();
+    t.after(engine.restore);
+    const field = new Field({ width: 400.4 });
+    const sizing = attachChatInputSizing(field);
+    field.type('x'.repeat(49));  // 49 advances fit 392.4px of text width, not 391.8px
+    sizing.sync();
+    assert.equal(field.style.getPropertyValue('--chat-input-height'), '33px');
+    field.width = 399.8;  // e.g. a window narrowed by one device pixel at 125%
+    assert.equal(field.clientWidth, 400, 'the rounded width did not change');
+    engine.report();
+    engine.flush();
+    assert.equal(field.style.getPropertyValue('--chat-input-height'), `${Math.round(2 * LINE + 10)}px`);
 });
 
 test('a width change keeps a capped selection and its scroll place', (t) => {

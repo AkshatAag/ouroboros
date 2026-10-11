@@ -1,14 +1,16 @@
 """Main/Project message-field height in the real UI: native content sizing and the measured fallback.
 
-The field grows with its text to the stylesheet's one cap, then scrolls, and shrinks again;
-a field whose text fits shows no scrollbar (DESIGN "message field"). Each engine runs twice:
-as it is, and with `field-sizing` denied, which is a genuine fallback because the stylesheet
-keys the native sizing on the mode `chat_input_sizing.js` selected (checked through the
-computed style). CSS zoom and device scale factor are proxies for display scaling, not a
-native Windows or WebView2 result.
+The field grows with its text, or an empty field's placeholder, to the stylesheet's one cap,
+then scrolls, and shrinks again; a field whose content fits shows no scrollbar and no cut
+glyph (DESIGN "message field"). Each engine runs twice: with the mode `chat_input_sizing.js`
+selects (WebKit 26 measures, because its content sizing cuts a wrapped placeholder), and with
+`field-sizing` denied, a genuine fallback because the stylesheet keys native sizing on that
+mode (checked through the computed style). CSS zoom and device scale factor are proxies for
+display scaling, not a native Windows or WebView2 result.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 from pathlib import Path
@@ -37,7 +39,6 @@ _GEOMETRY = r"""el => {
         rectHeight: rect.height, rectWidth: rect.width, clientHeight: el.clientHeight, clientWidth: el.clientWidth,
         scrollHeight: el.scrollHeight, scrollTop: el.scrollTop, maxScroll,
         line: parseFloat(style.lineHeight), pad: parseFloat(style.paddingTop) + parseFloat(style.paddingBottom),
-        padTop: parseFloat(style.paddingTop),
         maxHeight: style.maxHeight, sizing: el.dataset.sizing || '', fieldSizing: style.fieldSizing || '',
         overflowY: style.overflowY, inlineHeight: el.style.height,
         measuredHeight: el.style.getPropertyValue('--chat-input-height'),
@@ -55,10 +56,35 @@ _WATCH_WRITES = """el => {
     window.__sizingWatch.observe(el, { attributes: true, attributeFilter: ['style', 'data-sizing'] });
 }"""
 _PARAGRAPH = ("Paragraph changes wrapping on narrower space and keeps every word readable. " * 2).strip()
-# One proportional row at the desktop width, two rows in a monospace face.
-_ONE_ROW = "A line that fits one proportional row but wraps once it is set in a wider monospace face here."
-_LONG_PLACEHOLDER = ("Schreiben Sie Ouroboros eine Nachricht; Umschalt und Eingabe fügen eine neue Zeile ein, "
-                     "Eingabe sendet die Nachricht sofort")
+# A translation that wraps at a phone width, its last line carrying descenders.
+_LONG_PLACEHOLDER = ("Напишите сообщение для Ouroboros; Shift+Enter переносит строку, Enter отправляет сразу, "
+                     "файлы добавляйте скрепкой рядом")
+# A face the app serves, half again as wide as any interface face: the late-font text
+# rewraps whatever this platform's own face is.
+_LATE_FONT = "/static/vendor/katex/fonts/KaTeX_Typewriter-Regular.woff2"
+_LATE_FACE = "{ display: 'swap', sizeAdjust: '150%' }"
+# The longest prefix that fits one row of the field in its own face, and its width in
+# another face: the near-wrap text is derived from this platform's fonts, not assumed.
+_NEAR_WRAP = """(el, other) => {
+    const style = getComputedStyle(el);
+    const room = el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    const span = document.createElement('span');
+    span.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font-size:${style.fontSize}`;
+    document.body.append(span);
+    const width = (text, family) => {
+        span.style.fontFamily = family;
+        span.textContent = text;
+        return span.getBoundingClientRect().width;
+    };
+    let text = '';
+    for (const ch of 'A message that fits one row in this face and wraps once a wider face loads late, '.repeat(3)) {
+        if (width(text + ch, style.fontFamily) > room - 12) break;
+        text += ch;
+    }
+    const result = { text: text.trim(), room, own: width(text, style.fontFamily), other: width(text, other) };
+    span.remove();
+    return result;
+}"""
 
 
 def _assert_fits(g, mode, case, rows=None):
@@ -98,8 +124,10 @@ def _assert_mode(g, mode, case, state):
 
 
 class _Run:
-    def __init__(self, page, engine, mode, evidence, records):
+    """One engine run: `variant` is how the mode came about (`selected` or `denied`)."""
+    def __init__(self, page, engine, mode, evidence, records, variant):
         self.page, self.engine, self.mode, self.evidence, self.records = page, engine, mode, evidence, records
+        self.label = f"{variant}-{mode}"
 
     def settle(self):
         self.page.evaluate(_SETTLE_RESTORE_FRAMES)
@@ -107,11 +135,11 @@ class _Run:
     def geometry(self, field, case):
         self.settle()
         g = field.evaluate(_GEOMETRY)
-        self.records.append({"engine": self.engine, "mode": self.mode, "case": case, **g})
+        self.records.append({"engine": self.engine, "mode": self.mode, "run": self.label, "case": case, **g})
         return g
 
     def shoot(self, row, case):
-        row.screenshot(path=str(self.evidence / f"composer-sizing-{self.engine}-{self.mode}-{case}.png"))
+        row.screenshot(path=str(self.evidence / f"composer-sizing-{self.engine}-{self.label}-{case}.png"))
 
     def replace(self, field, text):
         field.focus()
@@ -215,6 +243,45 @@ def _layout(run, field, row):
     _assert_capped(g, mode, "capped-selection-resize", at_end=False)
     assert g["selection"] == [4, 9] and g["focused"] and g["scrollTop"] == 0, g
     page.set_viewport_size({"width": 1240, "height": 800})
+    # A sub-pixel narrowing that rewraps while clientWidth stays the same whole pixel, as a
+    # window resized by one device pixel at 125% does: two widths a fifth of a pixel apart
+    # straddle a text's wrap point, found by bisecting the field's own width.
+    run.replace(field, "")
+    found = field.evaluate("""(el, texts) => {
+        const tall = (text, width) => {
+            el.style.width = `${width}px`;
+            el.value = text;
+            const height = el.scrollHeight;
+            el.value = '';
+            return height > 1.5 * parseFloat(getComputedStyle(el).lineHeight) + 10;
+        };
+        el.style.flex = 'none';
+        const full = el.getBoundingClientRect().width;
+        for (const text of texts) {
+            let [fits, wrapped] = [full, 120];
+            for (let step = 0; step < 24; step++) {
+                const middle = (fits + wrapped) / 2;
+                if (tall(text, middle)) wrapped = middle; else fits = middle;
+            }
+            const widths = [fits + 0.1, fits - 0.1];
+            const client = widths.map(width => { el.style.width = `${width}px`; return el.clientWidth; });
+            if (client[0] === client[1]) return { text, widths };
+        }
+        return null;
+    }""", [" ".join(_PARAGRAPH.split()[:words]) for words in range(6, 11)])
+    assert found, "no text's wrap point lies inside one whole clientWidth"
+    field.evaluate("(el, width) => { el.style.width = `${width}px`; }", found["widths"][0])
+    run.settle()
+    run.replace(field, found["text"])
+    field.evaluate("el => el.blur()")
+    wide = run.geometry(field, "subpixel-wide")
+    _assert_fits(wide, mode, "subpixel-wide", rows=1)
+    field.evaluate("(el, width) => { el.style.width = `${width}px`; }", found["widths"][1])
+    narrow = run.geometry(field, "subpixel-narrow")
+    assert narrow["clientWidth"] == wide["clientWidth"], (wide, narrow)
+    _assert_fits(narrow, mode, "subpixel-narrow", rows=2)
+    field.evaluate("el => { el.style.removeProperty('width'); el.style.removeProperty('flex'); }")
+    run.replace(field, "")
 
 
 def _keyboard(run, field):
@@ -296,7 +363,7 @@ def _transcript(run, field):
     run.replace(field, "")
 
 
-def _scaling(run, field, row):
+def _scaling(run, field, row, late_text):
     """Fractional CSS zoom, a display scale and a late font face, with the text left as it is."""
     page, mode = run.page, run.mode
     for text, rows in (("x", 1), ("a\nb\nc\nd\ne", 5), (_PARAGRAPH, None)):
@@ -319,21 +386,20 @@ def _scaling(run, field, row):
         cdp.detach()
     # A late font face rewraps the same text at the same width, with no edit: the fallback
     # re-measures when the document's font loading period settles.
-    run.replace(field, _ONE_ROW)
+    run.replace(field, late_text)
     field.evaluate("el => el.blur()")
     before = run.geometry(field, "font-before")
     _assert_fits(before, mode, "font-before", rows=1)
-    status = page.evaluate("""async () => {
-        const face = new FontFace('SizingLate', ['Courier New', 'Courier', 'Menlo', 'Consolas', 'DejaVu Sans Mono',
-            'Liberation Mono'].map(name => `local("${name}")`).join(', '));
+    status = field.evaluate(f"""async el => {{
+        const face = new FontFace('SizingLate', 'url({_LATE_FONT}?sizing-late)', {_LATE_FACE});
         document.fonts.add(face);
         const style = document.createElement('style');
         style.id = 'sizing-late-font';
-        style.textContent = '#chat-input { font-family: SizingLate, -apple-system, system-ui, sans-serif; }';
+        style.textContent = `#chat-input {{ font-family: SizingLate, ${{getComputedStyle(el).fontFamily}}; }}`;
         document.head.append(style);
         await face.load();
         return face.status;
-    }""")
+    }}""")
     after = run.geometry(field, "font-loaded")
     assert status == "loaded" and after["scrollHeight"] > before["scrollHeight"] + after["line"] / 2, (status, before, after)
     _assert_fits(after, mode, "font-loaded", rows=2)
@@ -341,8 +407,38 @@ def _scaling(run, field, row):
     run.replace(field, "")
 
 
+def _ink_rows(png):
+    """Rows of a screenshot holding glyph ink: pixels far from the top-left background."""
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(png)).convert("RGB")
+    pixels, (width, height) = image.load(), image.size
+    background = pixels[1, 1]
+    return [any(max(abs(a - b) for a, b in zip(pixels[x, y], background)) > 48 for x in range(2, width - 2))
+            for y in range(height)]
+
+
+def _cut_ink(run, field, text):
+    """Glyph rows of `text` set as the value that lie below the box holding it as placeholder."""
+    def shot():
+        box = field.bounding_box()
+        return run.page.screenshot(clip=box), round(box["height"])
+    placeholder, height = shot()
+    run.replace(field, text)
+    field.evaluate("el => el.blur()")
+    run.settle()
+    value, _ = shot()
+    run.replace(field, "")
+    field.evaluate("el => el.blur()")
+    shown, held = _ink_rows(placeholder), _ink_rows(value)
+    return {"placeholderInkRows": sum(shown), "valueInkRows": sum(held),
+            "cutRows": sum(held[height:]), "placeholderBox": height}
+
+
 def _placeholder(run, field, row):
-    """The shipped placeholder fits a phone; a long translation may wrap and grow, never scroll."""
+    """An empty field holds its placeholder like text: a long one wraps and grows without a
+    cut glyph or a scrollbar, and past the cap it scrolls. A placeholder rewritten in place
+    (the language's dictionary arriving) is held with no edit."""
     page, mode = run.page, run.mode
     run.replace(field, "")
     field.evaluate("el => el.blur()")
@@ -351,23 +447,25 @@ def _placeholder(run, field, row):
     run.shoot(row, "placeholder-390")
     original = field.get_attribute("placeholder")
     field.evaluate("(el, text) => { el.placeholder = text; }", _LONG_PLACEHOLDER)
-    run.settle()
-    run.shoot(row, "long-placeholder-390")
     g = run.geometry(field, "long-placeholder-390")
-    # An empty field shows no scrollbar whatever its placeholder does.
-    assert g["overflowY"] == "hidden", g
-    if mode == "content":
-        # Content sizing grows with the wrapped placeholder; WebKit leaves out the top
-        # padding, so at most that much of it lies outside the box.
-        assert g["clientHeight"] > 2 * g["line"] and g["scrollHeight"] - g["clientHeight"] <= g["padTop"] + 1, g
-    # The fallback measures on a value change, so a placeholder changed alone keeps its last
-    # height; the next measurement holds the wrapped placeholder too.
-    field.evaluate("el => el.dispatchEvent(new Event('input', { bubbles: true }))")
-    run.shoot(row, "long-placeholder-390-input")
-    g = run.geometry(field, "long-placeholder-390-input")
-    assert g["overflowY"] == "hidden" and g["clientHeight"] > 2 * g["line"], g
-    assert g["scrollHeight"] - g["clientHeight"] <= g["padTop"] + 1 and g["scrollTop"] == 0, g
+    run.shoot(row, "long-placeholder-390")
+    _assert_fits(g, mode, "long-placeholder-390")
+    assert g["clientHeight"] > 3 * g["line"] and g["scrollTop"] == 0, g
+    ink = _cut_ink(run, field, _LONG_PLACEHOLDER)
+    run.records.append({"engine": run.engine, "run": run.label, "case": "long-placeholder-ink", **ink})
+    assert ink["placeholderInkRows"] > 3 * g["line"] / 2 and ink["cutRows"] == 0, ink
+    # A placeholder longer than the cap scrolls like text: the owner can reach its end.
+    field.evaluate("(el, text) => { el.placeholder = text; }", " ".join([_LONG_PLACEHOLDER] * 4))
+    g = run.geometry(field, "over-cap-placeholder-390")
+    _assert_capped(g, mode, "over-cap-placeholder-390", at_end=False)
+    box = field.bounding_box()
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.wheel(0, 2000)
+    g = run.geometry(field, "over-cap-placeholder-wheel")
+    run.shoot(row, "over-cap-placeholder-wheel")
+    assert g["scrollTop"] > 0, g
     field.evaluate("(el, text) => { el.placeholder = text; }", original)
+    _assert_fits(run.geometry(field, "placeholder-restored"), mode, "placeholder-restored", rows=1)
     page.set_viewport_size({"width": 1240, "height": 800})
 
 
@@ -409,6 +507,55 @@ def _project(run, data_project):
     assert writes == 0, writes
 
 
+def _late_text(run, field):
+    """One row in the field's own face, two in the late face: measured in both here."""
+    near = field.evaluate(f"""async el => {{
+        const face = new FontFace('SizingCalibrate', 'url({_LATE_FONT})', {_LATE_FACE});
+        document.fonts.add(face);
+        await face.load();
+        return ({_NEAR_WRAP})(el, 'SizingCalibrate');
+    }}""")
+    run.records.append({"engine": run.engine, "run": run.label, "case": "late-font-near-wrap", **near})
+    assert near["own"] <= near["room"] - 12 and 2 * near["room"] > near["other"] >= near["room"] + 12, near
+    return near["text"]
+
+
+def _early_font(browser, url, run, variant, text):
+    """A font loading period already running when the field attaches: its end re-measures.
+    The face stays on the wire until the near-wrap text is in the field."""
+    context = browser.new_context(viewport={"width": 1240, "height": 800})
+    held = []
+    context.route(f"**{_LATE_FONT}?sizing-early", lambda route: held.append(route))
+    page = context.new_page()
+    if variant == "denied":
+        page.add_init_script(f"({_DENY_FIELD_SIZING})()")
+    page.add_init_script(f"""(() => {{
+        const face = new FontFace('SizingEarly', 'url({_LATE_FONT}?sizing-early)', {_LATE_FACE});
+        document.fonts.add(face);
+        face.load().catch(() => {{}});
+        addEventListener('DOMContentLoaded', () => {{
+            const style = document.createElement('style');
+            style.textContent = `#chat-input {{ font-family: SizingEarly, ${{getComputedStyle(document.body).fontFamily}}; }}`;
+            document.head.append(style);
+        }});
+    }})()""")
+    page.goto(url, wait_until="domcontentloaded")
+    field = page.locator("#chat-input")
+    field.wait_for(state="visible")
+    run = _Run(page, run.engine, run.mode, run.evidence, run.records, variant)
+    run.replace(field, text)
+    field.evaluate("el => el.blur()")
+    before = run.geometry(field, "early-font-before")
+    assert held and page.evaluate("() => document.fonts.status") == "loading", held
+    _assert_fits(before, run.mode, "early-font-before", rows=1)
+    for route in held:
+        route.continue_()
+    page.wait_for_function("() => document.fonts.status === 'loaded'")
+    _assert_fits(run.geometry(field, "early-font-loaded"), run.mode, "early-font-loaded", rows=2)
+    run.shoot(page.locator("#chat-input-area .chat-text-row"), "early-font-loaded")
+    context.close()
+
+
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_message_field_sizing(direct_server_with_data, engine):
@@ -416,6 +563,7 @@ def test_message_field_sizing(direct_server_with_data, engine):
     from ouroboros.projects_registry import create_project
 
     data = direct_server_with_data["data_dir"]
+    url = direct_server_with_data["url"]
     project = create_project(data, "sizing-room", name="Sizing room")
     evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", data.parent))
     evidence.mkdir(parents=True, exist_ok=True)
@@ -425,47 +573,50 @@ def test_message_field_sizing(direct_server_with_data, engine):
         options = {"ignore_default_args": ["--hide-scrollbars"]} if engine == "chromium" else {}
         browser = getattr(pw, engine).launch(**options)
         try:
-            native = None
-            for mode in ("content", "measured"):
+            # `selected`: the mode the helper picks in this engine; `denied`: no field-sizing.
+            for variant in ("selected", "denied"):
+                deny = variant == "denied"
                 context = browser.new_context(viewport={"width": 1240, "height": 800})
                 page = context.new_page()
                 page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
                 page.add_init_script(f"({_RECORD_ERRORS})()")
-                if mode == "measured":
+                if deny:
                     page.add_init_script(f"({_DENY_FIELD_SIZING})()")
-                page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
+                page.goto(url, wait_until="domcontentloaded")
                 page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)")
                 field = page.locator("#chat-input")
                 field.wait_for(state="visible")
-                if mode == "content":
-                    native = page.evaluate("() => CSS.supports('field-sizing', 'content')")
-                    records.append({"engine": engine, "case": "engine", "fieldSizingSupported": native,
-                                    "userAgent": page.evaluate("() => navigator.userAgent")})
-                run_mode = mode if mode == "measured" or native else "measured"
-                run = _Run(page, engine, run_mode, evidence, records)
+                selected = field.evaluate("el => el.dataset.sizing")
+                records.append({"engine": engine, "run": variant, "case": "engine", "sizing": selected,
+                                "fieldSizingSupported": page.evaluate("() => CSS.supports('field-sizing', 'content')"),
+                                "userAgent": page.evaluate("() => navigator.userAgent")})
+                assert selected in ({"fit"} if deny else {"content", "fit"}), selected
+                run = _Run(page, engine, "content" if selected == "content" else "measured", evidence, records, variant)
                 row = page.locator("#chat-input-area .chat-text-row")
                 _typing(run, field, row)
                 _layout(run, field, row)
                 _keyboard(run, field)
                 _transcript(run, field)
-                _scaling(run, field, row)
+                late_text = _late_text(run, field)
+                _scaling(run, field, row, late_text)
                 _placeholder(run, field, row)
                 _project(run, project["id"])
                 errors = page.evaluate("() => window.__sizingErrors")
                 assert not [e for e in errors if "ResizeObserver" in e], errors
                 context.close()
+                _early_font(browser, url, run, variant, late_text)
                 # Device scale factor: another proxy for a scaled display.
                 context = browser.new_context(viewport={"width": 1240, "height": 800}, device_scale_factor=1.5)
                 page = context.new_page()
-                if mode == "measured":
+                if deny:
                     page.add_init_script(f"({_DENY_FIELD_SIZING})()")
-                page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
+                page.goto(url, wait_until="domcontentloaded")
                 field = page.locator("#chat-input")
                 field.wait_for(state="visible")
-                run = _Run(page, engine, run_mode, evidence, records)
+                run = _Run(page, engine, run.mode, evidence, records, variant)
                 for case, text, rows in (("dpr-1.5-one", "x", 1), ("dpr-1.5-five", "a\nb\nc\nd\ne", 5)):
                     run.replace(field, text)
-                    _assert_fits(run.geometry(field, case), run_mode, case, rows=rows)
+                    _assert_fits(run.geometry(field, case), run.mode, case, rows=rows)
                 run.shoot(page.locator("#chat-input-area .chat-text-row"), "dpr-1.5")
                 context.close()
         finally:
