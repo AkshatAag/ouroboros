@@ -9,8 +9,10 @@ refuses typed, and an active fence still refuses whatever the stamp's age.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import pathlib
+import threading
 
 import pytest
 
@@ -66,8 +68,9 @@ def test_a_failed_publication_refuses_typed(tmp_path, alive_generation):
         _reserve(tmp_path, CHILD)
 
 
-def test_a_publication_in_flight_is_waited_out(tmp_path, monkeypatch):
-    _publish(tmp_path, alive_generation=None)
+@pytest.mark.parametrize("alive_generation", [None, "g0"])
+def test_a_publication_in_flight_is_waited_out(tmp_path, monkeypatch, alive_generation):
+    _publish(tmp_path, alive_generation=alive_generation)
     waits = []
 
     def publisher_finishes(_sec):
@@ -78,8 +81,78 @@ def test_a_publication_in_flight_is_waited_out(tmp_path, monkeypatch):
     assert _reserve(tmp_path, CHILD).attempt_id and waits
 
 
-def test_an_unreadable_dispatch_document_refuses_typed(tmp_path):
+@pytest.mark.parametrize("damage", ["malformed", "non_object", "missing", "no_generation", "unreadable"])
+def test_an_unreadable_dispatch_document_refuses_typed(tmp_path, monkeypatch, caplog, damage):
     _publish(tmp_path)
-    (tmp_path / "state" / "queue_dispatch.json").write_text("{not json", encoding="utf-8")
+    path = tmp_path / "state/queue_dispatch.json"
+    if damage == "missing":
+        path.unlink()
+    elif damage == "unreadable":
+        read = pathlib.Path.read_text
+        def refuse(target, *args, **kwargs):
+            if target == path:
+                raise PermissionError("fixture dispatch read failed")
+            return read(target, *args, **kwargs)
+        monkeypatch.setattr(pathlib.Path, "read_text", refuse)
+    else:
+        path.write_text({"malformed": "{not json", "non_object": "[]", "no_generation": "{}"}[damage], encoding="utf-8")
+    reads, waits, load = [], [], queue_observation.load_queue_document
+    def observe(*args):
+        reads.append(args)
+        return load(*args)
+    monkeypatch.setattr(queue_observation, "load_queue_document", observe)
+    monkeypatch.setattr(queue_observation, "_sleep", waits.append)
     with pytest.raises(ua.UsageAccountingError, match="root budget fence authority unavailable"):
         _reserve(tmp_path, CHILD)
+    assert len(reads) == 1 and waits == []
+    assert len([record for record in caplog.records if record.exc_info]) == int(damage in {"malformed", "unreadable"})
+
+
+@pytest.mark.parametrize("operation", ["reserve", "dispatch"])
+@pytest.mark.parametrize("sliced", [False, True])
+@pytest.mark.parametrize("publication", ["stable", "before_lock", "under_lock"])
+def test_publication_waits_only_outside_the_money_lock(tmp_path, monkeypatch, operation, sliced, publication):
+    from ouroboros import _usage_wait
+
+    _publish(tmp_path)
+    reservation = _reserve(tmp_path, CHILD) if operation == "dispatch" else None
+    stamp, held, waits = tmp_path / "state/queue.alive", [], []
+    original = ua._locked
+
+    @contextlib.contextmanager
+    def locked(*args, **kwargs):
+        with original(*args, **kwargs) as view:
+            if publication == "under_lock":
+                stamp.unlink()
+            held.append(True)
+            try:
+                yield view
+            finally:
+                held.pop()
+
+    def finish_publication(seconds):
+        assert not held, "queue publication wait held the money lock"
+        waits.append(seconds)
+        _publish(tmp_path)
+
+    monkeypatch.setattr(ua, "_locked", locked)
+    monkeypatch.setattr(queue_observation, "_sleep", finish_publication)
+    if publication == "before_lock":
+        stamp.unlink()
+    token = _usage_wait._CANCEL.set(threading.Event() if sliced else None)
+    try:
+        def act():
+            return _reserve(tmp_path, CHILD) if operation == "reserve" else ua.mark_dispatched(reservation)
+        if publication == "under_lock":
+            with pytest.raises(ua.UsageAccountingError, match="root budget fence authority unavailable"):
+                act()
+        elif operation == "reserve":
+            assert act().attempt_id
+        else:
+            act()
+    finally:
+        _usage_wait._CANCEL.reset(token)
+    assert len(waits) == int(publication == "before_lock")
+    if reservation:
+        with ua.usage_store.read(tmp_path) as view:
+            assert view.attempt(reservation.attempt_id)["state"] == ("reserved" if publication == "under_lock" else "dispatched")

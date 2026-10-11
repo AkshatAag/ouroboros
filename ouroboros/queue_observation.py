@@ -45,6 +45,8 @@ def published_dispatch(drive_root, *, attempts=20, pause_sec=0.05):
     (the stamp is unlinked first) is re-read briefly; None when it stays uncertified."""
     for attempt in range(attempts):
         document = load_queue_document(drive_root, "queue_dispatch.json")
+        if not document.get("generation"):
+            return None  # Only an uncertified publication can be in flight.
         if queue_stamp(document):
             return document
         if attempt + 1 < attempts:

@@ -665,7 +665,7 @@ _CANDIDATE_ROW_FIELDS = (
 )
 
 
-def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path) -> None:
+def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path, *, retry: bool = True) -> None:
     from ouroboros.budget_pause import budget_fence_selected, dispatch_fenced
 
     if dispatch_fenced(scope.task_id):
@@ -679,7 +679,7 @@ def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path) -> None:
     root_task_id = str(scope.root_task_id or "").strip()
     snapshot_path = root / "state" / "queue_dispatch.json"
     if root_task_id and any((root / "state" / name).exists() for name in ("queue_dispatch.json", "queue_snapshot.json", "queue.alive")):
-        snapshot = published_dispatch(root)
+        snapshot = published_dispatch(root) if retry else published_dispatch(root, attempts=1)
         if snapshot is None:
             raise UsageAccountingError(f"root budget fence authority unavailable: {snapshot_path}")
         rows = snapshot.get("budget_root_fences")
@@ -715,7 +715,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
     attempt_id = uuid.uuid4().hex
 
     with acquire(root) as view:
-        _check_dispatch_fences(scope, root)
+        _check_dispatch_fences(scope, root, retry=False)
         global_limit = _global_limit(request)
         if view.exceeds_limit(global_limit):
             raise BudgetExceeded(
@@ -968,8 +968,11 @@ def _transition(reservation: AttemptReservation, state: str, **fields: Any) -> D
     from ouroboros._usage_wait import transition_acquisition
     from ouroboros.usage_ledger import is_abandoned_settlement
 
-    acquire = transition_acquisition(state, lambda: _check_dispatch_fences(
-        reservation.scope or current_usage_scope() or UsageScope(), reservation.drive_root))
+    def check_fences():
+        _check_dispatch_fences(reservation.scope or current_usage_scope() or UsageScope(), reservation.drive_root)
+    if state == "dispatched":
+        check_fences()
+    acquire = transition_acquisition(state, check_fences)
     with (acquire(reservation.drive_root) if acquire else _locked(reservation.drive_root)) as view:
         current = view.attempt(reservation.attempt_id)
         expected_seq = fields.pop("_expected_seq", None)
@@ -1026,7 +1029,7 @@ def _transition(reservation: AttemptReservation, state: str, **fields: Any) -> D
                                  root_limit_revision=scope.root_limit_revision)
             scope = replace(scope, **effective)
             fields.update(effective)
-            _check_dispatch_fences(scope, reservation.drive_root)
+            _check_dispatch_fences(scope, reservation.drive_root, retry=False)
             limit_request = AttemptRequest(model=reservation.model, provider=reservation.provider,
                 global_limit_usd=(current.get("global_limit_usd") if current.get("global_limit_source")
                                   not in {"", "settings_budget_resolver"} else None))
