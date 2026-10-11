@@ -374,9 +374,10 @@ def actor_decision_lock(drive_root: Any, task_id: str) -> Iterator[None]:
     finally:
         release_exclusive_file_lock(lock_path, fd)
 
-def _iter_rows(path: pathlib.Path) -> Iterator[Dict[str, Any]]:
+def _iter_rows(path: pathlib.Path, *, strict: bool = False) -> Iterator[Dict[str, Any]]:
     """Custody rows across the ROTATED CHAIN (archive segments + live file): the
-    importer's one fold and the explicit forensic replays.
+    importer's one fold (``strict``: an unreadable segment or a read error raises
+    its ``OSError`` instead of amputating the chain) and the explicit forensic replays.
 
     The event log rotates like chat/progress (CPL4-C1), so a full replay must
     read ``archive/events_*.jsonl`` before the live file or a rotation would
@@ -385,7 +386,7 @@ def _iter_rows(path: pathlib.Path) -> Iterator[Dict[str, Any]]:
     """
     from ouroboros.utils import jsonl_chain_handles
 
-    with jsonl_chain_handles(path) as handles:
+    with jsonl_chain_handles(path, strict=strict) as handles:
         for _, handle in handles:
             try:
                 for raw in handle:
@@ -398,6 +399,8 @@ def _iter_rows(path: pathlib.Path) -> Iterator[Dict[str, Any]]:
                     if isinstance(row, dict) and str(row.get("type") or "").startswith(_ROW_MARKER):
                         yield row
             except OSError:
+                if strict:
+                    raise
                 continue
 
 

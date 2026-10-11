@@ -3,6 +3,7 @@ death point, the pending invocation's atomic transition, the open set, the expor
 outbox verification and the importer's one fold of a legacy chain."""
 from __future__ import annotations
 
+import errno
 import json
 from contextlib import contextmanager
 
@@ -145,6 +146,65 @@ def test_the_export_preflight_flushes_the_outbox_and_refuses_a_stuck_one(tmp_pat
     with monkeypatch.context() as patched:
         patched.setattr(current, "flush_outbox", lambda root: pytest.fail("flushed on a chainless export"))
         assert store_switch._preflight(tmp_path, {"facts": False, "money": False, "handles": False}, {"steps": {}}, []) == ""
+
+
+def test_an_unreadable_chain_aborts_the_import_typed_and_a_missing_one_imports_empty(tmp_path, monkeypatch):
+    """EMFILE/EIO while folding the custody chain: the import aborts typed, builds and stamps
+    nothing and the next boot retries — never a published store with no custody row. A chain
+    that does not exist is the positively empty state and imports."""
+    from ouroboros.store_import import ensure_current_store
+
+    path = c.event_log_path(tmp_path)
+    append_jsonl(path, {"ts": "2026-01-01T00:00:00+00:00", "type": c.STARTED, "run_id": "run-a", "task_id": "t1"})
+    real_iter_rows = c._iter_rows
+
+    def exhausted(chain, **kwargs):
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(c, "_iter_rows", exhausted)
+    with pytest.raises(store.StoreBusy, match="custody chain not readable \\(EMFILE\\)"):
+        ensure_current_store(tmp_path)
+    assert store.probe(tmp_path)[0] == "absent" and not store.generation_stamped(tmp_path)
+    monkeypatch.setattr(c, "_iter_rows", real_iter_rows)
+    rotated = path.with_name("events.jsonl.part")
+    path.rename(rotated)
+    path.mkdir()  # exists, cannot be opened: the chain probe's own unreadable answer
+    with pytest.raises(store.StoreError, match="custody chain not readable \\(EIO\\)"):
+        ensure_current_store(tmp_path)
+    assert store.probe(tmp_path)[0] == "absent" and not store.generation_stamped(tmp_path)
+    path.rmdir()
+    rotated.rename(path)
+    assert ensure_current_store(tmp_path)["status"] == "completed"  # the next boot retries and folds the row
+    assert [run.run_id for run in c.open_runs(tmp_path)] == ["run-a"]
+    other = tmp_path / "fresh"
+    other.mkdir()
+    assert ensure_current_store(other)["status"] == "completed" and c.open_runs(other) == []
+
+
+def test_the_strict_chain_reader_raises_a_read_error_instead_of_amputating_the_chain(tmp_path, monkeypatch):
+    from ouroboros import utils
+
+    path = c.event_log_path(tmp_path)
+    append_jsonl(path, {"ts": "2026-01-01T00:00:00+00:00", "type": c.STARTED, "run_id": "run-a", "task_id": "t1"})
+
+    class Failing:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __iter__(self):
+            raise OSError(errno.EIO, "Input/output error")
+
+    real = utils.jsonl_chain_handles
+
+    @contextmanager
+    def failing_handles(chain, **kwargs):
+        with real(chain, **kwargs) as handles:
+            yield [(p, Failing(h)) for p, h in handles]
+
+    monkeypatch.setattr(utils, "jsonl_chain_handles", failing_handles)
+    assert list(c._iter_rows(path)) == []  # the fail-soft readers keep their lenient answer
+    with pytest.raises(OSError, match="Input/output error"):
+        list(c._iter_rows(path, strict=True))
 
 
 def test_the_import_folds_a_legacy_chain_into_the_custody_tables_once(tmp_path, monkeypatch):

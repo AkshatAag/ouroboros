@@ -196,17 +196,19 @@ def _custody_rows(root: pathlib.Path, records: List[Record]) -> Tuple[Dict[str, 
     """The custody half of the import, folded ONCE from the retained event chain: every run's
     row (``custody_runs``), the pending invocations (``custody_open``), the definite refusals
     and the task marks, plus the closing receipts still owed to a result's terminal refresh
-    (``delegated_runs``). An unreadable chain imports no custody row: the sweep's own readers
-    answer UNKNOWN for it."""
+    (``delegated_runs``). A chain that exists but cannot be read in full (EMFILE, EIO, an
+    unopenable segment) ABORTS the import typed — nothing is built or stamped and the next
+    boot retries — never a published store with no custody row; a missing chain is empty."""
     from ouroboros import delegate_custody as c
     from ouroboros.delegate_custody_current import fold
 
+    chain = c.event_log_path(root)
     try:
         if c.custody_chain_unreadable(root):
-            return {}, {}
-        rows = tuple(c._iter_rows(c.event_log_path(root)))
-    except Exception:
-        return {}, {}
+            raise OSError(errno.EIO, "custody chain exists but cannot be opened")
+        rows = tuple(c._iter_rows(chain, strict=True))
+    except OSError as exc:
+        raise _unreadable(exc, chain, "custody chain") from exc
     folded = fold(rows)
     owed = {task_id for task_id, document in records if document.get("delegated_runs_unreconciled")}
     receipts: Dict[str, Dict[str, Any]] = {}
@@ -278,10 +280,10 @@ def _stat_result(path: pathlib.Path) -> Optional[Tuple[int, int]]:
     return info.st_size, info.st_mtime_ns
 
 
-def _unreadable(exc: OSError, path: pathlib.Path) -> store.StoreError:
+def _unreadable(exc: OSError, path: pathlib.Path, what: str = "task result") -> store.StoreError:
     name = errno.errorcode.get(exc.errno, str(exc.errno))
     kind = store.StoreBusy if exc.errno in (errno.EMFILE, errno.ENFILE) else store.StoreError
-    return kind(f"task result not readable ({name}), import aborted: {path}")
+    return kind(f"{what} not readable ({name}), import aborted: {path}")
 
 
 def _read_results(root: pathlib.Path):
