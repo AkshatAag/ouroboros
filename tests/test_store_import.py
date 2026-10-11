@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import sqlite3
 
 import pytest
@@ -544,6 +545,34 @@ def test_p6_compares_and_preserves_the_whole_projected_document(tmp_path):
     ensure_current_store(root, with_children=False)
     copies = list((root / "task_results" / "quarantine").glob("fresh2.deleted-*.json"))
     assert len(copies) == 1 and set(json.loads(copies[0].read_text(encoding="utf-8"))["launch_handoffs"]) == {"op1", "op2"}
+
+
+def test_a_refused_or_quarantined_identity_stays_occupied_for_strict_reads_and_create_only_writes(tmp_path):
+    """ABI-2 (M10): the import records the identities it refused or quarantined; a strict read
+    refuses them and a create-only write does not readmit them as a fresh absence — from the
+    store's record, not a quarantine-directory scan (the directory is gone here). A free
+    identity is still created; a plain read still sees absence; an admissible file at P6'
+    re-opens the identity."""
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    root = fixture_root(tmp_path)  # legacy: quarantined at import; mismatch: refused
+    ensure_current_store(root, with_children=False)
+    shutil.rmtree(root / "task_results" / "quarantine")
+    for task_id in ("legacy", "mismatch"):
+        assert load_task_result(root, task_id) is None
+        with pytest.raises(ValueError, match="unreadable or invalid"):
+            load_task_result(root, task_id, strict=True)
+        with pytest.raises(ValueError, match="unreadable or invalid"):
+            write_task_result(root, task_id, "scheduled", create_only=True, strict_existing_dict=True)
+        assert load(root, task_id) is None
+    assert write_task_result(root, "fresh9", "scheduled", create_only=True, strict_existing_dict=True)["status"] == "scheduled"
+    write_result(root, result("legacy", "completed"))  # the old body wrote an admissible file under the identity
+    assert ensure_current_store(root, with_children=False)["new"] == 1
+    assert load_task_result(root, "legacy", strict=True)["status"] == "completed"
+    atomic_write_json(task_result_path(root, "done1"), {"task_id": "done1", "status": "completed"})  # unstamped: quarantined at P6'
+    assert ensure_current_store(root, with_children=False)["quarantined"] == 1
+    with pytest.raises(ValueError, match="unreadable or invalid"):
+        write_task_result(root, "done1", "scheduled", create_only=True, strict_existing_dict=True)
 
 
 def test_set_file_edits_alone_are_not_detected_but_follow_a_result_change(tmp_path):

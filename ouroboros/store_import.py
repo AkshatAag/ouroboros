@@ -167,7 +167,8 @@ def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tup
     tmp = path.with_name(f"{path.name}.import-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     try:
         _build(tmp, tier, root, records, sets, baseline, provenance, folded,
-               sets_baseline=_sets_baseline(_read_sets(root)), chain_offset=folded.get("chain_offset", 0))
+               sets_baseline=_sets_baseline(_read_sets(root)), chain_offset=folded.get("chain_offset", 0),
+               occupied={**{row["task_id"]: row["reason"] for row in quarantined}, **refused})
         os.replace(tmp, path)
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -347,6 +348,18 @@ def _pending_drive(root: pathlib.Path, task_id: str, document: Dict[str, Any]) -
     return False
 
 
+OCCUPIED = "occupied"  # meta: the identities whose file the import refused or quarantined (ABI-2: not readmitted)
+
+
+def occupied_reason(root: pathlib.Path, task_id: str, *, write: bool = False) -> str:
+    """Why TASK_ID's identity is occupied without a row (its file was refused or quarantined by
+    the import or a P6'), ``""`` for a free identity: what a strict read or a create-only write
+    (``write``: through the write gate, so a first touch imports first) consults instead of
+    scanning the quarantine directory."""
+    with store.open_store(root, write=write) as txn:
+        return str((txn.meta(OCCUPIED) or {}).get(str(task_id)) or "")
+
+
 def holds_facts(root: pathlib.Path) -> bool:
     """Whether ROOT holds facts the importer would read: result files or obligation set files."""
     for directory in (task_results_dir(root, create=False), set_file_path(root, "nonterminal").parent):
@@ -368,7 +381,8 @@ def _sets_baseline(files: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dic
 
 def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Record], sets: Dict[str, Any],
            baseline: Dict[str, Any], provenance: Dict[str, Any], folded: Optional[Dict[str, Any]] = None, *,
-           sets_baseline: Optional[Dict[str, Any]] = None, chain_offset: int = 0) -> None:
+           sets_baseline: Optional[Dict[str, Any]] = None, chain_offset: int = 0,
+           occupied: Optional[Dict[str, str]] = None) -> None:
     from ouroboros.delegate_custody_current import CHAIN_BOUNDARY
 
     conn = store.connect(tmp, tier, create=True)
@@ -390,7 +404,8 @@ def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Recor
                     txn.put_row(f"custody_{name}", identity, facts)
         for key, value in (("schema_version", store.SCHEMA_VERSION), ("lock_tier", tier), ("generation", GENERATION),
                            ("phase", PUBLISHED), ("import", provenance), ("freeze_utc", utc_now_iso()),
-                           ("baseline", baseline), ("sets_baseline", sets_baseline or {}), (CHAIN_BOUNDARY, chain_offset)):
+                           ("baseline", baseline), ("sets_baseline", sets_baseline or {}), (CHAIN_BOUNDARY, chain_offset),
+                           (OCCUPIED, occupied or {})):
             txn.set_meta(key, value)
         store.commit(conn)
     finally:
@@ -444,18 +459,21 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
     refused: Dict[str, str] = {}
     latched: List[str] = []
     conflicts: Dict[str, Any] = txn.meta("conflicts") or {}
+    occupied: Dict[str, str] = txn.meta(OCCUPIED) or {}
     for task_id in changed + fresh:  # the old body was the authority while it ran: its files win
         path, raw = present[task_id]
         document, reason, outcome = _admit(path, raw)
         if outcome == "quarantined":  # the file left the directory with its bytes; the row goes with it
             quarantined.append({"task_id": task_id, "reason": reason})
+            occupied[task_id] = reason
             txn.delete_task(task_id)
             baseline.pop(task_id, None)
             continue
         if outcome == "refused":
-            refused[task_id] = reason
+            refused[task_id] = occupied[task_id] = reason
             baseline[task_id] = _baseline_entry(path, raw, None, reason)
             continue
+        occupied.pop(task_id, None)  # an admissible file re-opens the identity
         if reason == "latch_stamped":
             latched.append(task_id)
         body = _projected(txn, task_id)  # the store's version WITH its handoff rows (B5)
@@ -472,7 +490,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
         baseline.pop(task_id, None)
     moved = _reconcile_sets(txn, _read_sets(root))  # the old body maintained the set files too
     legacy = _apply_legacy_custody(root, txn)
-    for key, value in (("baseline", baseline), ("freeze_utc", now), ("conflicts", conflicts),
+    for key, value in (("baseline", baseline), ("freeze_utc", now), ("conflicts", conflicts), (OCCUPIED, occupied),
                        ("reconciled", {"at": now, **counts, "quarantined": len(quarantined), "refused": refused,
                                        "conflicts": len(conflicts), "set_rows": moved, "legacy_custody": legacy})):
         txn.set_meta(key, value)

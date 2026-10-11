@@ -746,9 +746,20 @@ def load_task_result(
         return None
     data = read_document(drive_root, tid)
     if data is None:
+        if strict:
+            _refuse_occupied(drive_root, tid, write=False)
         return None  # This read saw absence even if a writer publishes immediately after it.
     _admit_stored(data, tid, strict=strict, noun="task result authority")
     return _normalize_swarm_efficiency(data)
+
+
+def _refuse_occupied(drive_root: Any, task_id: str, *, write: bool) -> None:
+    """ABI-2: an identity whose file the import refused or quarantined has no row, yet a strict
+    reader or a create-only writer must not readmit it as a fresh absence."""
+    from ouroboros.store_import import occupied_reason
+
+    if occupied_reason(drive_root, task_id, write=write):
+        raise ValueError(f"task result authority is unreadable or invalid: task:{task_id}")
 
 
 def _admit_stored(data: Dict[str, Any], task_id: str, *, strict: bool, noun: str) -> None:
@@ -806,6 +817,8 @@ def write_task_result(
     obligation flags of the merged document, the custody and handoff riders, COMMIT.
     """
     path = f"task:{validate_task_id(task_id)}"
+    if create_only:
+        _refuse_occupied(results_drive_root, task_id, write=True)
     explicit_ts = str(fields.pop("ts", "") or "")
     from ouroboros.task_custody import capture_owner_mail, capture_unread_mail, merge_unread_mail
 
