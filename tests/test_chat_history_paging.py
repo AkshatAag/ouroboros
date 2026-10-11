@@ -187,6 +187,8 @@ def test_historical_terminal_never_overrides_current_result_authority(tmp_path, 
                                       "task_id": "old-task", "status": "completed" if current == "finalizing" else "running",
                                       **({"root_phase_checkpoint": {"post_task_synthesis": "running"}}
                                          if current == "finalizing" else {})})
+    from ouroboros.store_import import ensure_current_store
+    ensure_current_store(tmp_path)  # the boot door's import judges the planted file; a GET never imports
     status, payload = request(tmp_path)
     assert status == 200
     [narration] = [message for message in payload["messages"] if message.get("is_progress")]

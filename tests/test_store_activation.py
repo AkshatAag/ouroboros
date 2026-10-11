@@ -39,19 +39,31 @@ def _wire_git_ops(monkeypatch, repo: pathlib.Path, root: pathlib.Path) -> None:
 
 # ---- the predicate ---------------------------------------------------------------------------
 
-def test_migrating_is_true_only_inside_the_import_window(tmp_path):
+def test_migrating_is_true_until_publication_and_inside_the_import_window(tmp_path):
+    """Readiness is publication: a root holding facts no import published is migrating and the
+    predicate imports nothing (never opens for write); a root holding none is not (its first
+    write publishes an empty store); the published store is ready outside the window only."""
     root = tmp_path / "data"
-    assert store.migrating(root) is False  # an idle absent store is first-touched, not refused
-    assert store.probe(root)[0] == "present"
+    (root / "task_results").mkdir(parents=True)
+    (root / "task_results" / "t1.json").write_text(json.dumps(
+        {"task_id": "t1", "status": "completed", "ts": "2026-10-10T00:00:00+00:00", "_schema_version": 1}))
+    assert store.migrating(root) is True and store.store_ready(root) is False
+    assert store.probe(root)[0] == "absent"  # the predicate is a pure read
+    idle = tmp_path / "idle"
+    idle.mkdir()
+    assert store.migrating(idle) is False and store.store_ready(idle) is False and store.probe(idle)[0] == "absent"
+    ensure_current_store(root)
+    assert store.migrating(root) is False and store.store_ready(root) is True
     with store.importing(root):
         assert store.migrating(root) is True
         assert store.store_ready(root) is False
     assert store.migrating(root) is False and store.store_ready(root) is True
 
 
-def test_migrating_is_true_for_an_absent_store_while_another_root_owner_imports(tmp_path):
-    """The first touch of an absent store inside another thread's window answers typed."""
+def test_migrating_is_true_for_a_published_store_while_another_thread_imports(tmp_path):
+    """Another thread's window over a published store answers migrating to every door."""
     root = tmp_path / "data"
+    ensure_current_store(root)
     seen = {}
 
     def other_thread():
@@ -94,10 +106,12 @@ def test_create_door_answers_migrating_inside_the_window_and_proceeds_outside(tm
     assert outside.status_code == 409 and b"already exists" in outside.body  # past the gate, the door's own answer
 
 
-def test_cancel_door_answers_migrating_inside_the_window_and_proceeds_outside(tmp_path):
+def test_cancel_door_answers_migrating_inside_the_window_and_proceeds_outside(tmp_path, monkeypatch):
+    from supervisor import queue
     from ouroboros.gateway import tasks
 
     root = tmp_path / "data"
+    monkeypatch.setattr(queue, "DRIVE_ROOT", root)  # the intent writer's root is the door's
     write_task_result(root, "done", "completed")
     app = Starlette(routes=[Route("/api/tasks/{task_id}/cancel", tasks.api_task_cancel, methods=["POST"])])
     app.state.drive_root = root
@@ -113,6 +127,7 @@ def test_pause_door_answers_migrating_inside_the_window_and_proceeds_outside(tmp
     from supervisor import owner_pause_control
 
     root = tmp_path / "data"
+    ensure_current_store(root)
     calls = []
     monkeypatch.setattr(owner_pause_control, "request_owner_pause",
                         lambda task_id, *, request_id: calls.append((task_id, request_id)) or {"ok": True})
@@ -133,6 +148,7 @@ def test_presence_door_answers_migrating_inside_the_window_and_proceeds_outside(
     _seed_token(tmp_path, skill="telegram-bot", token="presence-token", permissions=["presence"],
                 manifest_permissions=["presence"])
     binding_id = _seed_presence_behavior(tmp_path)
+    ensure_current_store(tmp_path)
     runs = []
 
     def run_presence(**kwargs):
@@ -152,6 +168,35 @@ def test_presence_door_answers_migrating_inside_the_window_and_proceeds_outside(
     answered = client.post("/presence/turn", headers=headers, json={"binding_id": binding_id, "event": event})
     assert answered.status_code == 200, answered.json()
     assert runs == ["telegram:bot-1:42"]
+
+
+def test_the_task_reading_gets_answer_503_migrating_instead_of_importing(tmp_path):
+    """GET /api/tasks, GET /api/tasks/{id} and GET /api/chat/history on a root whose store is
+    not published (never imported: the boot door owns the import) answer 503 ``migrating`` and
+    import nothing; after publication they answer (a published store reads inside the window)."""
+    from ouroboros.gateway import tasks
+    from ouroboros.gateway.history import make_chat_history_endpoint
+
+    root = tmp_path / "data"
+    (root / "task_results").mkdir(parents=True)
+    (root / "task_results" / "t1.json").write_text(json.dumps(
+        {"task_id": "t1", "status": "completed", "ts": "2026-10-10T00:00:00+00:00", "_schema_version": 1}))
+    (root / "logs").mkdir()
+    (root / "logs" / "chat.jsonl").write_text(json.dumps(  # a quiz card: the history reads its task's projection
+        {"ts": "2026-10-10T00:00:00+00:00", "chat_id": 1, "direction": "out", "type": "quiz", "task_id": "t1",
+         "quiz": {"quiz_id": "q1", "question": "Choose?", "state": "open", "options": ["a", "b"]}}) + "\n")
+    app = Starlette(routes=[Route("/api/tasks", tasks.api_tasks_list, methods=["GET"]),
+                            Route("/api/tasks/{task_id}", tasks.api_task_get, methods=["GET"]),
+                            Route("/api/chat/history", make_chat_history_endpoint(root), methods=["GET"])])
+    app.state.drive_root = root
+    with TestClient(app) as client:
+        for path in ("/api/tasks", "/api/tasks/t1", "/api/chat/history"):
+            _migrating_body(client.get(path))
+        assert store.probe(root)[0] == "absent"  # no GET imported; the file stays where it was
+        ensure_current_store(root)
+        assert [row["task_id"] for row in client.get("/api/tasks").json()["tasks"]] == ["t1"]
+        assert client.get("/api/tasks/t1").json()["status"] == "completed"
+        assert client.get("/api/chat/history").status_code == 200
 
 
 # ---- the boot door ---------------------------------------------------------------------------

@@ -63,7 +63,7 @@ from ouroboros.contracts.task_contract import (
 )
 from ouroboros.outcomes import public_task_result
 from ouroboros import artifacts as artifact_store
-from ouroboros.store import StoreError
+from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.task_results import (
     STATUS_FAILED,
     STATUS_SCHEDULED,
@@ -871,7 +871,10 @@ async def api_tasks_list(request: Request) -> JSONResponse:
     queue_only = str(request.query_params.get("queue_only") or "").strip().lower() in {"1", "true", "yes"}
     drive_root = request_drive_root(request)
     wanted = {status.lower() for status in statuses}
-    payload = await asyncio.to_thread(_tasks_list_payload, drive_root, wanted, limit, queue_only)
+    try:
+        payload = await asyncio.to_thread(_tasks_list_payload, drive_root, wanted, limit, queue_only)
+    except StoreMigrating:
+        return json_error("the task store is importing; retry shortly", 503, reason_code="migrating")
     return JSONResponse(payload)
 
 
@@ -892,6 +895,8 @@ def _task_get_response(request: Request) -> JSONResponse:
             from ouroboros.task_store import exists
             if not exists(drive_root, task_id):
                 return json_error("task not found", 404)
+    except StoreMigrating:
+        return json_error("the task store is importing; retry shortly", 503, reason_code="migrating")
     except StoreError:
         data = None  # the store cannot answer for this id: unavailable, not absent
     if not data:

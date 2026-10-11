@@ -108,10 +108,7 @@ def test_an_imported_journal_gives_the_shipped_answer(checkpoint, tmp_path, monk
 
     root = tmp_path / "data"
     (root / "state").mkdir(parents=True)
-    for name, blob in checkpoint["files"].items():
-        path = root / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_DOC["blobs"][blob].replace("<ROOT>", str(root)), encoding="utf-8")
+    _materialize(root, checkpoint)
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
     for key, value in checkpoint["env"].items():
@@ -154,10 +151,13 @@ def test_an_imported_journal_gives_the_shipped_answer(checkpoint, tmp_path, monk
 
 
 def _materialize(root, checkpoint):
+    from ouroboros.store_import import ensure_current_store
+
     for name, blob in checkpoint["files"].items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_DOC["blobs"][blob].replace("<ROOT>", str(root)), encoding="utf-8")
+    ensure_current_store(root)  # the boot door imports the journal era's files; a read never does
 
 
 @pytest.mark.serial

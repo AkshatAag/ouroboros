@@ -36,6 +36,7 @@ from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.history_retention import retention_summary
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.project_dialogue import historical_terminal_projection
+from ouroboros.store import StoreMigrating
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, delegated_activity_meta, executor_observation_meta, initiator_meta, subagent_message_meta
 from ouroboros.task_results import TASK_COST_META_FIELDS as _TASK_COST_META_FIELDS
 from ouroboros.utils import JsonlChainUnreadable, strip_markdown, utc_now_iso
@@ -918,6 +919,8 @@ def _collect_chat_rows(
                 if field in entry:
                     rec[field] = entry[field]
             combined.append(rec)
+    except StoreMigrating:
+        raise  # the endpoint's own typed 503 (the store is importing), never a disclosed gap
     except Exception as exc:
         log.warning("Failed to read chat history: %s", exc)
         stream_gaps = {*stream_gaps, PROJECTION_FAILED}  # rows after the fault are missing: never a clean window
@@ -1581,8 +1584,9 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         cursor = request.query_params.get("cursor")
         try:
             body = await asyncio.to_thread(_assemble_history_response, data_dir, thread_id, n_human, n_progress, cursor)
-        except (HistoryCursorError, JsonlChainUnreadable, OSError) as exc:
-            reason = exc.reason if isinstance(exc, HistoryCursorError) else "history_source_unavailable"
+        except (HistoryCursorError, JsonlChainUnreadable, OSError, StoreMigrating) as exc:
+            reason = (exc.reason if isinstance(exc, HistoryCursorError) else
+                      "migrating" if isinstance(exc, StoreMigrating) else "history_source_unavailable")
             return Response(content=json.dumps({"messages": [], "error": reason, "reason_code": reason,
                                                 "next_cursor": cursor, "has_more": True,
                                                 "window": {"complete": False, "truncated_by": [reason]}}),

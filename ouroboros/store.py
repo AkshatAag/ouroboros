@@ -10,10 +10,12 @@ name lock, nothing above SQLite 3.24 so the bundled engine's file opens on a
 3.37 system engine); the schema (``tasks`` typed facts and obligation flags,
 ``task_bodies`` the original document joined only by ``load``, ``obligations``
 owner-held sets, ``task_handoffs``/``custody_runs``/``custody_outbox``, ``meta``);
-the tri-state open (``probe``/``open_store``: an absent, never-imported store is
-imported on first touch unless this process's lifespan is importing it, which
-reads as ``StoreMigrating``); ``update_task`` (the phase read inside the
-transaction); ``load`` (body plus the row-backed fields ``ROW_BACKED_FIELDS``).
+the tri-state open (``probe``/``open_store``: the boot door imports a root's facts
+inside the import window, a public write imports a never-imported root on first
+touch, a read never imports — a root holding facts reads as ``StoreMigrating``
+until published, one holding none reads empty); the one write gate (the window
+and the PUBLISHED phase; ``service`` for the importer/exporter/seam); ``update_task``;
+``load`` (body plus the row-backed fields ``ROW_BACKED_FIELDS``).
 """
 
 from __future__ import annotations
@@ -321,33 +323,51 @@ def store_ready(root: Any) -> bool:
 
 
 def migrating(root: Any) -> bool:
-    """The write doors' predicate (P1): True while ``store_ready`` is false because the boot
-    import owns ROOT or its first touch cannot publish. An absent store on an idle root is
-    first-touched here instead (milliseconds); the other typed answers stay the door's own."""
-    if store_ready(root):
-        return False
+    """The doors' predicate (P1): True while the import window is open for ROOT, while its
+    present store is not published (an export runs), or while ROOT holds facts no import has
+    published yet (the boot door imports them); a root without facts is not migrating — its first
+    write publishes an empty store. A pure read: nothing is opened for write, nothing imported."""
     if _in_window(root):
         return True
+    root = pathlib.Path(root)
     try:
-        with open_store(root, write=True):  # the door's own first touch: an idle absent root is imported now
-            return False
-    except StoreMigrating:
-        return True
+        state, _tier = probe(root)
     except StoreError:
-        return False
+        return False  # the door proceeds; its write gets the typed answer
+    if state == "present":
+        return not published(root)
+    return holds_facts(root) and not (generation_stamped(root) or retired_sibling(root))
 
 
-def _absent(root: pathlib.Path, *, first_touch: bool) -> None:
-    """The typed answer for an absent store, or a first-touch import when a public transaction
-    asks for one and nothing forbids it (a service transaction, the window, a nested open)."""
+def holds_facts(root: pathlib.Path) -> bool:
+    """Whether ROOT holds facts the importer would read: result files or obligation set files."""
+    for directory in (root / "task_results", root / "state" / "obligations"):
+        try:
+            with os.scandir(directory) as entries:
+                if any(entry.name.endswith(".json") for entry in entries):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _absent(root: pathlib.Path, *, write: bool, service: bool) -> bool:
+    """The typed answer for an absent store; a first-touch import when a public WRITE asks for
+    one and nothing forbids it (the window, a nested open); ``True`` when a READ may answer
+    empty because ROOT holds no facts to import (a read never imports: a root with facts is
+    the boot door's, ``StoreMigrating`` until it publishes)."""
     if generation_stamped(root):
         raise StoreLost(f"current store missing beside its completed stamp: {store_path(root)}")
     retired = retired_sibling(root)
     if retired is not None:
         raise StoreRetired(f"current store retired by an export as {retired.name}: the files are the authority")
     entered = getattr(_FIRST_TOUCH, "roots", None) or set()
-    if not first_touch or _in_window(root) or str(root) in entered:
+    if _in_window(root) or str(root) in entered or (write and service):
         raise StoreMigrating(f"current store not published yet: {store_path(root)}")
+    if not write:
+        if holds_facts(root):
+            raise StoreMigrating(f"current store not published yet: {store_path(root)} (a read never imports)")
+        return True
     from ouroboros.store_import import ensure_current_store
 
     # Another thread importing the same root is waited for inside ``ensure_current_store`` (its
@@ -361,14 +381,18 @@ def _absent(root: pathlib.Path, *, first_touch: bool) -> None:
         raise StoreMigrating(f"current store not published: the first-touch import failed: {exc}") from exc
     finally:
         _FIRST_TOUCH.roots = entered
+    return False
 
 
 @contextlib.contextmanager
 def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC, service: bool = False) -> Iterator["Txn"]:
-    """One transaction on the published store: ``StoreMigrating`` while the lifespan imports, a
-    first-touch import for a never-imported root, ``StoreLost`` for a missing store beside its
-    completed stamp, ``StoreRetired`` for one an export set aside (the files are the authority
-    until the next import), ``StoreBusy`` on contention; ``mode=rw``, never creating here.
+    """One transaction on the published store: ``StoreMigrating`` while the lifespan imports or
+    for a read of a never-imported root that holds facts (a read never imports; a root without
+    facts, or one that does not exist, reads empty and creates nothing), a first-touch import
+    when a public write reaches a never-imported root (a nested drive's first row), ``StoreLost``
+    for a missing store beside its completed stamp, ``StoreRetired`` for one an export set aside
+    (the files are the authority until the next import), ``StoreBusy`` on contention;
+    ``mode=rw``, never creating here.
 
     The one write gate: a public write (``write`` without ``service``) refuses ``StoreMigrating``
     while ROOT is in the import window and ``StoreRetired`` inside the transaction when the phase
@@ -379,9 +403,8 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC, serv
     if write and not service and _in_window(root):
         raise StoreMigrating(f"current store not published yet: the import of {root} runs")
     state, tier = probe(root)
-    if state == "absent" and not write and not root.is_dir():
-        # A root that does not exist holds nothing: a read answers empty and creates nothing.
-        conn = sqlite3.connect(":memory:", isolation_level=None)
+    if state == "absent" and ((not write and not root.is_dir()) or _absent(root, write=write, service=service)):
+        conn = sqlite3.connect(":memory:", isolation_level=None)  # the root holds nothing: empty, nothing created
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA)
         try:
@@ -391,7 +414,6 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC, serv
             conn.close()
         return
     if state == "absent":
-        _absent(root, first_touch=not service)
         state, tier = probe(root)
         if state == "absent":
             raise StoreMigrating(f"current store not published yet: {store_path(root)}")

@@ -1019,19 +1019,12 @@ def _presence_work_view(
     from ouroboros.presence_runner import presence_result_from_stored
 
     result = presence_result_from_stored(stored, work_ref)
-    return 200, {
-        "ok": True,
-        "status": status,
-        "outcome": result.outcome,
-        "text": result.text,
-        "work_ref": work_ref,
-        "delivery_reporting_version": result.delivery_reporting_version,
-    }
+    return 200, {"ok": True, "status": status, "outcome": result.outcome, "text": result.text, "work_ref": work_ref,
+                 "delivery_reporting_version": result.delivery_reporting_version}
 
 
 async def _api_presence_work(request: Request) -> JSONResponse:
     """Read a correlated late result, or retain an attributed inbox observation."""
-
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
         skill_name, _token_payload = await _authenticated(ctx, request.headers.get("x-skill-token", ""), "presence")
@@ -1059,6 +1052,8 @@ async def _api_presence_work(request: Request) -> JSONResponse:
         if getattr(exc, "code", ""):
             return _presence_exception(exc, 404)
         return _presence_error(str(exc), 400, "presence_observation_invalid", "rejected")
+    except store.StoreMigrating:
+        return _presence_error("the task store is importing; retry shortly", 503, "migrating", "retry")
     except Exception as exc:
         code = str(getattr(exc, "code", ""))
         if code:
