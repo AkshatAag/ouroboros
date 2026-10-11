@@ -116,11 +116,33 @@ def file_identity(path: pathlib.Path) -> Optional[tuple]:
     return info.st_ino, info.st_dev
 
 
+_HEADER_FDS: Dict[Tuple[int, int], int] = {}
+_HEADER_GUARD = threading.Lock()
+
+
+def _read_header(path: pathlib.Path) -> bytes:
+    """The first 100 bytes, without ever closing a descriptor of a live store file: on POSIX a
+    close releases every advisory lock this process holds on the file, an open transaction's on
+    another thread included, and another process then writes the same pages (sqlite.org
+    howtocorrupt §2.2). One descriptor per file stays open for the process lifetime; Windows
+    locks belong to their handle, and a held handle there would block the export rename."""
+    if os.name == "nt":
+        with open(path, "rb") as handle:
+            return handle.read(100)
+    info = os.stat(path)
+    with _HEADER_GUARD:
+        fd = _HEADER_FDS.get((info.st_dev, info.st_ino))
+        if fd is None:
+            fd = os.open(str(path), os.O_RDONLY)
+            opened = os.fstat(fd)  # the path may name a newer file than the stat did: key what was opened
+            _HEADER_FDS.setdefault((opened.st_dev, opened.st_ino), fd)
+        return os.pread(fd, 100, 0)
+
+
 def header_tier(path: pathlib.Path, application_ids: Dict[str, int]) -> Optional[str]:
     """The lock tier the file's SQLite header names; ``None`` for a missing or foreign file."""
     try:
-        with open(path, "rb") as handle:
-            header = handle.read(100)
+        header = _read_header(path)
     except FileNotFoundError:
         return None
     if len(header) < 100 or not header.startswith(b"SQLite format 3\x00"):

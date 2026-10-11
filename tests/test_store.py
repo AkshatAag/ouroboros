@@ -600,3 +600,35 @@ def test_mutator_inputs_are_prepared_before_begin_and_reprepared_outside_when_th
     retained = plan_author_history._read(tmp_path, "t1", final["author_history_head"])
     assert retained["author_disposition"]["rationale"] == "first stance"
     assert all(name in {"_read", "_persist"} for name in probes)
+
+
+def test_a_header_read_keeps_the_write_lock_another_thread_holds(tmp_path):
+    """Closing any descriptor of the store file releases every POSIX lock this process holds on
+    it (sqlite.org howtocorrupt 2.2). ``probe`` reads the header on every ``open_store``: a
+    close there freed an open transaction's lock and a second process wrote the same pages."""
+    import subprocess
+    import sys
+    import threading
+
+    from ouroboros import store_import
+
+    store_import.ensure_current_store(tmp_path)
+    task_store.patch_document(tmp_path, "t1", lambda _current: {"task_id": "t1", "status": "running"})
+    path = store.store_path(tmp_path)
+    attempt = ("import sqlite3, sys\n"
+               "conn = sqlite3.connect(sys.argv[1], isolation_level=None, timeout=0)\n"
+               "try:\n    conn.execute('BEGIN IMMEDIATE')\n"
+               "except sqlite3.OperationalError:\n    print('blocked')\n"
+               "else:\n    print('acquired')\n    conn.execute('ROLLBACK')\n")
+
+    def other_process() -> str:
+        return subprocess.run([sys.executable, "-c", attempt, str(path)], capture_output=True,
+                              text=True, timeout=60, check=True).stdout.strip()
+
+    with store.open_store(tmp_path, write=True):
+        assert other_process() == "blocked"
+        reader = threading.Thread(target=store.probe, args=(tmp_path,))
+        reader.start()
+        reader.join()
+        assert other_process() == "blocked"
+    assert other_process() == "acquired"
