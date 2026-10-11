@@ -98,7 +98,6 @@ class StoreBusy(StoreError):
     """Contention or exhausted process resources: retry; never a new store."""
 
 
-# ---- the core both SQLite stores share --------------------------------------
 _PROCESS_LOCKS: Dict[str, threading.RLock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
 
@@ -194,7 +193,6 @@ def transaction(conn: sqlite3.Connection, *, write: bool, commit_wait_sec: Optio
     (finish or (lambda: commit(conn)))()
 
 
-# ---- the current-facts store ------------------------------------------------
 
 def store_path(root: Any) -> pathlib.Path:
     return pathlib.Path(root) / STORE_REL

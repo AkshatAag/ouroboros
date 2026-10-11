@@ -58,7 +58,6 @@ def _decode_all(rows: Dict[str, Dict[str, Any]]):
     return {rid: _decode(facts) for rid, facts in rows.items()}
 
 
-# -- reads (each one SELECT) ---------------------------------------------------------------
 
 def runs(root, where: str = "", params: tuple = ()):
     """Custody selected by typed columns (all runs when unfiltered)."""
@@ -185,7 +184,6 @@ def snapshot(root, closed: bool = True):
     return {"state": state, "pending": pending_invocations(root, rows=invocations), "current": True}
 
 
-# -- the reducer's transaction -------------------------------------------------------------
 
 def _reduce(txn, event: Dict[str, Any], state: Dict[str, Any], marks_by_task: Dict[str, Dict[str, Any]]) -> None:
     """Apply ONE event to the rows it touches (``state`` holds the decoded runs the caller
@@ -343,7 +341,6 @@ def outbox_depth(root) -> int:
         return len(txn.outbox_rows())
 
 
-# -- the importer's fold -------------------------------------------------------------------
 
 def fold(rows) -> Dict[str, Any]:
     """Fold a retained chain ONCE into every custody table's rows: ``runs`` (facts by run

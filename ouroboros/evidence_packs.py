@@ -543,27 +543,24 @@ def _pack_roots(root: pathlib.Path) -> List[pathlib.Path]:
     return [root, *(child for child in descendant_drives(root) if packs_dir(child).is_dir())]
 
 
-def _checkpoint_prefix(sidecar: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return sorted((m for m in sidecar["members"] if m["kind"] == CHECKPOINT and m.get("path")), key=lambda m: int(m["offset"]))
+def _absent_checkpoints(root: Any, sidecar: Dict[str, Any]) -> Iterator[tuple]:
+    for member in sorted((m for m in sidecar["members"] if m["kind"] == CHECKPOINT and m.get("path")), key=lambda m: int(m["offset"])):
+        target = _handle_path(root, sidecar["task_id"], member["path"])
+        if not target.exists():
+            yield member, target
 
 
 def restore_checkpoint_handles(root: Any) -> Dict[str, Any]:
     """Write every packed checkpoint handle back to its loose name (prefix decode only; blobs stay
     packed) on this root and its retained child roots; ``OSError`` on ANY failure so the switch
     seam refuses before anything moves."""
-    from ouroboros.artifacts import task_artifact_dir_path
-
     report = {"status": "no_packs", "handles": 0, "bytes": 0, "packs": 0}
     try:
         for candidate in _pack_roots(pathlib.Path(root)):
             for sidecar_path, sidecar in list_sidecars(candidate):
                 report["packs"] += 1
                 reader = _PackReader(sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])))
-                for member in _checkpoint_prefix(sidecar):
-                    target = task_artifact_dir_path(candidate, sidecar["task_id"], create=False).joinpath(
-                        *pathlib.PurePosixPath(member["path"]).parts)
-                    if target.exists():
-                        continue
+                for member, target in _absent_checkpoints(candidate, sidecar):
                     parts: List[bytes] = []
                     reader.read_at(int(member["offset"]), int(member["size"]), parts.append)
                     if _restore_handle(target, b"".join(parts), member["sha256"]):
@@ -578,14 +575,11 @@ def restore_checkpoint_handles(root: Any) -> Dict[str, Any]:
 
 def pending_restore_bytes(root: Any) -> int:
     """Raw bytes of packed checkpoint handles whose loose file is absent (the preflight's sum)."""
-    from ouroboros.artifacts import task_artifact_dir_path
-
     total = 0
     for candidate in _pack_roots(pathlib.Path(root)):
         for _, sidecar in list_sidecars(candidate):
-            base = task_artifact_dir_path(candidate, sidecar["task_id"], create=False)
-            total += sum(int(m["size"]) for m in _checkpoint_prefix(sidecar)
-                         if not base.joinpath(*pathlib.PurePosixPath(m["path"]).parts).exists())
+            _handle_path(candidate, sidecar["task_id"], "")  # validate even a pack with no checkpoint members
+            total += sum(int(member["size"]) for member, _ in _absent_checkpoints(candidate, sidecar))
     return total
 
 

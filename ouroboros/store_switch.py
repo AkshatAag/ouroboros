@@ -60,7 +60,6 @@ def _progress(root: pathlib.Path, phase: str, **facts: Any) -> None:
     supervisor_row(root, "storage_switch", {"phase": phase, **facts})
 
 
-# ---- intent and receipt -------------------------------------------------------------
 
 def record_switch_intent(root: Any, *, target_sha: str, target_ref: str, reason: str, door: str) -> Dict[str, Any]:
     """The door's record of the switch it wants; write-once until consumed or refused."""
@@ -176,7 +175,6 @@ def rev_parse(repo_dir: Any, ref: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-# ---- preflight, money, abandonment -----------------------------------------------------
 
 def _roots(root: pathlib.Path) -> Tuple[list, str]:
     """The drives whose store is present, and the refusal when one is LOST (absent beside its
@@ -305,7 +303,6 @@ def _refuse(root: pathlib.Path, intent: Dict[str, Any], receipt: Dict[str, Any],
     return {"status": "refused", "reason": reason, "restored": restored, **facts}
 
 
-# ---- the seam ------------------------------------------------------------------------------
 
 def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, blockers: Sequence[str] = (),
                     restore_handles: Optional[Callable[[pathlib.Path], Dict[str, Any]]] = None) -> Dict[str, Any]:
