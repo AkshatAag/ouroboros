@@ -157,8 +157,15 @@ def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tup
     for name, rows in boot_admissions(root).items():  # under the set files: an interrupted publication stays a candidate
         sets[name] = {**rows, **sets.get(name, {})}
     folded, custody = _custody_rows(root, records)
+    # The chain decides a pending invocation: a request the retained chain bound to a run or
+    # refused (an old body's append after the export) is not readmitted from the exported set file.
+    resolved = {str(facts.get("invocation_id") or "") for facts, _hold in folded["runs"].values()} | set(folded["refused"])
     for name, rows in custody.items():
-        sets[name] = {**sets.get(name, {}), **rows} if name == "custody_open" else _merge_receipts(sets.get(name, {}), rows)
+        if name == "custody_open":
+            kept = {key: facts for key, facts in sets.get(name, {}).items() if key.split(":", 1)[-1] not in resolved}
+            sets[name] = {**kept, **rows}
+        else:
+            sets[name] = _merge_receipts(sets.get(name, {}), rows)
     sets = {name: o.owner_held_rows(name, rows) for name, rows in sets.items()}  # derived members come from the columns
     provenance = {"status": "completed", "imported_at": utc_now_iso(), "lock_tier": tier,
                   "results": len(records), "quarantined": len(quarantined), "refused": refused,

@@ -314,6 +314,32 @@ def test_p6_keeps_the_store_only_set_rows_and_moves_only_what_the_old_body_chang
         assert set(txn.set_rows("custody_open")) == {"run:r1", "invocation:new", "invocation:old"}
 
 
+def test_a_rebuild_does_not_readmit_a_pending_invocation_the_chain_has_since_bound_or_refused(tmp_path):
+    """The exported ``custody_open`` set file is a snapshot; a request the retained chain bound to
+    a run or definitely refused after the export (an old body's append) stays resolved at the
+    rebuild — the chain decides, a request the chain never mentions keeps its file row."""
+    from ouroboros import delegate_custody as c
+    from ouroboros.store_switch import _retire
+
+    root = fixture_root(tmp_path)
+    ensure_current_store(root, with_children=False)
+    for iid in ("inv-bound", "inv-refused", "inv-open"):
+        assert c.emit(root, c.START_REQUESTED, {"invocation_id": iid, "task_id": "root1", "request": {"p": iid}})
+    export_facts(root)
+    chain = c.event_log_path(root)
+    append_jsonl(chain, {"ts": "2026-01-02T00:00:00+00:00", "type": c.STARTED, "run_id": "run-old", "task_id": "root1",
+                         "invocation_id": "inv-bound"})
+    append_jsonl(chain, {"ts": "2026-01-02T00:00:01+00:00", "type": c.START_FAILED, "task_id": "root1",
+                         "invocation_id": "inv-refused", "definite": True, "error": "refused"})
+    add_set_member(root, "custody_open", "invocation:inv-file-only", {"request": {"type": c.START_REQUESTED,
+                   "invocation_id": "inv-file-only", "task_id": "root1", "request": {"p": "f"}}})
+    _retire(root)
+    assert ensure_current_store(root, with_children=False)["status"] == "completed"
+    assert sorted(row["invocation_id"] for row in c.pending_invocations(root)) == ["inv-file-only", "inv-open"]
+    assert c.invocation_record(root, "inv-bound")["run_id"] == "run-old"
+    assert c.invocation_record(root, "inv-refused")["state"] == "failed_definite"
+
+
 def test_p6_applies_the_custody_events_an_old_body_appended_after_the_boundary_once(tmp_path):
     """B4: the import records the chain boundary and every own append moves it; a P6' reduces
     the legacy events after it (event-id dedup, a replayed request re-opens nothing) and moves
