@@ -258,8 +258,8 @@ def set_fence_state(root_drive: Any, root_task_id: str, *, fence_id: str, state:
                   if state == FENCE_PAUSED and old.get("state") != FENCE_PAUSED else {})
         return stamp_task_result_schema({**current, **notice, "owner_pause": fence})
 
-    from ouroboros.obligations import update_result
-    update_result(pathlib.Path(root_drive), str(root_task_id), update)
+    from ouroboros.task_store import patch_document
+    patch_document(pathlib.Path(root_drive), str(root_task_id), update)
     return dict(written)
 
 

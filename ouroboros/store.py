@@ -670,10 +670,6 @@ class Txn:
             (run_id, str(facts.get("task_id") or ""), str(facts.get("project_id") or ""),
              str(facts.get("invocation_id") or ""), state, machine_json(facts), utc_now_iso()))
 
-    def custody_task_ids(self) -> List[str]:
-        return [record["task_id"] for record in
-                self.conn.execute("SELECT DISTINCT task_id FROM custody_runs WHERE task_id<>'' ORDER BY task_id")]
-
     # -- the custody outbox: an emitted event waits here between its COMMIT and its chain append.
     def outbox_put(self, event: Dict[str, Any]) -> None:
         self.conn.execute(

@@ -1347,7 +1347,6 @@ def recover_orphaned_acceptance_operations(drive_root: Any, *, stop: Optional[Ca
             row = load_task_result(root, task_id) or {}
         except (OSError, ValueError, StoreError):
             continue
-        path = SimpleNamespace(stem=task_id)  # the settlement rows below name the task by its id
         ctx = SimpleNamespace(task_id=task_id, task_attempt=None, drive_root=root,
                               budget_drive_root=root, task_metadata={}, event_queue=None)
         if not acceptance_actor_ended(ctx, task_id, row):
@@ -1362,7 +1361,7 @@ def recover_orphaned_acceptance_operations(drive_root: Any, *, stop: Optional[Ca
                           else controller_state(entry.get("controller")))
             if registered or (state != OPERATION_UNPUBLISHED and controller in {"alive", "unknown"}):
                 if controller == "unknown" and not registered:
-                    report["deferred"].append({"task_id": path.stem, "owner_id": owner_id,
+                    report["deferred"].append({"task_id": task_id, "owner_id": owner_id,
                                                "reason": "controller_unverifiable"})
                 continue
             if state == OPERATION_PREPARING:
@@ -1372,30 +1371,30 @@ def recover_orphaned_acceptance_operations(drive_root: Any, *, stop: Optional[Ca
                 if fence_closed(fence) and fence.get('fence_id') == pause.get('fence_id'):
                     from supervisor.owner_pause_control import retain_late_phase_latch
                     retain_late_phase_latch(root, pause['root_task_id'])
-                    report['deferred'].append({'task_id': path.stem, 'owner_id': owner_id,
+                    report['deferred'].append({'task_id': task_id, 'owner_id': owner_id,
                                                'reason': 'owner_paused_preparation'})
                     continue  # Unsent remainder, not a live controller or boot dispatch authority.
-                _mark_operation(root, path.stem, owner_id, 'preparation_unknown', from_states={OPERATION_PREPARING})
-                report['pending'].append({'task_id': path.stem, 'owner_id': owner_id,
+                _mark_operation(root, task_id, owner_id, 'preparation_unknown', from_states={OPERATION_PREPARING})
+                report['pending'].append({'task_id': task_id, 'owner_id': owner_id,
                                           'reason': 'preparation_controller_ended_before_request'})
                 continue  # an intent is never a ready request or a paid claim
-            ctx = SimpleNamespace(task_id=path.stem, task_attempt=entry.get("task_attempt"), drive_root=root,
+            ctx = SimpleNamespace(task_id=task_id, task_attempt=entry.get("task_attempt"), drive_root=root,
                                   budget_drive_root=root, task_metadata={}, event_queue=None)
             try:
                 status = settle_acceptance_operation(
-                    ctx, retry_key=str(entry.get("retry_key") or ""), task_id=path.stem, result=row,
+                    ctx, retry_key=str(entry.get("retry_key") or ""), task_id=task_id, result=row,
                     checkpoint={**entry, "owner_id": owner_id}, controller=entry.get("controller"))
             except Exception as exc:
-                report["errors"].append({"task_id": path.stem, "owner_id": owner_id, "error": f"{type(exc).__name__}: {exc}"})
+                report["errors"].append({"task_id": task_id, "owner_id": owner_id, "error": f"{type(exc).__name__}: {exc}"})
                 log.warning("Orphaned acceptance operation %s could not be collected", owner_id, exc_info=True)
                 continue
             done = status in {"announced", "published", "settled"}
             if done:
-                _mark_operation(root, path.stem, owner_id, OPERATION_COLLECTED,
+                _mark_operation(root, task_id, owner_id, OPERATION_COLLECTED,
                                 from_states=_OPEN_STATES | {OPERATION_UNPUBLISHED})
-            report["settled" if done else "pending"].append({"task_id": path.stem, "owner_id": owner_id,
+            report["settled" if done else "pending"].append({"task_id": task_id, "owner_id": owner_id,
                                                              "status": status})
-        _recover_legacy_acceptance_panels(root, path.stem, row, report, stop=stop)
+        _recover_legacy_acceptance_panels(root, task_id, row, report, stop=stop)
     return report
 
 

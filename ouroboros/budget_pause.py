@@ -453,8 +453,8 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
                   and (old.get("state") != STATE_PAUSED or old.get("pause_id") != row.get("pause_id")) else {})
         return stamp_task_result_schema({**current, **retained_wait, **notice, "budget_pause": dict(row)})
 
-    from ouroboros.obligations import update_result
-    update_result(root, task_id, update)
+    from ouroboros.task_store import patch_document
+    patch_document(root, task_id, update)
     return dict(row)
 
 

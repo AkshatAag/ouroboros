@@ -6,8 +6,8 @@ row the same transaction writes. Readers ask the row (``task_facts``,
 ``select_lineage``, ``list_documents`` with a status prefilter, ``newest_ids``,
 ``signature``, ``exists``) and read a body only for the documents they need.
 ``patch_document`` is the locked read-modify-write every result patch used to do
-on a file: the mutator sees CURRENT, returns the new document or ``None`` for no
-write, and ``after_write`` runs inside the transaction. ``patch_handoff`` /
+on a file: the mutator sees CURRENT and returns the new document or ``None`` for
+no write. ``patch_handoff`` /
 ``put_handoffs`` write one operation row of the ``store.ROW_BACKED_FIELDS``
 projections (a tool claim, a model wait, a retired consumer) without a body write;
 ``load`` projects the rows back. Nothing here touches ``task_results/*.json``: the
@@ -59,12 +59,9 @@ def delete_document(root: Any, task_id: str) -> bool:
 
 
 def patch_document(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]], *,
-                   strict_existing_dict: bool = False, reject_existing_empty_dict: bool = False,
-                   after_write: Optional[Callable[[Dict[str, Any]], Any]] = None,
-                   riders: Tuple[Callable[[Txn, Dict[str, Any], Dict[str, Any]], None], ...] = ()) -> Dict[str, Any]:
+                   strict_existing_dict: bool = False, reject_existing_empty_dict: bool = False) -> Dict[str, Any]:
     """One result patch: the mutator over CURRENT inside the write transaction; ``None`` leaves
-    the store untouched; ``after_write(updated)`` and the riders run inside the same
-    transaction. Returns the document that is current when the transaction ends."""
+    the store untouched. Returns the document that is current when the transaction ends."""
     from ouroboros.obligations import pending_drive_rule
 
     task_id = str(task_id)
@@ -74,13 +71,9 @@ def patch_document(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], 
         seen["current"] = current
         return mutator(current)
 
-    def _after(txn: Txn, current: Dict[str, Any], updated: Dict[str, Any]) -> None:
-        if after_write is not None:
-            after_write(updated)
-
     # Every stored body is a non-empty dict: the file-era guards have nothing left to refuse.
     del strict_existing_dict, reject_existing_empty_dict
-    updated = store.update_task(root, task_id, _mutate, riders=(_after, *riders), pending_drive=pending_drive_rule)
+    updated = store.update_task(root, task_id, _mutate, pending_drive=pending_drive_rule)
     return seen.get("current", {}) if updated is None else {**updated, "task_id": task_id}
 
 

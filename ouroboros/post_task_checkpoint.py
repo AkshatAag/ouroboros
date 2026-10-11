@@ -120,7 +120,7 @@ def update_late_phase_pause(drive_root: Any, task_id: str,
     read-modify-write: it never writes a lifecycle status.
     """
     from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
-    from ouroboros.obligations import update_result
+    from ouroboros.task_store import patch_document
 
     applied: Dict[str, Any] = {}
 
@@ -136,7 +136,7 @@ def update_late_phase_pause(drive_root: Any, task_id: str,
         applied["record"] = record
         return stamp_task_result_schema({**latest, "root_phase_checkpoint": {**checkpoint, "post_task_pause": record}})
 
-    update_result(pathlib.Path(drive_root), str(task_id), update)
+    patch_document(pathlib.Path(drive_root), str(task_id), update)
     return applied.get("record")
 
 

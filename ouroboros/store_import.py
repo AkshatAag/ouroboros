@@ -390,7 +390,7 @@ def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Recor
            baseline: Dict[str, Any], provenance: Dict[str, Any], folded: Optional[Dict[str, Any]] = None, *,
            sets_baseline: Optional[Dict[str, Any]] = None, chain_offset: int = 0,
            occupied: Optional[Dict[str, str]] = None) -> None:
-    from ouroboros.delegate_custody_current import CHAIN_BOUNDARY
+    from ouroboros.delegate_custody_current import CHAIN_BOUNDARY, write_fold
 
     conn = store.connect(tmp, tier, create=True)
     try:
@@ -404,11 +404,7 @@ def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Recor
         for name, rows in sets.items():
             txn.replace_set(name, rows)
         if folded:
-            for rid, (facts, hold) in folded["runs"].items():
-                txn.put_custody(rid, facts, state=hold)
-            for name in ("refused", "marks"):
-                for identity, facts in folded[name].items():
-                    txn.put_row(f"custody_{name}", identity, facts)
+            write_fold(txn, folded, replace=False)  # the sets above already hold the fold's open rows
         for key, value in (("schema_version", store.SCHEMA_VERSION), ("lock_tier", tier), ("generation", GENERATION),
                            ("phase", PUBLISHED), ("import", provenance), ("freeze_utc", utc_now_iso()),
                            ("baseline", baseline), ("sets_baseline", sets_baseline or {}), (CHAIN_BOUNDARY, chain_offset),
@@ -555,12 +551,6 @@ def _apply_legacy_custody(root: pathlib.Path, txn: Txn) -> int:
     return applied
 
 
-def _set_rows_in_full(txn: Txn, name: str) -> Dict[str, Any]:
-    """An obligation set file's content: the stored rows plus the members the flag and
-    status columns derive (owner-held sets are rows only)."""
-    return o.members_in(txn, name)
-
-
 def _identity(text: str) -> Dict[str, Any]:
     data = text.encode("utf-8")
     return {"size": len(data), "sha256": sha256_hex(data)}
@@ -587,7 +577,7 @@ def export_facts(root: Any) -> Dict[str, Any]:
                        if path.stem not in task_ids and not (baseline.get(path.stem) or {}).get("refused"))
         manifest = {"status": "writing", "started_at": utc_now_iso(),
                     "results": {task_id: _identity(document_text(txn.load(task_id))) for task_id in task_ids},
-                    "sets": {name: _identity(machine_json(_set_rows_in_full(txn, name)))  # what atomic_write_json writes
+                    "sets": {name: _identity(machine_json(o.members_in(txn, name)))  # the set file in FULL, as atomic_write_json writes it
                              for name in names},
                     "removed": stale}
         txn.set_meta("export_manifest", manifest)
@@ -605,7 +595,7 @@ def export_facts(root: Any) -> Dict[str, Any]:
             total += len(data)
             entries[task_id] = _baseline_entry(path, data, document)
         for name in names:
-            atomic_write_json(set_file_path(root, name), _set_rows_in_full(txn, name), fsync=True)
+            atomic_write_json(set_file_path(root, name), o.members_in(txn, name), fsync=True)
     for task_id in stale:
         with contextlib.suppress(FileNotFoundError):
             task_result_path(root, task_id).unlink()

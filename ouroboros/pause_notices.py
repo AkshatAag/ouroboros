@@ -35,8 +35,8 @@ def notice_fields(current: dict, root: Any, task_id: str, episode_id: str, reaso
 
 def _acknowledge(root: pathlib.Path, task_id: str, identity: str, notice: dict) -> None:
     """Drop one recorded notice from the task; the last one retires its membership."""
-    from ouroboros.obligations import update_result
     from ouroboros.task_results import require_writable_task_result_schema
+    from ouroboros.task_store import patch_document
 
     def update(current: dict):
         require_writable_task_result_schema(current)
@@ -49,7 +49,7 @@ def _acknowledge(root: pathlib.Path, task_id: str, identity: str, notice: dict) 
             updated.pop("pause_notices")
         return updated
 
-    update_result(root, task_id, update)
+    patch_document(root, task_id, update)
 
 
 def reconcile_pause_notices(drive_root: Any, *, stop_requested=None) -> None:

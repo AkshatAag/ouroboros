@@ -110,13 +110,6 @@ def result_facts(row: dict) -> dict:
     return {key: row[key] for key in _FACT_COLUMNS if row.get(key)}
 
 
-def update_result(root: Any, task_id: str, mutator: Any, **kwargs: Any) -> dict:
-    """A patch of one result document in the store; its memberships ride on the write."""
-    from ouroboros.task_store import patch_document
-
-    return patch_document(root, task_id, mutator, **kwargs)
-
-
 def pending_drive_rule(txn: store.Txn, current: dict, updated: dict) -> bool:
     """The writer's ``pending_drive``: nonterminal owes the drive; a settled result owes it until
     its terminal files are ready; any other status keeps the previous answer (as the file set

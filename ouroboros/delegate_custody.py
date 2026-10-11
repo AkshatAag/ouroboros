@@ -1,19 +1,8 @@
-"""Durable custody for delegated (Claudexor) runs.
-
-A delegated run is an OVERPOWERED, MUTATING process that Ouroboros does not own the
-process tree of: it lives inside the Claudexor daemon and survives our worker, so
-custody cannot live in a module dict — a crash, restart, or lost POST response would
-leave a LIVE run nothing can wait on, cancel or settle. ``maxSeconds`` is damage
-limitation, not custody.
-
-**The authority is the durable record that is already written.** The task's own event
-log (``logs/events.jsonl`` under the canonical data root) is the SSOT; the
-process-local dict below is a pure memoization of these rows, and every question is
-answered by replaying them. Rows survive a restart, so custody does too.
-
-Three lookup answers, never two: OWNED, FOREIGN (another task started it) and UNKNOWN
-(no durable record at all). Collapsing UNKNOWN into "not yours" is what made a restarted
-owner indistinguishable from an intruder.
+"""Durable custody for delegated (Claudexor) runs: a run lives inside the Claudexor daemon
+and survives our worker, so its custody is a row of the current-facts store
+(``delegate_custody_current``: the event reduced and parked in one transaction, then appended
+to the chain ``logs/events.jsonl`` — the forensic record — never a module dict). Three lookup
+answers, never two: OWNED, FOREIGN (another task started it) and UNKNOWN (no durable record).
 """
 
 from __future__ import annotations
