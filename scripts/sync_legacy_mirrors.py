@@ -4,8 +4,10 @@
 Before 2026-05-31 Ouroboros lived at ``joi-lab/ouroboros`` (a fork of this
 repository) and ``joi-lab/ouroboros-desktop``. Both stay archived with a
 "moved" notice, yet old posts, clones, Colab links and installed builds still
-reach them. After every push to ``ouroboros-stable`` this script briefly
-unarchives each mirror and:
+reach them. After every stable release (``main`` advances to the release tag
+only once the release is published) this script checks that the source commit
+carries that published, non-prerelease tag, then briefly unarchives each mirror
+and:
 
 - fast-forwards its update branches to the stable commit (never a force push:
   a branch that is not an ancestor of the stable commit is reported and left);
@@ -24,7 +26,8 @@ admin on both mirrors (archive state) and the workflow scope (the stable tree
 carries ``.github/workflows``). Standard library only.
 
 Usage: ``python3 scripts/sync_legacy_mirrors.py --source-ref <sha> [--dry-run]
-[--only joi-lab/ouroboros] [--skip-branch joi-lab/ouroboros-desktop:ouroboros]``
+[--only joi-lab/ouroboros] [--skip-branch joi-lab/ouroboros-desktop:ouroboros]``;
+``--archive-only`` just archives both mirrors (the workflow's cleanup step).
 """
 
 from __future__ import annotations
@@ -164,8 +167,13 @@ class GitHub:
                     raw = resp.read()
                     return resp.status, json.loads(raw) if raw.strip() else {}
             except urllib.error.HTTPError as exc:
-                if exc.code < 500 or attempt == attempts:
-                    return exc.code, {"message": exc.read().decode("utf-8", "replace")[:400]}
+                message = exc.read().decode("utf-8", "replace")[:400]
+                limited = exc.code == 429 or (exc.code == 403 and "rate limit" in message.lower())
+                if not (exc.code >= 500 or limited) or attempt == attempts:
+                    return exc.code, {"message": message}
+                if limited:  # secondary limits name their own wait
+                    time.sleep(min(60, int(exc.headers.get("Retry-After") or 30)))
+                    continue
             except (urllib.error.URLError, http.client.HTTPException, OSError):
                 if attempt == attempts:
                     raise
@@ -189,8 +197,11 @@ class GitHub:
 
 
 def git(*args: str, env: dict[str, str] | None = None, stdin: str | None = None) -> str:
-    result = subprocess.run(["git", *args], capture_output=True, text=True, input=stdin,
-                            env={**os.environ, **(env or {})})
+    try:
+        result = subprocess.run(["git", *args], capture_output=True, text=True, input=stdin,
+                                env={**os.environ, **(env or {})}, timeout=900)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"git {' '.join(args[:3])}: no answer in 15 minutes") from exc
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args[:3])}: {result.stderr.strip()[:400]}")
     return result.stdout.strip()
@@ -273,7 +284,38 @@ def refresh(gh: GitHub, token: str, mirror: Mirror, source: str, version: str, s
                 gh.must("PATCH", f"/repos/{mirror.repo}/releases/{release['id']}",
                         {"body": new_body, "make_latest": "false"})
                 marked += 1
+                time.sleep(0 if gh.dry_run else 1)  # GitHub asks for a pause between mutations
         log.append(f"{mirror.repo}: {'would mark' if gh.dry_run else 'marked'} {marked} outdated releases")
+
+
+def published_stable_problem(gh: GitHub, source: str, version: str) -> str:
+    """Empty when ``source`` is the commit of the published, non-prerelease ``v<VERSION>``."""
+    tag = f"v{version}"
+    try:
+        tagged = git("rev-parse", f"{tag}^{{commit}}")
+    except RuntimeError:
+        return f"no tag {tag}"
+    if tagged != source:
+        return f"{tag} is {tagged[:10]}"
+    status, release = gh.call("GET", f"/repos/razzant/ouroboros/releases/tags/{tag}")
+    if status != 200:
+        return f"no GitHub release {tag} (HTTP {status})"
+    if release.get("draft") or release.get("prerelease"):
+        return f"release {tag} is a draft or a prerelease"
+    return ""
+
+
+def archive_all(gh: GitHub, mirrors: list[Mirror]) -> int:
+    failures = 0
+    for mirror in mirrors:
+        try:
+            if not gh.must("GET", f"/repos/{mirror.repo}").get("archived"):
+                gh.must("PATCH", f"/repos/{mirror.repo}", {"archived": True})
+            print(f"{mirror.repo}: archived")
+        except Exception as exc:  # noqa: BLE001 - name the repository left open
+            failures += 1
+            print(f"{mirror.repo}: STILL UNARCHIVED: {exc}")
+    return 1 if failures else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -282,14 +324,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", action="append", default=[])
     parser.add_argument("--skip-branch", action="append", default=[])
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--archive-only", action="store_true")
     args = parser.parse_args(argv)
     token = os.environ.get("MIRROR_TOKEN", "").strip()
     if not token:
         print("MIRROR_TOKEN is not set", file=sys.stderr)
         return 2
+    gh = GitHub(token, args.dry_run)
+    if args.archive_only:
+        return archive_all(gh, [m for m in MIRRORS if not args.only or m.repo in args.only])
     source = git("rev-parse", f"{args.source_ref}^{{commit}}")
     version = git("show", f"{source}:VERSION").strip()
-    gh = GitHub(token, args.dry_run)
+    reason = published_stable_problem(gh, source, version)
+    if reason:
+        print(f"{source[:10]} is not a published stable release ({reason}); nothing to refresh")
+        return 0
     log: list[str] = [f"acting as {gh.must('GET', '/user').get('login', '?')}"]
     failures = 0
     for mirror in MIRRORS:

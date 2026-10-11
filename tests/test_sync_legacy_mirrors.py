@@ -81,3 +81,64 @@ def test_main_commit_keeps_both_histories_and_is_idempotent(tmp_path, monkeypatc
     assert mirrors.build_main_commit(fork, source, new, "7.6.0") is None
     desktop = mirrors.build_main_commit(mirrors.MIRRORS[1], source, mirror_main, "7.6.0")
     assert "notebooks/quickstart.ipynb" not in _git(repo, "ls-tree", "-r", "--name-only", desktop)
+
+
+def _fake_github(monkeypatch, release):
+    calls = []
+
+    def call(self, method, path, body=None):
+        calls.append((method, path))
+        if path == "/user":
+            return 200, {"login": "ouroboros-agent"}
+        if path.startswith("/repos/razzant/ouroboros/releases/tags/"):
+            return (200, release) if release is not None else (404, {"message": "Not Found"})
+        if method == "GET":
+            return 200, {"archived": False}
+        return 200, {}
+
+    monkeypatch.setattr(mirrors.GitHub, "call", call)
+    monkeypatch.setenv("MIRROR_TOKEN", "test-token")
+    return calls
+
+
+def _tagged_repo(tmp_path, monkeypatch, *, tag):
+    repo = tmp_path / "official"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    head = _commit(repo, {"VERSION": "7.7.0\n"}, "release")
+    if tag:
+        _git(repo, "tag", tag)
+    monkeypatch.chdir(repo)
+    return head
+
+
+def _mutations(calls):
+    return [c for c in calls if c[0] != "GET"]
+
+
+def test_a_commit_without_the_published_release_tag_changes_nothing(tmp_path, monkeypatch):
+    head = _tagged_repo(tmp_path, monkeypatch, tag="")
+    calls = _fake_github(monkeypatch, release={"draft": False, "prerelease": False})
+    assert mirrors.main(["--source-ref", head]) == 0
+    assert _mutations(calls) == []
+
+
+def test_a_prerelease_changes_nothing(tmp_path, monkeypatch):
+    head = _tagged_repo(tmp_path, monkeypatch, tag="v7.7.0")
+    calls = _fake_github(monkeypatch, release={"draft": False, "prerelease": True})
+    assert mirrors.main(["--source-ref", head]) == 0
+    assert _mutations(calls) == []
+
+
+def test_the_published_stable_release_passes_the_gate(tmp_path, monkeypatch):
+    head = _tagged_repo(tmp_path, monkeypatch, tag="v7.7.0")
+    calls = _fake_github(monkeypatch, release={"draft": False, "prerelease": False})
+    # No mirror selected: the run stops right after the gate, without network or mutations.
+    assert mirrors.main(["--source-ref", head, "--only", "joi-lab/none"]) == 0
+    assert ("GET", "/user") in calls and _mutations(calls) == []
+
+
+def test_archive_only_archives_both_mirrors(monkeypatch):
+    calls = _fake_github(monkeypatch, release=None)
+    assert mirrors.main(["--archive-only"]) == 0
+    assert _mutations(calls) == [("PATCH", "/repos/joi-lab/ouroboros"), ("PATCH", "/repos/joi-lab/ouroboros-desktop")]
