@@ -31,11 +31,13 @@ from __future__ import annotations
 import argparse
 import base64
 import dataclasses
+import http.client
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -150,15 +152,24 @@ class GitHub:
             print(f"DRY-RUN {method} {path} {json.dumps(body or {})[:200]}")
             return 0, {}
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(f"{API}{path}", data=data, method=method, headers={
-            "Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "ouroboros-legacy-mirrors"})
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                raw = resp.read()
-                return resp.status, json.loads(raw) if raw.strip() else {}
-        except urllib.error.HTTPError as exc:
-            return exc.code, {"message": exc.read().decode("utf-8", "replace")[:400]}
+        # Only idempotent requests are retried: a repeated POST could create a second release.
+        attempts = 1 if method == "POST" else 3
+        for attempt in range(1, attempts + 1):
+            req = urllib.request.Request(f"{API}{path}", data=data, method=method, headers={
+                "Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "ouroboros-legacy-mirrors"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    raw = resp.read()
+                    return resp.status, json.loads(raw) if raw.strip() else {}
+            except urllib.error.HTTPError as exc:
+                if exc.code < 500 or attempt == attempts:
+                    return exc.code, {"message": exc.read().decode("utf-8", "replace")[:400]}
+            except (urllib.error.URLError, http.client.HTTPException, OSError):
+                if attempt == attempts:
+                    raise
+            time.sleep(3 * attempt)
+        raise AssertionError("unreachable")
 
     def must(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         status, data = self.call(method, path, body)
@@ -168,8 +179,8 @@ class GitHub:
 
     def releases(self, repo: str) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
-        for page in range(1, 50):
-            batch = self.must("GET", f"/repos/{repo}/releases?per_page=100&page={page}")
+        for page in range(1, 100):
+            batch = self.must("GET", f"/repos/{repo}/releases?per_page=30&page={page}")
             if not batch:
                 return out
             out.extend(batch)
@@ -239,7 +250,8 @@ def refresh(gh: GitHub, token: str, mirror: Mirror, source: str, version: str, s
         pushes.append(f"{main_new}:refs/heads/main")
     if pushes and not gh.dry_run:
         git(*auth_args(token), "push", "--quiet", url, *pushes)
-    log.append(f"{mirror.repo}: pushed {[p.split(':', 1)[1] for p in pushes] or 'nothing'}")
+    verb = "would push" if gh.dry_run else "pushed"
+    log.append(f"{mirror.repo}: {verb} {[p.split(':', 1)[1] for p in pushes] or 'nothing'}")
 
     pointer_body = render_pointer(mirror, version)
     status, existing = gh.call("GET", f"/repos/{mirror.repo}/releases/tags/{POINTER_TAG}")
@@ -260,7 +272,7 @@ def refresh(gh: GitHub, token: str, mirror: Mirror, source: str, version: str, s
                 gh.must("PATCH", f"/repos/{mirror.repo}/releases/{release['id']}",
                         {"body": new_body, "make_latest": "false"})
                 marked += 1
-        log.append(f"{mirror.repo}: marked {marked} outdated releases")
+        log.append(f"{mirror.repo}: {'would mark' if gh.dry_run else 'marked'} {marked} outdated releases")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -295,7 +307,8 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             try:
                 gh.must("PATCH", f"/repos/{mirror.repo}", {"archived": True})
-                log.append(f"{mirror.repo}: archived{' again' if unarchived else ''}")
+                log.append(f"{mirror.repo}: {'would archive' if gh.dry_run else 'archived'}"
+                           f"{' again' if unarchived else ''}")
             except Exception as exc:  # noqa: BLE001
                 failures += 1
                 log.append(f"{mirror.repo}: FAILED to archive: {exc}")
