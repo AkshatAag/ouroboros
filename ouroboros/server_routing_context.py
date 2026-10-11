@@ -587,30 +587,21 @@ def _message_routing_receipt(ctx: Any, client_message_id: str) -> Dict[str, Any]
 
     Read from the annotation the routing rail already writes, so no new store and no
     new reader: the decision turn simply sees what was already decided for the same
-    message. Fail-soft - a missing or torn annotations file leaves the turn exactly
-    as it was.
+    message (a promote's or route's status from its admission, as every reader shows
+    it: ``routing_wait.routing_act_fields``). Fail-soft - a missing or torn
+    annotations file leaves the turn exactly as it was.
     """
     if not client_message_id:
         return {}
     try:
         from ouroboros.project_dialogue import latest_chat_annotations
+        from ouroboros.routing_wait import routing_act_fields
 
         row = latest_chat_annotations(ctx.DRIVE_ROOT).get(str(client_message_id)) or {}
+        return routing_act_fields(pathlib.Path(ctx.DRIVE_ROOT), str(client_message_id), row) if row else {}
     except Exception:
         log.debug("message routing receipt lookup failed", exc_info=True)
         return {}
-    return _receipt_fields(row) if row else {}
-
-
-def _receipt_fields(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "action": str(row.get("action") or ""),
-        "target": str(row.get("target") or ""),
-        "target_label": str(row.get("target_label") or ""),
-        "status": str(row.get("status") or ""),
-        "ts": str(row.get("ts") or ""),
-        "project_id": str(row.get("project_id") or ""),
-    }
 
 
 def _message_routing_acts(ctx: Any, client_message_id: str) -> list:
@@ -622,14 +613,16 @@ def _message_routing_acts(ctx: Any, client_message_id: str) -> list:
     """
     try:
         from ouroboros.project_dialogue import _ANNOTATIONS_NAME, _latest_annotations_by_token
+        from ouroboros.routing_wait import routing_act_fields
 
+        root = pathlib.Path(ctx.DRIVE_ROOT)
         rows = [row for (message_id, _token), row in _latest_annotations_by_token(
-            pathlib.Path(ctx.DRIVE_ROOT) / "logs" / _ANNOTATIONS_NAME).items()
-            if message_id == str(client_message_id)]
+            root / "logs" / _ANNOTATIONS_NAME).items() if message_id == str(client_message_id)]
+        return [routing_act_fields(root, str(client_message_id), row)
+                for row in sorted(rows, key=lambda row: str(row.get("ts") or ""))]
     except Exception:
         log.debug("message routing acts lookup failed", exc_info=True)
         return []
-    return [_receipt_fields(row) for row in sorted(rows, key=lambda row: str(row.get("ts") or ""))]
 
 
 def _scoped_task_metadata(project_id: str, task_metadata: Any) -> Any:

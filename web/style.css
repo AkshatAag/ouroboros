@@ -1715,6 +1715,15 @@ body.resizing-panels { user-select: none; }
     color: var(--status-error-fg);
 }
 
+/* A file the host could not attach to the task: wraps (names must stay readable on a phone). */
+.msg-attachment-outcome {
+    margin-top: 6px;
+    color: var(--status-warn-fg);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    overflow-wrap: anywhere;
+}
+
 .msg-time {
     font-size: var(--type-meta);
     color: var(--text-secondary);

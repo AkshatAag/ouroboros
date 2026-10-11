@@ -614,16 +614,26 @@ therefore about intents.
 
 ### Chat authorship and System rows
 
-Voice follows authorship, not severity or the transport that delivered the text.
-Model-authored replies use Ouroboros's assistant voice; host-composed commands,
-receipts and diagnostics use System voice. A **System row** is a chat message
-with `role="system"`, rendered with the existing yellow/amber system treatment,
-or its existing task-card placement. `role` alone selects voice; `system_type`
-names the kind, not the author (two documented presentations of a System pointer row show
-model-authored bytes in Ouroboros's voice: the Project question mirror and the Project
-completion mirror). New host producers stamp both fields. Relays
-preserve them through live delivery, persistence and history. Model narration,
-proactive replies and questions remain model-authored even when typed.
+Voice follows authorship, not severity or transport. Model-authored replies use
+Ouroboros's assistant voice; host-composed commands, receipts and diagnostics use
+System voice. A **System row** is a chat message with `role="system"`, in the
+yellow/amber system treatment or its task-card placement. `role` alone selects
+voice; `system_type` names the kind, not the author (the Project question and
+completion mirrors are System pointer rows showing model-authored bytes in
+Ouroboros's voice). New host producers stamp both fields; relays keep them through
+delivery, persistence and history. Model narration, proactive replies and
+questions stay model-authored even when typed.
+
+A host fact has a subject, and the subject names its carrier: a task's fact is a
+row of its card, a fact about the owner's message is the typed annotation on that
+message, and a landed act publishes no row (its receipt or card already says it).
+A standalone System row exists only where nothing else can carry the fact: no mind
+can speak, no mind will read the message, the owner's own direct act, the
+runtime's state, Main's Project lifecycle, or words signed by their author (a
+reminder, a skill notice). It is one short typed mark in owner words, never a
+paragraph or text written for a model. `tests/test_host_message_voice.py` keeps
+every host type stamped as a literal at its send site in one of these classes, with
+its counted producer sites.
 
 Language follows the same line. The install's interface language
 (`OUROBOROS_UI_LANGUAGE`, Settings → Appearance → Language) translates chrome and
@@ -1175,6 +1185,13 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
   bridge says so; a copied link is a fallback, never reported as opened.
   The photo's Copy to clipboard puts the image itself there or says it could
   not (Open in new tab and Download stay); it never copies an address instead.
+- **Handing a file to a task adds nothing on success:** it arrives in the task's
+  own message. A file the host could not attach is named in one wrapping line
+  right under the owner's words ("Not attached to the task: …", from the routing
+  receipt, live and on replay, never folded away in Main), and Telegram gets the
+  same line. A new turn whose every file was refused is the System mark "Not
+  started: the attachments could not be staged (N files)"; one that starts with
+  only some of them says so in its own words.
 - **The same view everywhere:** the sender's bubble, another tab and the replay
   after reload or restart render the one server view of each attachment. The
   stored text still names the files for the model; only the exact tail the web
