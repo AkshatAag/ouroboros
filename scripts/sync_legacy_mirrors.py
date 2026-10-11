@@ -15,7 +15,8 @@ unarchives each mirror and:
   ref is rewritten;
 - keeps one "moved" release, latest, pointing at the official latest release;
 - marks the outdated desktop releases at the top of their notes;
-- turns GitHub Actions off in the mirror and archives it again, also on error.
+- turns GitHub Actions off, limits new pull requests to collaborators and
+  archives the mirror again, also on error.
 
 Owner decisions 2026-10-11 №1=B (refresh on every stable release), №2=A (keep
 and mark old releases), №5=A (act as ouroboros-agent). ``MIRROR_TOKEN`` needs
@@ -300,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
                 gh.must("PATCH", f"/repos/{mirror.repo}", {"archived": False})
                 unarchived = True
             gh.must("PUT", f"/repos/{mirror.repo}/actions/permissions", {"enabled": False})
+            # New pull requests only from collaborators; the old ones stay readable (owner 2026-05-31: keep them).
+            gh.must("PATCH", f"/repos/{mirror.repo}", {"pull_request_creation_policy": "collaborators_only"})
             refresh(gh, token, mirror, source, version, set(args.skip_branch), log)
         except Exception as exc:  # noqa: BLE001 - every mirror is attempted; the archive is restored below
             failures += 1
