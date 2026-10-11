@@ -197,6 +197,16 @@ def test_settings_cost_warnings_skip_review_and_authored_widget(direct_server_wi
         card.locator('[data-skill-menu-trigger]').click()
         skip = page.locator('.skills-card-menu-dialog[open] .skills-attest-review')
         assert skip.inner_text().strip() == 'Skip review'
+        for theme in ('dark', 'light'):
+            page.emulate_media(color_scheme=theme)
+            page.wait_for_function("theme => document.documentElement.dataset.theme === theme", arg=theme)
+            page.evaluate("() => Promise.all(document.getAnimations().filter(a => a instanceof CSSTransition).map(a => a.finished.catch(() => null)))")
+            assert skip.evaluate("""node => {
+                const sample = document.createElement('span'); sample.style.color = 'var(--status-warn-fg)';
+                node.append(sample); const expected = getComputedStyle(sample).color; sample.remove();
+                return getComputedStyle(node).color === expected;
+            }"""), 'Skip review retains its warning foreground'
+            page.screenshot(path=str(evidence / f'skip-review-menu-{theme}.png'))
         skip.click()
         dialog = page.locator('.confirm-dialog')
         assert 'Skip review for emoji-own' in dialog.inner_text()
@@ -229,12 +239,12 @@ def test_child_progress_uses_actual_producer_live_and_history(
     producer = Producer(server["data_dir"], monkeypatch)
     root, child = producer.worker(ROOT, None), producer.worker(KID, LINEAGE)
     text = "⚡ Fallback: child host note" if not narration else "⚡ Fallback: my quoted words"
-    frames = [*producer.say(root, "Following a child."), *producer.lifecycle("Child queued", "scheduled")]
-    ctx, events = child
-    ctx.emit_progress_fn(text, narration=narration)
-    frames.extend(producer._deliver(events))
     with _browser(server, request, engine) as (page, evidence, errors):
         _open(page, server["url"])
+        frames = [*producer.say(root, "Following a child."), *producer.lifecycle("Child queued", "scheduled")]
+        ctx, events = child
+        ctx.emit_progress_fn(text, narration=narration)
+        frames.extend(producer._deliver(events))
         for frame in frames:
             _emit_ws_frame(page, frame)
         expected = text if narration else text.split(" ", 1)[1]
