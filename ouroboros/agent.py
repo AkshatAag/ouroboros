@@ -48,7 +48,7 @@ from ouroboros.agent_startup_checks import (
 from ouroboros.agent_task_pipeline import (
     emit_task_results, build_review_context,
 )
-from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
+from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, terminal_result_fields
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
@@ -134,7 +134,7 @@ def _task_exception_terminal(env: Any, task: Dict[str, Any], exc: Exception, dri
                 "task_exception", review_trigger="agent_exception"),
             trace_summary=build_trace_summary(llm_trace),
             trace_refs=loop_outcome.get("trace_refs") or collect_trace_refs(usage, llm_trace),
-            **effort_result_fields(task),
+            **effort_result_fields(task), **terminal_result_fields(usage),
         )
     except Exception:
         log.debug("Failed to persist task exception projection", exc_info=True)

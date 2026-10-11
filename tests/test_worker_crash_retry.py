@@ -1179,7 +1179,8 @@ def test_real_crash_retry_keeps_prepared_scope_across_registry_activity(tmp_path
 
 
 def _run_worker_main_once(monkeypatch, tmp_path, task, error):
-    """Drive the real worker loop over one task whose agent raises ``error`` from handle_task."""
+    """Drive the real worker loop over one task whose agent raises ``error`` from handle_task,
+    or runs ``error(runner, task)`` when it is a callable."""
     import ouroboros.agent as agent_module
     import ouroboros.config as config
     import ouroboros.extension_loader as extension_loader
@@ -1195,12 +1196,15 @@ def _run_worker_main_once(monkeypatch, tmp_path, task, error):
     class Runner:
         owner_wait_callback = None
 
-        def __init__(self, drive_root):
+        def __init__(self, drive_root, budget_drive_root=None):
             self.env = agent_module.Env(repo_dir=repo, drive_root=Path(drive_root))
+            self.budget_drive_root = Path(budget_drive_root or drive_root)
             drives.append(str(drive_root))
 
-        def handle_task(self, _task):
-            raise error
+        def handle_task(self, task_arg):
+            if isinstance(error, BaseException):
+                raise error
+            return error(self, task_arg)
 
     items = iter([task, {"type": "shutdown"}])
     monkeypatch.setenv("OUROBOROS_IN_WORKER", "0")  # worker_main sets it; teardown restores the original
@@ -1212,7 +1216,8 @@ def _run_worker_main_once(monkeypatch, tmp_path, task, error):
     monkeypatch.setattr(config, "initialize_runtime_mode_baseline", lambda: None)
     monkeypatch.setattr(config, "get_skills_repo_path", lambda: "")
     monkeypatch.setattr(extension_loader, "reload_all", lambda *_a, **_k: None)
-    monkeypatch.setattr(agent_module, "make_agent", lambda **kwargs: Runner(kwargs["drive_root"]))
+    monkeypatch.setattr(agent_module, "make_agent",
+                        lambda **kwargs: Runner(kwargs["drive_root"], kwargs.get("budget_drive_root")))
     monkeypatch.setattr(utils, "set_log_sink", lambda _sink: None)
     monkeypatch.setattr(utils, "get_git_info", lambda _repo: ("test", "sha"))
 
@@ -1230,6 +1235,7 @@ def test_a_handle_task_exception_is_the_tasks_own_terminal_without_a_crash_retry
     import supervisor.queue as q
     import supervisor.workers as W
     from ouroboros.task_results import load_task_result
+    from supervisor.terminal_delivery import project_terminal_result_event
     from supervisor.worker_health import recover_confirmed_dead_worker
 
     job, events = _reserved_job(tmp_path, monkeypatch, exitcode=0, child=child)
@@ -1248,10 +1254,100 @@ def test_a_handle_task_exception_is_the_tasks_own_terminal_without_a_crash_retry
     assert current["result"] == "⚠️ Error during processing: ValueError: predecessor plan source unavailable"
     assert current["terminal_time"]["source"] == "executor_terminal" and current["terminal_time"]["occurred_at"]
     assert "platform-level" not in json.dumps(current, ensure_ascii=False)
+    # A host-written text: delivered as a System row, never as the model's answer.
+    assert current.get("terminal_origin") == "host_notice"
+    assert project_terminal_result_event(tmp_path, job["task"], job["task_id"], result_text=current["result"],
+                                         terminal_origin=current.get("terminal_origin")).get("role") == "system"
     q.enqueue_task.assert_not_called()
     toast.assert_not_called()
     done = events.get_nowait()
     assert (done["type"], done["status"], done["reason_code"]) == ("task_done", "failed", "task_exception")
+
+
+@pytest.mark.parametrize("child", [False, True], ids=["pooled_canonical", "headless_child"])
+@pytest.mark.parametrize("refusal", ["grant_not_live", "source_removed"])
+def test_a_refused_exact_continuation_load_parks_the_same_id_again(tmp_path, monkeypatch, refusal, child):
+    """#1196 F4 stays the recovery's window: an owner Resume whose continuation the REAL
+    loader refuses at startup is no task_exception terminal; the SAME id returns to its pause.
+    A forked child's pause row stays in the budget root, never in the drive it runs on."""
+    import queue as stdqueue
+    import supervisor.queue as q
+    from ouroboros import budget_pause
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
+    from supervisor.worker_health import recover_confirmed_dead_worker
+    from tests._budget_pause_exact_helpers import _install_queue, _parked
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
+    task, _row = _parked(tmp_path, monkeypatch, task_id="f4")
+    assert queue.resume_budget_paused_task("f4")["ok"] is True
+    granted = budget_pause.budget_pause_row(tmp_path, "f4")
+    if refusal == "source_removed":
+        (task_artifact_dir_path(tmp_path, "f4") / granted["source_ref"]["path"]).unlink()
+    else:  # a newer writer revoked the grant before the worker could load it
+        budget_pause.set_budget_pause(
+            tmp_path, "f4", {**granted, "state": budget_pause.STATE_PAUSED,
+                             "grant": {**granted["grant"], "revoked_at": time.time(), "revoke_reason": "newer"}},
+            expected_pause_id=str(granted["pause_id"]), expected_state=budget_pause.STATE_RESUME_GRANTED,
+            expected_grant_id=str(granted["grant"]["grant_id"]))
+    if child:
+        from ouroboros.headless import prepare_task_drive
+
+        drive = prepare_task_drive(tmp_path, "f4", "empty")
+        task.update(drive_root=str(drive), child_drive_root=str(drive))
+    workers.PENDING.remove(task)
+    workers.RUNNING["f4"] = {"task": task, "worker_id": 0, "attempt": 1}
+    monkeypatch.setattr(workers, "WORKERS", {0: _make_worker(busy_task_id="f4", exitcode=0)})
+    events = stdqueue.Queue()
+    monkeypatch.setattr(workers, "get_event_q", lambda: events)
+    for name in ("respawn_worker", "send_with_budget"):
+        monkeypatch.setattr(workers, name, MagicMock())
+    monkeypatch.setattr(q, "persist_queue_snapshot", lambda **_k: True)
+    monkeypatch.setattr(q, "enqueue_task", MagicMock())
+    monkeypatch.setattr("supervisor.terminal_delivery.deliver_miss_lane_outcome", MagicMock())
+    refused = []
+
+    def load_continuation(runner, task_arg):  # the agent's order: the RUNNING row, then the exact load
+        write_task_result(runner.env.drive_root, "f4", STATUS_RUNNING, result="running")
+        ctx = SimpleNamespace(task_id="f4", task_attempt=1, drive_root=runner.env.drive_root,
+                              budget_drive_root=runner.budget_drive_root,
+                              budget_pause_resume=task_arg["_budget_pause_resume"])
+        try:
+            budget_pause.load_budget_pause(ctx)
+        except Exception as exc:
+            refused.append(type(exc).__name__)
+            raise
+        return []  # a load that did not refuse runs on, and the driver's crash assertion fails
+
+    _run_worker_main_once(monkeypatch, tmp_path, task, load_continuation)
+    workers.ensure_workers_healthy()
+    recover_confirmed_dead_worker(q._reap_queue.get_nowait())
+
+    done = []
+    while not events.empty():
+        done.append(events.get_nowait().get("type"))
+    observed = {"refused": refused, "status": load_task_result(tmp_path, "f4", strict=True)["status"],
+                "pause": budget_pause.budget_pause_row(tmp_path, "f4")["state"],
+                "pending": [item["id"] for item in workers.PENDING], "running": list(workers.RUNNING),
+                "task_done": "task_done" in done}
+    assert observed == {"refused": ["ValueError" if refusal == "grant_not_live" else "FileNotFoundError"],
+                        "status": "scheduled", "pause": budget_pause.STATE_PAUSED, "pending": ["f4"],
+                        "running": [], "task_done": False}
+
+
+@pytest.mark.parametrize("pause, returns", [
+    ({"state": "paused", "task_attempt": 1}, True),
+    ({"state": "resume_granted", "task_attempt": 1, "grant": {"grant_id": "g"}}, True),
+    ({"state": "resume_granted", "task_attempt": 1, "grant": {"grant_id": "g", "consumed_at": 1.0}}, False),
+    ({"state": "resumed", "task_attempt": 1, "grant": {"grant_id": "g", "consumed_at": 1.0}}, False),
+    ({"state": "paused", "task_attempt": 2}, False),
+    ({}, False),
+])
+def test_only_a_live_unconsumed_pause_of_this_attempt_keeps_the_death_for_recovery(pause, returns):
+    from ouroboros.budget_pause import death_returns_to_pause
+
+    assert death_returns_to_pause(pause, 1) is returns
 
 
 def test_a_late_handle_task_exception_never_replaces_an_earlier_terminal(tmp_path, monkeypatch):
