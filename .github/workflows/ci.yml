@@ -252,7 +252,7 @@ jobs:
           uv sync --locked --extra browser --group dev --no-install-project --python /usr/bin/python3
           .venv/bin/python -c "import sqlite3, sys; print(sys.version, sqlite3.sqlite_version); assert sqlite3.sqlite_version == '3.37.2'"
       - name: Run the store modules on SQLite 3.37.2
-        run: /usr/bin/python3 -I -S scripts/safe_test.py --temp-parent "${{ runner.temp }}" -- .venv/bin/python -m pytest tests/test_store.py tests/test_store_import.py tests/test_store_switch.py -q --tb=short --timeout=300 --timeout-method=thread
+        run: /usr/bin/python3 -I -S scripts/safe_test.py --temp-parent "${{ runner.temp }}" -- .venv/bin/python -m pytest tests/test_store.py tests/test_store_import.py tests/test_store_switch.py tests/test_custody_store_rows.py tests/test_store_cutover.py tests/test_store_activation.py -q --tb=short --timeout=300 --timeout-method=thread
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 2: Windows/macOS for every PR and every landed `ouroboros` push (Ubuntu is
