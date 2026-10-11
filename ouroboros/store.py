@@ -19,6 +19,7 @@ import errno
 import json
 import os
 import pathlib
+import shutil
 import sqlite3
 import threading
 import time
@@ -116,11 +117,129 @@ def file_identity(path: pathlib.Path) -> Optional[tuple]:
     return info.st_ino, info.st_dev
 
 
+_HEADER_FDS: Dict[Tuple[int, int], int] = {}
+_HEADER_GUARD = threading.Lock()
+
+
+def _read_header(path: pathlib.Path) -> bytes:
+    """The first 100 bytes, without ever closing a descriptor of a live store file: on POSIX a
+    close releases every advisory lock this process holds on the file, an open transaction's on
+    another thread included, and another process then writes the same pages (sqlite.org
+    howtocorrupt §2.2). One descriptor per file stays open for the process lifetime; Windows
+    locks belong to their handle, and a held handle there would block the export rename."""
+    if os.name == "nt":
+        with open(path, "rb") as handle:
+            return handle.read(100)
+    info = os.stat(path)
+    with _HEADER_GUARD:
+        fd = _HEADER_FDS.get((info.st_dev, info.st_ino))
+        if fd is None:
+            fd = os.open(str(path), os.O_RDONLY)
+            opened = os.fstat(fd)  # the path may name a newer file than the stat did: key what was opened
+            _HEADER_FDS.setdefault((opened.st_dev, opened.st_ino), fd)
+        return os.pread(fd, 100, 0)
+
+
+def held_descriptor(path: Any) -> Optional[int]:
+    """The descriptor this process keeps on a store file it uses through SQLite, else ``None``."""
+    if os.name == "nt":
+        return None
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    with _HEADER_GUARD:
+        return _HEADER_FDS.get((info.st_dev, info.st_ino))
+
+
+class _KeptReader:
+    """A binary reader over a kept store descriptor; leaving or closing it keeps the descriptor."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd, self._offset = fd, 0
+
+    def __enter__(self) -> "_KeptReader":
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def fileno(self) -> int:
+        return self._fd
+
+    def tell(self) -> int:
+        return self._offset
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        if whence not in (os.SEEK_SET, os.SEEK_CUR, os.SEEK_END):
+            raise ValueError(f"invalid whence ({whence})")
+        base = os.fstat(self._fd).st_size if whence == os.SEEK_END else (0 if whence == os.SEEK_SET else self._offset)
+        if base + offset < 0:
+            raise ValueError("negative seek position")
+        self._offset = base + offset
+        return self._offset
+
+    def read(self, size: Optional[int] = -1) -> bytes:
+        """Up to ``size`` bytes (all that remain when negative); short ``pread``s are continued."""
+        wanted, parts = (-1 if size is None else size), []
+        while wanted:
+            data = os.pread(self._fd, wanted if wanted > 0 else 1 << 20, self._offset)
+            if not data:
+                break
+            parts.append(data)
+            self._offset += len(data)
+            wanted = wanted - len(data) if wanted > 0 else wanted
+        return b"".join(parts)
+
+
+def open_for_read(path: Any) -> Any:
+    """``open(path, "rb")`` for any reader in a process that may hold a store: a held store file
+    is read through its kept descriptor, never a new one whose close would release the process's
+    locks on it; any other file is opened and closed as usual."""
+    fd = held_descriptor(path)
+    return pathlib.Path(path).open("rb") if fd is None else _KeptReader(fd)
+
+
+def iter_file_bytes(path: Any, *, limit: Optional[int] = None, chunk: int = 1 << 20) -> Iterator[bytes]:
+    """A file's bytes (the first ``limit``, or all), read through ``open_for_read``."""
+    with open_for_read(path) as handle:
+        while limit is None or limit > 0:
+            data = handle.read(chunk if limit is None else min(chunk, limit))
+            if not data:
+                return
+            if limit is not None:
+                limit -= len(data)
+            yield data
+
+
+def read_file_bytes(path: Any, *, limit: Optional[int] = None) -> bytes:
+    return b"".join(iter_file_bytes(path, limit=limit))
+
+
+def copy_file_bytes(source: Any, destination: Any) -> Any:
+    """``shutil.copy2`` that reads a held store file through its kept descriptor (a ``copytree``
+    ``copy_function``); the copy is a byte copy, not a consistent snapshot of a live store."""
+    if held_descriptor(source) is None:
+        return shutil.copy2(source, destination)
+    target = pathlib.Path(destination)
+    if target.is_dir():
+        target = target / pathlib.Path(source).name
+    if target.exists() and os.path.samefile(source, target):
+        raise shutil.SameFileError(f"{source!r} and {str(target)!r} are the same file")
+    with open(target, "wb") as handle:
+        for data in iter_file_bytes(source):
+            handle.write(data)
+    shutil.copystat(source, target)
+    return str(target)
+
+
 def header_tier(path: pathlib.Path, application_ids: Dict[str, int]) -> Optional[str]:
     """The lock tier the file's SQLite header names; ``None`` for a missing or foreign file."""
     try:
-        with open(path, "rb") as handle:
-            header = handle.read(100)
+        header = _read_header(path)
     except FileNotFoundError:
         return None
     if len(header) < 100 or not header.startswith(b"SQLite format 3\x00"):
