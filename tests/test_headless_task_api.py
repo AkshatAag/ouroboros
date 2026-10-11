@@ -352,8 +352,12 @@ def test_task_api_identity_collision_check_is_strict_not_fail_soft(tmp_path, mon
     """ABI-2 (Ф3.1 fix-round pin): the task_id-already-exists probe is an
     AUTHORITY read. A stored row occupies its identity — the request is refused
     with 409 — and the probe must NOT mutate storage as a side effect (row
-    signature unchanged, nothing under quarantine/); an UNREADABLE row (the
-    store refusing) occupies it the same way instead of reading as absent."""
+    signature unchanged). An INADMISSIBLE legacy file (unstamped pre-7.0 history,
+    a torn file) is judged by the real upgrade import, which quarantines it; its
+    identity stays occupied (409) and the probe moves nothing more. An UNREADABLE
+    row (the store refusing) occupies it the same way instead of reading as absent."""
+    from ouroboros.store_import import ensure_current_store
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
@@ -362,32 +366,40 @@ def test_task_api_identity_collision_check_is_strict_not_fail_soft(tmp_path, mon
     data = tmp_path / "data"
     results = data / "task_results"
     results.mkdir(parents=True)
-    seed_result(data, "legacyid", {"task_id": "legacyid", "status": "completed", "result": "pre-7.0"})
-    original = result_signature(data, "legacyid")
+    legacy = {"task_id": "legacyid", "status": "completed", "result": "pre-7.0"}
+    (results / "legacyid.json").write_text(json.dumps(legacy), encoding="utf-8")  # unstamped pre-7.0 history
+    (results / "tornid.json").write_text("{ not json", encoding="utf-8")
+    seed_result(data, "storedid", {"task_id": "storedid", "status": "completed"})
+    ensure_current_store(data)  # the real upgrade door: the two legacy files are quarantined, byte-unchanged
+    quarantined = sorted(path.name for path in (results / "quarantine").glob("*.json"))
+    assert quarantined == ["legacyid.json", "tornid.json"]
+    assert json.loads((results / "quarantine" / "legacyid.json").read_text(encoding="utf-8")) == legacy
+    original = result_signature(data, "storedid")
     monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: task)
     monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": True)
 
     app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
     app.state.drive_root = data
     app.state.repo_dir = repo
-    response = TestClient(app).post(
-        "/api/tasks",
-        json={"description": "x", "task_id": "legacyid", "workspace_root": str(workspace)},
-    )
-
-    assert response.status_code == 409
-    assert "already exists" in response.json()["error"]
-    # The identity probe never mutates storage: no quarantine, bytes unchanged.
-    assert result_signature(data, "legacyid") == original
-    assert not (results / "quarantine").exists()
+    for task_id in ("storedid", "legacyid", "tornid"):
+        response = TestClient(app).post(
+            "/api/tasks",
+            json={"description": "x", "task_id": task_id, "workspace_root": str(workspace)},
+        )
+        assert response.status_code == 409, task_id
+        assert "already exists" in response.json()["error"]
+    # The identity probe never mutates storage: the row's signature and the quarantine are as the import left them.
+    assert result_signature(data, "storedid") == original
+    assert sorted(path.name for path in (results / "quarantine").glob("*.json")) == quarantined
+    assert not (results / "legacyid.json").exists() and not (results / "tornid.json").exists()
     # An unreadable row (the store refuses its read) occupies its identity the same way.
-    unreadable_result(monkeypatch, "tornid")
+    unreadable_result(monkeypatch, "brokenid")
     torn_response = TestClient(app).post(
         "/api/tasks",
-        json={"description": "x", "task_id": "tornid", "workspace_root": str(workspace)},
+        json={"description": "x", "task_id": "brokenid", "workspace_root": str(workspace)},
     )
     assert torn_response.status_code == 409
-    assert not (results / "quarantine").exists()
+    assert sorted(path.name for path in (results / "quarantine").glob("*.json")) == quarantined
 
 
 def test_resolve_workspace_root_blocks_case_variant_control_plane(tmp_path):

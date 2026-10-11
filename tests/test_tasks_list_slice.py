@@ -16,6 +16,7 @@ import json
 from types import SimpleNamespace
 
 from ouroboros.gateway.tasks import api_task_get, api_tasks_list
+from ouroboros.store_import import ensure_current_store
 from ouroboros.task_results import write_task_result
 from ouroboros.utils import utc_now_iso
 from tests._shared import write_queue_document
@@ -118,6 +119,7 @@ def test_inadmissible_files_are_quarantined_at_the_import_door_before_the_first_
     (results / "future.json").write_text(json.dumps({"_schema_version": 99, "task_id": "future",
                                                      "status": "completed"}), encoding="utf-8")
 
+    ensure_current_store(data)  # the boot door's real import; a list never imports
     assert [row["task_id"] for row in _get_tasks(data)["tasks"]] == ["good"]
     assert sorted(p.name for p in (results / "quarantine").glob("*.json")) == ["future.json", "old.json", "torn.json"]
     events = [

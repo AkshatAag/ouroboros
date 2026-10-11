@@ -30,6 +30,7 @@ from ouroboros.task_results import (
     task_result_schema_refusal,
     write_task_result,
 )
+from ouroboros.store_import import ensure_current_store
 from ouroboros.task_store import patch_document
 from tests._store_shared import read_result, result_signature
 
@@ -46,6 +47,12 @@ def _write_raw(root: pathlib.Path, task_id: str, payload) -> pathlib.Path:
     else:
         path.write_text(str(payload), encoding="utf-8")
     return path
+
+
+def _upgrade(root: pathlib.Path) -> None:
+    """The real upgrade door: the boot import judges every file the old body left behind
+    (a read never imports, so the legacy file's fate is decided here, once)."""
+    ensure_current_store(root)
 
 
 def _quarantine_files(root: pathlib.Path):
@@ -120,6 +127,7 @@ def test_unstamped_history_is_quarantined_not_converted(tmp_path):
     path = _write_raw(tmp_path, "t5", legacy)
     original = path.read_bytes()
 
+    _upgrade(tmp_path)
     assert load_task_result(tmp_path, "t5") is None
 
     assert not path.exists()
@@ -136,8 +144,10 @@ def test_unstamped_history_is_quarantined_not_converted(tmp_path):
 
 def test_quarantine_is_idempotent_for_repeat_reads(tmp_path):
     _write_raw(tmp_path, "t6", {"task_id": "t6", "status": "completed"})
+    _upgrade(tmp_path)
     assert load_task_result(tmp_path, "t6") is None
     assert load_task_result(tmp_path, "t6") is None  # second read: plain absence
+    _upgrade(tmp_path)  # a second boot of the same root: nothing to move, no second event
     assert len(_quarantine_files(tmp_path)) == 1
     assert len(_quarantine_events(tmp_path)) == 1  # no second event
 
@@ -153,6 +163,7 @@ def test_quarantine_is_idempotent_for_repeat_reads(tmp_path):
 ])
 def test_inadmissible_rows_are_quarantined_with_the_typed_reason(tmp_path, payload, reason):
     _write_raw(tmp_path, "t7", payload)
+    _upgrade(tmp_path)
     assert load_task_result(tmp_path, "t7") is None
     assert len(_quarantine_files(tmp_path)) == 1
     events = _quarantine_events(tmp_path)
@@ -173,6 +184,7 @@ def test_retired_until_deadline_contract_is_quarantined(tmp_path):
     }
     assert task_result_schema_refusal(row) == "retired_contract_until_deadline"
     _write_raw(tmp_path, "t8", row)
+    _upgrade(tmp_path)
     assert load_task_result(tmp_path, "t8") is None
     events = _quarantine_events(tmp_path)
     assert len(events) == 1
@@ -198,12 +210,15 @@ def test_list_scan_quarantines_the_whole_batch_as_one_event(tmp_path):
 
 
 def test_the_import_quarantines_an_unstamped_file_once_whatever_the_first_reader_is(tmp_path):
-    """The door is the import, not the reader: the first touch of the root (a strict read
-    here) moves the inadmissible file byte-unchanged and reports it once; the strict read
-    then answers absence and no later read repeats the move."""
+    """The door is the import, not the reader: the boot import moves the inadmissible file
+    byte-unchanged and reports it once; a plain read then answers absence, the strict reader
+    still refuses the occupied identity (ABI-2) and no later read repeats the move."""
     path = _write_raw(tmp_path, "t9", {"task_id": "t9", "status": "completed"})
     before = path.read_bytes()
-    assert load_task_result(tmp_path, "t9", strict=True) is None
+    _upgrade(tmp_path)
+    assert load_task_result(tmp_path, "t9") is None
+    with pytest.raises(ValueError, match="unreadable or invalid"):
+        load_task_result(tmp_path, "t9", strict=True)
     assert list_task_results(tmp_path, strict=True) == []
     [moved] = _quarantine_files(tmp_path)
     assert moved.read_bytes() == before and not path.exists()

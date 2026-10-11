@@ -411,6 +411,8 @@ def test_a_legacy_child_final_uses_the_progress_lineage_the_client_reads(room, o
         path = room.root / "task_results" / "kid-old.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"id": "kid-old", "status": "completed", **lineage}), encoding="utf-8")
+        from ouroboros.store_import import ensure_current_store
+        ensure_current_store(room.root)  # the boot door's real import judges it; a page read never imports
     recent = room.read()
     assert any(row.get("subagent_task_id") == "kid-old" for row in recent["messages"])
     assert recent["window"]["latest_message"] == {"history_id": room.row_id("root answer"), "out_of_order": False}
