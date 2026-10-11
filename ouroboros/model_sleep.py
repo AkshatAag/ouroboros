@@ -5,7 +5,7 @@
 it: mail from named senders, the terminal of named tasks it can read, the
 terminal of delegated runs it owns, the exit of its own named services (warm
 only), and an optional absolute wake time. With no source or time selected, live direct children are captured; a
-childless request must choose a source. Owner words and controls (Stop, Wrap
+childless request awaits owner/control or typed attention. Owner words and controls (Stop, Wrap
 up, Hurry, Pause, a quiz answer) are never filtered.
 Unselected mail stays unread until the model is awake; nothing is acknowledged
 until the transcript delivered it.
@@ -86,13 +86,13 @@ def _canonical_root(ctx: Any) -> pathlib.Path:
 
 
 def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = None, services: Any = None,
-              wake_at: Any = None, wake_after_sec: Any = None, allow_empty: bool = False) -> Dict[str, Any]:
+              wake_at: Any = None, wake_after_sec: Any = None) -> Dict[str, Any]:
     """Validate the selected sources; ``ValueError`` names the first bad one.
 
     Senders and tasks must have a readable result or admitted queue authority;
     runs must be delegated runs THIS task owns (its custody rows); services must be
     this task's own, each pinned to the start it has NOW (``_service_pins``).
-    ``allow_empty`` is for observational snapshots, never request_sleep.
+    An empty selection still waits for owner/control or typed attention.
     """
     from ouroboros.task_results import validate_task_id
     from ouroboros.task_status import load_effective_task_result
@@ -131,8 +131,6 @@ def selectors(ctx: Any, *, senders: Any = None, tasks: Any = None, runs: Any = N
             root, parent_task_id=str(ctx.task_id), scope="direct", materialize_artifacts=False,
         ) if row.get("task_id") and str(row.get("status") or "") not in SETTLED_STATUSES]
     chosen["any_mail"] = False
-    if not allow_empty and not (chosen["senders"] or chosen["tasks"] or chosen["runs"] or pins or chosen["wake_at"]):
-        raise ValueError("no live children or selected source: choose senders for a reply, tasks/runs/services, or a wake time")
     return chosen
 
 
@@ -273,7 +271,7 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None) -> List[Dic
     # Sleeping releases the root's project lease, so every member's retained
     # custody matters, including paused and terminal children.
     from ouroboros import process_custody as pc
-    from ouroboros.delegate_custody_memo import custody_rows_with_integrity
+    from ouroboros.delegate_custody_current import tree_task_ids
     from ouroboros.owner_pause import current_tool_operation, tree_member_results
     from ouroboros.platform_layer import pid_is_alive
 
@@ -283,12 +281,7 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None) -> List[Dic
     dependencies = set(chosen.get("tasks", []) + chosen.get("senders", []))
     members = {str(ctx.task_id)}
     try:
-        rows, malformed = custody_rows_with_integrity(root, tree_id)
-        if malformed is None or malformed:
-            raise OSError("tree_custody_unreadable")
-        for row in rows:
-            if str(row.get("root_task_id") or row.get("task_id") or "") == tree_id:
-                members.add(str(row.get("task_id") or tree_id))
+        members.update(tree_task_ids(root, tree_id))
         from ouroboros.task_status import _load_queue_snapshot, _merge_queue_status
 
         member_rows = tree_member_results(root, tree_id)

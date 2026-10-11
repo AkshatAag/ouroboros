@@ -1,6 +1,7 @@
 import { isTerminalTaskDetail, taskPresentation, taskTerminalSummary } from './log_events.js';
 import { fmt, tr } from './i18n.js';
 import { waitFacts } from './question_presentation.js';
+import { strokeIcon } from './page_icons.js';
 
 // The live card's own words. Its root is one the overlay never enters (a transcript), so every
 // label is read through the translation seam here, at the producer.
@@ -26,6 +27,7 @@ const CHIP = {
     queued: () => tr('task.chip.queued', 'Queued'),
     ownerWait: () => tr('task.chip.waiting_for_answer', 'Waiting for your answer'),
     reviewWorkFinishing: () => tr('task.chip.review_work_finishing', 'review work finishing'),
+    ownerHurry: () => tr('task.chip.owner_hurry_applied', 'Owner hurry applied'),
 };
 
 export function pausePhaseLabel(phase, cause = '', finishingReviews = false) {
@@ -59,12 +61,33 @@ function outcomeView(outcome) {
     return phaseView(presentation.phase, presentation.headline);
 }
 
+// Facts from the active call, not provider reasoning or task lifecycle. The
+// transport sends no prompt, model/account details or inferred queue position.
+export function modelActivityPresentation(activity) {
+    const labels = {
+        preparing: 'Preparing request', queued: 'Request accepted · waiting for admission',
+        dispatching: 'Preparing request dispatch', awaiting_response: 'Sending request / waiting for response',
+        response_ready: 'Response available', response_received: 'Response received · processing',
+        rejoining: 'Rejoining the same model operation', unknown: 'Model operation unconfirmed',
+    };
+    const phase = activity?.phase;
+    if (!Object.hasOwn(labels, phase)) return null;
+    const waiting = ['queued', 'rejoining', 'unknown'].includes(phase);
+    const reasons = { global_limit: 'shared capacity limit', class_limit: 'model capacity limit',
+        thread_busy: 'conversation busy', stopping: 'engine stopping' };
+    const blockers = phase === 'queued' && Array.isArray(activity.blockers) ? activity.blockers : [];
+    const text = [tr(`task.model_activity.${phase}`, labels[phase]), ...blockers
+        .filter(row => Object.hasOwn(reasons, row?.kind))
+        .map(row => tr(`task.model_activity.${row.kind}`, reasons[row.kind]))].join(' · ');
+    return phaseView('working', text, waiting ? 'working waiting' : 'working', !waiting, waiting);
+}
+
 // One pure presentation over task facts, shared by cards, receipts and project
 // summaries. Outcome and ongoing finalization are independent; a Failed label
 // never animates merely because the task still has post-task work.
 export function taskActivityPresentation({ phase = 'working', outcome = '', ended = false,
     finalizing = false, ownerWait = '', modelWaiting = false, hold = '', pauseCause = '', stopPolicy = '',
-    finishingReviews = false } = {}) {
+    finishingReviews = false, modelActivity = null } = {}) {
     if (ended) return outcomeView(outcome);
     if (stopPolicy) {
         const motion = ['working', 'thinking', 'finalizing'].includes(phase) && !modelWaiting && !ownerWait && !hold;
@@ -72,6 +95,7 @@ export function taskActivityPresentation({ phase = 'working', outcome = '', ende
             'working cancelling', motion, !motion);
     }
     let current;
+    const modelPhase = modelActivityPresentation(modelActivity);
     if (phase === 'unknown') current = phaseView('unknown', CHIP.unconfirmed(), 'warn');
     else if (['budget_paused', 'budget_pausing'].includes(phase)) {
         // Only a settled Pause names the reviews it lets finish (owner 2026-10-08).
@@ -85,6 +109,8 @@ export function taskActivityPresentation({ phase = 'working', outcome = '', ende
     else if (ownerWait === 'unknown') current = phaseView('unknown', CHIP.unconfirmed(), 'warn');
     else if (phase === 'queued') current = phaseView('queued', CHIP.queued(), 'warn');
     else if (finalizing || phase === 'finalizing') current = phaseView('working', CHIP.finalizing(), 'working finalizing', true);
+    else if (phase === 'preparing') current = modelActivityPresentation({ phase: 'preparing' });
+    else if (modelPhase) current = modelPhase;
     else if (phase === 'thinking') current = phaseView('working', CHIP.thinking(), 'working', true);
     else if (phase === 'working') current = phaseView('working', CHIP.working(), 'working', true);
     else current = phaseView('unknown', CHIP.unconfirmed(), 'warn');
@@ -117,6 +143,7 @@ export function censusTaskPhase(activity, detail = null, connected = true, model
         ownerWait: activityWaitPhase(activity || {}), modelWaiting,
         hold: activity?.project_admission_hold?.label || '', pauseCause: activity?.pause_cause || '',
         finishingReviews: Boolean(activity?.finishing_reviews),
+        modelActivity: activity?.model_activity,
     });
 }
 
@@ -134,6 +161,7 @@ function recordPhase(record = {}, terminalPhase = 'done') {
         modelWaiting: Boolean(record.modelWaiting), hold: record.projectHold,
         pauseCause: record.pauseCause, stopPolicy: record.cancelPendingPolicy,
         finishingReviews: Boolean(record.finishingReviews),
+        modelActivity: record.modelActivity,
     });
 }
 
@@ -163,6 +191,7 @@ export function syncParkedPhase(record, phase = '', activity = {}) {
     record.parkedPhase = parked;
     record.pauseCause = cause;
     record.censusPhase = phase;
+    record.modelActivity = activity.model_activity || null;
     record.finishingReviews = parked === 'budget_paused' && Boolean(activity.finishing_reviews);
     const desired = desiredLiveCardPhase(record);
     return setLiveCardPhase(record, desired.phase, desired.text, desired.className, desired.secondary);
@@ -219,6 +248,23 @@ export function paintTaskPhase(phaseEl, view, secondaryEl = null, isSubagent = f
     if (phaseEl.getAttribute('aria-atomic') !== 'true') phaseEl.setAttribute('aria-atomic', 'true');
     if (phaseEl.getAttribute('aria-label') !== activeLabel) phaseEl.setAttribute('aria-label', activeLabel);
     return changed || secondaryChanged;
+}
+
+// HQ1: an applied owner hurry is one more fact beside the phase chip, drawn as the
+// house fast-forward vector and named for assistive technology; the root attribute
+// stays the card's record of it. Returns whether the card changed.
+export function markOwnerHurry(record) {
+    const root = record?.root;
+    if (!root || root.getAttribute('data-owner-hurry') === '1') return false;
+    root.setAttribute('data-owner-hurry', '1');
+    const mark = root.querySelector('[data-live-hurry]');
+    if (mark) {
+        mark.innerHTML = strokeIcon('<polygon points="13 19 22 12 13 5 13 19"></polygon><polygon points="2 19 11 12 2 5 2 19"></polygon>', 14);
+        mark.setAttribute('aria-label', CHIP.ownerHurry());
+        mark.title = CHIP.ownerHurry();
+        mark.hidden = false;
+    }
+    return true;
 }
 
 // Preserve the established setter while adapting the card's private facts to

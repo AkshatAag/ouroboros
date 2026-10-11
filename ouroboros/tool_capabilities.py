@@ -30,7 +30,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "finish_task",
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
-    "search_code", "query_code", "plan_task",
+    "search_code", "query_code", "query_data", "plan_task",
     "run_command", "run_script",
     "start_service", "service_status", "service_logs", "stop_service",
     "vcs_status", "vcs_diff", "vcs_commit_reviewed", "commit_reviewed",
@@ -97,7 +97,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # the cheap lane and finds the work harder raises itself instead of failing or
     # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
     "switch_model",
-    "read_file", "list_files", "search_code", "query_code",
+    "read_file", "list_files", "search_code", "query_code", "query_data",
     "vcs_status", "vcs_diff",
     # Memory: a child reads, writes knowledge notes and marks in its own name (the
     # host signs both with its focus) and publishes chronicle pages and parts only as
@@ -123,11 +123,11 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # updates the existing child result through join_ledger's lineage/hash authority.
     # It has no repo/control-plane effect, so remains valid for read-only subagents.
     "tree_note", "tree_read", "override_delegation_constraint",
-    # Nanny verbs. The child gets no shell — it gets the right to ASK the host to run a
-    # session, and the host derives the access profile from THIS task's authority, so a
-    # read-only child can only ever host a read-only session. delegate_answer and
-    # delegate_message speak only to a run this task already owns (custody-gated
-    # like cancel); a message is placed into the run's live turn, never a shell.
+    # Nanny verbs grant no native child shell. A hosted session uses captured rights
+    # in an evidence-only investigation copy when the task has no product-write
+    # authority; explicit readonly, Observe and Presence ceilings still narrow it.
+    # delegate_answer/message address only this task's owned run (like cancel);
+    # speaking to its live turn grants neither shell nor candidate-apply authority.
     "delegate_start", "delegate_wait", "delegate_cancel", "delegate_answer",
     "delegate_message",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
@@ -158,7 +158,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # the cheap lane and finds the work harder raises itself instead of failing or
     # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
     "switch_model",
-    "read_file", "list_files", "search_code", "query_code",
+    "read_file", "list_files", "search_code", "query_code", "query_data",
     "vcs_status", "vcs_diff",
     "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -206,7 +206,7 @@ def acting_tool_names_for_context(ctx: object, registered_names: Iterable[str]) 
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "inspect_harness",
     "read_file", "list_files",
-    "search_code", "query_code", "recent_tasks",
+    "search_code", "query_code", "query_data", "recent_tasks",
     "web_search", "chat_history",
     "vcs_status", "vcs_diff", "service_status", "service_logs",
     "get_task_result", "list_projects", "memory_read",
@@ -285,6 +285,7 @@ TOOL_RESULT_LIMITS: dict[str, int] = {
     "run_script": 80_000,
     "search_code": 80_000,
     "query_code": 80_000,
+    "query_data": 80_000,
     "service_logs": 80_000,
     # Best-of-N patch comparison shows several candidate diffs side by side; the
     # default 15k cap would truncate after the first one and defeat the tool.
@@ -356,7 +357,7 @@ EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
 # Tools whose own affordance IS paging: selects the recovery WORDING of a
 # partial view only; it exempts nothing from source persistence.
 PAGEABLE_TOOL_RESULTS: frozenset[str] = frozenset({
-    "read_file", "chat_history", "journal_read", "tree_read", "recent_tasks", "query_code",
+    "read_file", "chat_history", "journal_read", "tree_read", "recent_tasks", "query_code", "query_data",
 })
 
 
@@ -390,12 +391,13 @@ REVIEWED_MUTATIVE_TOOLS: frozenset[str] = frozenset({
     "vcs_commit_reviewed",
 })
 
-# Foreground mutative tools may keep editing files after Python future timeout;
-# the loop must wait for terminal completion instead of returning while they run.
-# D10 retired the SDK edit gateway; publication is now the foreground mutator
-# whose remote branch/commit/PR effects must settle before control returns.
+# Foreground mutative tools may keep mutating after their soft timeout; the loop
+# joins them to terminal completion instead of returning while they still run, so
+# a file editor settles before a later call can target the same bytes. Only a
+# worker kill (Stop now, the deadline reaper, Panic) ends a hung one.
 FOREGROUND_MUTATIVE_TOOLS: frozenset[str] = frozenset({
     "submit_skill_to_hub",
+    "write_file", "edit_text", "edit_batch", "apply_patch",
 })
 
 
@@ -432,8 +434,9 @@ def routing_action_for_tool(name: object) -> str:
 # HERE, next to the routing family it extends. The registry's own
 # ``mutates_worktree`` marker is the second source for the same fact —
 # tests/test_consciousness_authority.py pins that every entry carrying it is
-# named below, so the table cannot drift away from the catalog. Publication
-# (``FOREGROUND_MUTATIVE_TOOLS``) joins the set at the authority module.
+# named below, so the table cannot drift away from the catalog. The foreground
+# set (``FOREGROUND_MUTATIVE_TOOLS``: publication and the file editors) joins it
+# at the authority module.
 OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "maintain_harness",
     # starting or steering work (steer_task stays: the nanny of a running campaign)

@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from typing import Any, Dict
+from ouroboros.store import StoreError
 
 log = logging.getLogger(__name__)
 
@@ -49,16 +50,21 @@ def announce_released_settlement(
             log.warning("plan review historical settlement could not be attached", exc_info=True)
     if not settled_wave or usage_ctx is None or not getattr(usage_ctx, "drive_root", None):
         return
+    from ouroboros.review_custody import RELEASED_UNRESOLVED
     ok = sum(1 for status in settled_wave.values() if status in {"ok", "empty"})
+    unresolved = sum(1 for status in settled_wave.values() if status == RELEASED_UNRESOLVED)
+    settled = len(settled_wave) - unresolved
     from ouroboros.owner_mailbox import write_task_message
 
     try:
         write_task_message(
             pathlib.Path(str(usage_ctx.drive_root)),
-            f"Plan review wave {fingerprint[:8] or '?'}: {len(settled_wave)} of "
+            f"Plan review wave {fingerprint[:8] or '?'}: {settled} of "
             f"{max(int(roster_size or 0), len(settled_wave))} reviewer slot(s) settled "
-            f"({ok} ok, {len(settled_wave) - ok} failed); not yet collected "
-            f"(review_fingerprint {fingerprint}).",
+            f"({ok} ok, {settled - ok} failed)"
+            + (f"; {unresolved} unresolved — the reviewer's outcome is not known yet, which is "
+               "neither a failure nor a verdict" if unresolved else "")
+            + f"; not yet collected (review_fingerprint {fingerprint}).",
             task_id, source_task_id=task_id, provenance="system",
             attention_kind="review_requested",
         )
@@ -232,7 +238,7 @@ def collect_before_gate(ctx: Any, state: Dict[str, Any]) -> Dict[str, Any]:
         state_root, task_id = _planning_state_location(ctx)
         run_plan_coroutine(collect_open_wave(ctx, state_root=state_root, task_id=task_id, wave=current))
         return load_plan_review_state(state_root, task_id)
-    except (OSError, ValueError, TimeoutError) as exc:
+    except (OSError, ValueError, TimeoutError, StoreError) as exc:
         log.warning("plan wave %s could not be collected before the gate: %s",
                     str(current.get("request_fingerprint") or "")[:8], exc)
         return state

@@ -56,7 +56,7 @@ def test_warm_is_default_and_in_slot_is_an_explicit_choice(tmp_path):
     from ouroboros.tools.control_task_results import _await_messages
 
     ctx = _ctx(tmp_path)
-    assert "no live children or selected source" in _await_messages(ctx)
+    assert json.loads(_await_messages(ctx))["reason"] == "sleep_armed"
     _result(tmp_path, "live-child", parent_task_id="sleeper", root_task_id="sleeper", delegation_role="subagent")
     assert json.loads(_await_messages(ctx))["mode"] == "warm"
     out = json.loads(_await_messages(ctx, 1, mode="in_slot"))

@@ -249,9 +249,9 @@ def _terminal_cost_probe(
     drive_root: pathlib.Path, task_id: str, current: dict,
 ) -> tuple[str, dict, tuple[bool, str] | None]:
     """Compare one owner's addressed task/root summaries with its stored cost."""
-    from ouroboros.task_status import SETTLED_STATUSES
     from ouroboros import usage_store
     from ouroboros._usage_rows import _with_integrity
+    from ouroboros.task_status import SETTLED_STATUSES
 
     if current.get("status") not in SETTLED_STATUSES:
         return "ineligible", {}, None
@@ -625,10 +625,9 @@ def _finish_task_done_dispatch(
 
     _events()._maybe_notify_provider_death(ctx, task_id, task, final_task_result, task_done_event)
     try:
-        results_dir = pathlib.Path(ctx.DRIVE_ROOT) / "task_results"
-        results_dir.mkdir(parents=True, exist_ok=True)
-        result_file = results_dir / f"{task_id}.json"
-        if not result_file.exists():
+        from ouroboros.task_store import exists
+
+        if not exists(ctx.DRIVE_ROOT, str(task_id or "")):
             write_task_result(
                 ctx.DRIVE_ROOT,
                 str(task_id or ""),
@@ -797,6 +796,7 @@ def _resolve_lifecycle_fault(
         "status": status,
         "reason_code": str(stored.get("reason_code") or ""),
         "outcome_axes": normalize_outcome_axes(stored),
+        **_terminal_lineage(stored, task_row, evt),
     }
     for key in ("review_projection", "review_status", "artifact_status", "artifact_bundle", "root_phase_checkpoint"):
         if key in stored:
@@ -951,6 +951,17 @@ def _notify_consciousness_of_root_done(ctx: Any, task: Dict[str, Any], task_meta
         log.debug("consciousness notify on task_done failed", exc_info=True)
 
 
+def _terminal_lineage(*records: Any) -> Dict[str, Any]:
+    """Carry host lineage by presence: canonical result, admission, then transport.
+
+    Explicit empty root fields outrank a stale frame; absence stays unknown.
+    Execution-route enrichment remains transport-only.
+    """
+    return {key: next(row[key] for row in records if isinstance(row, dict) and key in row)
+            for key in ("parent_task_id", "root_task_id", "delegation_role")
+            if any(isinstance(row, dict) and key in row for row in records)}
+
+
 def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = evt.get("task_id")
     wid = evt.get("worker_id")
@@ -1091,6 +1102,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         "reason_code": reason_code,
         "artifact_status": artifact_status,
         **terminal_cost,
+        **_terminal_lineage(final_task_result, task, evt),
     }
     if str(evt.get("typed_routing_action") or "").strip():
         task_done_event["typed_routing_action"] = str(evt.get("typed_routing_action") or "").strip()

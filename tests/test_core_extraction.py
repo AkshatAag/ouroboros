@@ -135,11 +135,14 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # additive `max_chars` view budget (an exact piece of one window after start_char,
     # the header naming the next cursor) and start_char's description names the
     # code-point basis and the partial-view address; no parameter changed type,
-    # default or required status.
-    # Combined with the additive forward_to_worker attention_kind selector:
-    # wake priority is explicit, without changing sender authority.
+    # default or required status. Rolled for the owner-approved edit/read package:
+    # numbered read views (both cursors count source characters, never display
+    # numbers), explicit omitted-root semantics and ordered same-file edit_text
+    # replacements; editor calls run in call order and `force` confirms only an
+    # intentional shrink.
+    # Event waits add explicit attention_kind without widening sender authority.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "337c7052d32621a3c67b992ab21f08dd7a4fa87c0b6fff65e093780246e72711"
+        "966c88f442b255434f0dfcb74ab670d77e21cbdaa65f019a7cb590cb8adac5d3"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
@@ -185,7 +188,7 @@ def test_extracted_read_and_list_result_bytes_are_stable(tmp_path):
     ctx = ToolContext(repo_dir=repo, drive_root=data)
 
     assert core_file_tools._repo_read(ctx, "sample.txt").encode() == (
-        b"# sample.txt \xe2\x80\x94 lines 1\xe2\x80\x932 of 2\nalpha\nbeta\n"
+        b"# sample.txt \xe2\x80\x94 lines 1\xe2\x80\x932 of 2\n     1\talpha\n     2\tbeta\n"
     )
     assert core_file_tools._repo_list(ctx, ".").encode() == (
         b'[\n  "nested/",\n  "sample.txt"\n]'

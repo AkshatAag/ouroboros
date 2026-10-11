@@ -154,10 +154,10 @@ def test_standalone_wait_envelope_is_strictly_inside_operation_lease(tmp_path, m
     assert waits._event_wait_window(ctx) == OPERATION_WINDOW_FALLBACK_SEC - NESTED_SETTLEMENT_MARGIN_SEC
 
 
-def test_childless_sleep_requires_a_reply_source_and_missing_continuation_refuses(tmp_path):
+def test_childless_sleep_awaits_attention_and_missing_continuation_refuses(tmp_path):
     ctx = SimpleNamespace(task_id="t-wait", drive_root=tmp_path, task_attempt=1,
                           _loop_mailbox_seen_ids=set(), task_metadata={}, owner_wait_callback=lambda *_: None)
-    assert "no live children or selected source" in waits._await_messages(ctx)
+    assert json.loads(waits._await_messages(ctx))["reason"] == "sleep_armed"
     seed(tmp_path, "peer")
     assert json.loads(waits._await_messages(ctx, senders=["peer"]))["reason"] == "sleep_armed"
     ctx.owner_wait_callback = None

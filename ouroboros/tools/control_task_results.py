@@ -111,12 +111,8 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None)
             origin = str(
                 data.get("original_task_id") or data.get("timeout_retry_from") or ""
             )
-            paths = [f"task_results/{tid}.json"]
-            if origin and origin != tid:
-                paths.append(f"task_results/{origin}.json")
-            custody["full_source"] = [
-                f"read_file(root='runtime_data', path='{p}')" for p in paths
-            ]
+            ids = [tid] + ([origin] if origin and origin != tid else [])
+            custody["full_source"] = [f"get_task_result(task_id='{task_id}')" for task_id in ids]
         summary["delegated_custody"] = custody
     if isinstance(data.get("task_contract"), dict):
         summary["task_contract"] = data.get("task_contract")
@@ -889,7 +885,7 @@ def _await_messages(ctx: ToolContext, timeout_sec: int | None = None, mode: str 
         from ouroboros import model_sleep
         try:
             chosen = model_sleep.selectors(ctx, senders=senders, tasks=tasks, runs=runs,
-                services=services, wake_at=wake_at, wake_after_sec=wake_after_sec, allow_empty=True)
+                services=services, wake_at=wake_at, wake_after_sec=wake_after_sec)
             ready = model_sleep.wake_reason(ctx, chosen, consume_beacons=False)
         except (TypeError, ValueError) as exc:
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
@@ -1389,7 +1385,7 @@ def _wait_for_tasks(
         # envelope duplicated forensics (trace_refs, loop_outcome internals,
         # verification_ledger) into the parent context on every batch absorb.
         # The parent decision needs the semantic handoff only; the full envelope
-        # stays on disk in task_results/<id>.json, addressable by
+        # stays in the current task store, addressable by
         # child_result_sha256 (the join-ledger SSOT hash), and is fetched with
         # get_task_result — a DISCLOSED omission (BIBLE P1), not silent
         # truncation. get_task_result is the explicit full terminal reader;
@@ -1422,8 +1418,8 @@ def _wait_for_tasks(
         waited["tasks"] = public_tasks
         waited["tasks_note"] = (
             "Compact per-child projection. The full result envelope (trace_refs, "
-            "loop_outcome, verification_ledger) remains on disk in task_results/"
-            "<task_id>.json, addressable by child_result_sha256; get_task_result "
+            "loop_outcome, verification_ledger) remains in the task store, "
+            "addressable by child_result_sha256; get_task_result "
             "returns the full result text plus trace/outcome summaries."
         )
         if unknown_ids:

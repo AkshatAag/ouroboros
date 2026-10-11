@@ -9,7 +9,7 @@ def test_joined_rounds_duplicate_usage_and_child_denominator():
         {"tool": "wait_tasks", "tool_call_id": "w", "task_id": "parent", "round_id": 1},
         {"type": "llm_usage", "category": "task", "task_id": "parent", "round_id": 2, "prompt_tokens": 300, "cached_tokens": 0, "tool_call_count": 1},
         {"tool": "read_file", "tool_call_id": "r", "task_id": "parent", "round_id": 2},
-        {"type": "task_done", "task_id": "child", "parent_task_id": "parent"},
+        {"type": "task_done", "task_id": "child", "parent_task_id": "parent", "status": "completed"},
     ]
     r = measure(rows)
     assert r["coverage_complete"]
@@ -40,7 +40,7 @@ def _tool(name="wait_tasks", call_id="a"):
     return {"tool": name, "tool_call_id": call_id, "task_id": "parent", "round_id": 1}
 
 
-_DONE = {"type": "task_done", "task_id": "child", "parent_task_id": "parent"}
+_DONE = {"type": "task_done", "task_id": "child", "parent_task_id": "parent", "status": "completed"}
 
 
 def _unknown(rows):

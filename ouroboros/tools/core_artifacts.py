@@ -150,6 +150,9 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text="⚠️ Provide a file_path."))
 
     fp = pathlib.Path(file_path).expanduser().resolve()
+    if not fp.exists():
+        from ouroboros.evidence_packs import materialize_path
+        materialize_path(fp)  # a packed checkpoint handle is written back beside its name first
     if not fp.exists() or not fp.is_file():
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File not found: {file_path}"))
     mime = _detect_document_mime(str(fp))

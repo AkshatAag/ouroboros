@@ -22,8 +22,16 @@ def measure(rows: list[dict]) -> dict:
     for i, row in enumerate(rows):
         task, round_id = row.get("task_id"), row.get("round_id")
         if row.get("type") == "task_done" and task:
-            if row.get("parent_task_id") or row.get("delegation_role") == "subagent":
+            status = row.get("status")
+            if status == "interrupted":
+                continue  # Requeued work is not a child completion.
+            if status not in {"completed", "failed", "cancelled", "rejected_duplicate"}:
+                gaps.append({"row": i, "reason": "terminal_status_missing_or_invalid"})
+            elif row.get("parent_task_id") or row.get("delegation_role") == "subagent":
                 terminals.add(str(task))
+            elif row.get("delegation_role") == "root" or (
+                    "parent_task_id" in row and not row["parent_task_id"] and row.get("root_task_id") == task):
+                pass  # Known roots are outside the child-completion denominator.
             else:
                 gaps.append({"row": i, "reason": "terminal_child_lineage_missing"})
         name = row.get("fn_name") or row.get("name") or row.get("tool")
