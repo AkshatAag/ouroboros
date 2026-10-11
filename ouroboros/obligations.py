@@ -110,23 +110,27 @@ def result_facts(row: dict) -> dict:
     return {key: row[key] for key in _FACT_COLUMNS if row.get(key)}
 
 
-def pending_drive_rule(txn: store.Txn, current: dict, updated: dict) -> bool:
-    """The writer's ``pending_drive``: nonterminal owes the drive; a settled result owes it until
-    its terminal files are ready; any other status keeps the previous answer (as the file set
-    kept its member until ``drive_finished``)."""
+def pending_drive(root: Path, task_id: str, document: dict) -> bool | None:
+    """None preserves a writer's membership; import has no previous membership."""
     from ouroboros.headless import terminal_task_files_ready
     from ouroboros.task_status import SETTLED_STATUSES
 
-    status = updated.get("status")
+    status = document.get("status")
     if status in {"running", "interrupted"}:
         return True
-    task_id = str(updated.get("task_id") or current.get("task_id") or "")
     if status in SETTLED_STATUSES:
         try:
-            return not terminal_task_files_ready(Path(txn.root), {**updated, "id": task_id}, updated)
+            return not terminal_task_files_ready(root, {**document, "id": task_id}, document)
         except Exception:
-            return True  # unknown readiness keeps the drive pending, as the boot classification does
-    return bool(txn.row(task_id, "pending_drive"))
+            return True  # unknown readiness keeps the drive pending
+    return None
+
+
+def pending_drive_rule(txn: store.Txn, current: dict, updated: dict) -> bool:
+    """A status outside the drive lifecycle keeps its previous membership."""
+    task_id = str(updated.get("task_id") or current.get("task_id") or "")
+    pending = pending_drive(Path(txn.root), task_id, updated)
+    return bool(txn.row(task_id, "pending_drive")) if pending is None else pending
 
 
 def drive_started(root: Any, task: dict) -> None:

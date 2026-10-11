@@ -516,6 +516,12 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         _supersede(state, entry)
         return
     custody = state.get(run_id)
+    # A terminal/incident row may outlive STARTED or follow a refused start;
+    # preserve the event's own identity and source in live and import paths.
+    if custody is None and kind in (SETTLED, CONTAINMENT_FAULT):
+        custody = state[run_id] = RunCustody(
+            run_id=run_id, task_id=str(row.get("task_id") or ""), route_id=str(row.get("route") or ""),
+            project_id=str(row.get("project_id") or ""), source=str(row.get("source") or ""))
     if custody is None:
         return
     if kind == LEDGER_RECORDED:

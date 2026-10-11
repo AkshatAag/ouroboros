@@ -408,14 +408,11 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC, serv
         raise StoreMigrating(f"current store not published yet: the import of {root} runs")
     state, tier = probe(root)
     if state == "absent" and ((not write and not root.is_dir()) or _absent(root, write=write, service=service)):
-        conn = sqlite3.connect(":memory:", isolation_level=None)  # the root holds nothing: empty, nothing created
-        conn.row_factory = sqlite3.Row
-        conn.executescript(_SCHEMA)
-        try:
+        with contextlib.closing(sqlite3.connect(":memory:", isolation_level=None)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.executescript(_SCHEMA)
             with transaction(conn, write=False):
                 yield Txn(conn, root)
-        finally:
-            conn.close()
         return
     if state == "absent":
         state, tier = probe(root)
@@ -574,13 +571,10 @@ class Txn:
 
     def put_row(self, set_name: str, identity: str, facts: Dict[str, Any]) -> None:
         """One owner-held obligation row (an existing row keeps its place; only changed facts write)."""
-        current = self.conn.execute("SELECT facts FROM obligations WHERE set_name=? AND id=?",
-                                    (set_name, identity)).fetchone()
-        text = machine_json(facts)
-        if current is None:
-            self.conn.execute("INSERT INTO obligations (set_name, id, facts) VALUES (?, ?, ?)", (set_name, identity, text))
-        elif current["facts"] != text:
-            self.conn.execute("UPDATE obligations SET facts=? WHERE set_name=? AND id=?", (text, set_name, identity))
+        self.conn.execute(
+            "INSERT INTO obligations (set_name,id,facts) VALUES (?,?,?) ON CONFLICT(set_name,id) "
+            "DO UPDATE SET facts=excluded.facts WHERE obligations.facts<>excluded.facts",
+            (set_name, identity, machine_json(facts)))
 
     def delete_row(self, set_name: str, identity: str) -> None:
         self.conn.execute("DELETE FROM obligations WHERE set_name=? AND id=?", (set_name, identity))
@@ -589,12 +583,6 @@ class Txn:
         record = self.conn.execute("SELECT facts FROM obligations WHERE set_name=? AND id=?",
                                    (set_name, identity)).fetchone()
         return None if record is None else json.loads(record["facts"])
-
-    def flagged(self, set_name: str) -> List[str]:
-        """Task ids whose flag column says they belong to a derived set."""
-        column = FLAG_COLUMNS[set_name]
-        return [record["task_id"] for record in
-                self.conn.execute(f"SELECT task_id FROM tasks WHERE {column}=1 ORDER BY task_id")]
 
     # -- handoff rows: one row per operation of a task's ``ROW_BACKED_FIELDS`` projection, keyed
     #    (task_id, op_id); ``kind`` names the field. Insertion order is the dict order the document had.

@@ -550,7 +550,7 @@ def test_switch_preflight_refuses_corrupt_sidecar_before_export_or_owner(root, m
     with store.open_store(root, write=False) as txn:
         assert txn.phase() == store.PUBLISHED
     sidecar.write_bytes(original)
-    assert store_switch._handle_restore_bytes(root) == packs.pending_restore_bytes(root) > 0
+    assert packs.pending_restore_bytes(root) > 0
 
 
 @pytest.mark.parametrize("leader", [True, False])

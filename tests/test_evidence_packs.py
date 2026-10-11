@@ -62,7 +62,7 @@ def _task(root, task_id, *, status="completed", blobs=3, payloads=None, handle=b
 
 
 def _run(root):
-    return packer.run_pass(root, stop=lambda: False)
+    return packer.run_pass(root)
 
 
 def _loose(ref):
@@ -476,7 +476,7 @@ def test_settle_predicate_waits_for_unresolved_money(tmp_path, monkeypatch):
         assert packs.task_settlement_facts(root, "open")["money_open"] is True
         assert packs.task_settlement_facts(root, "paid")["money_open"] is False
         assert packs.task_settled(root, "paid") and not packs.task_settled(root, "open")
-        report = packer.run_pass(root, stop=lambda: False)
+        report = packer.run_pass(root)
         assert report["packed"] == 1
         monkeypatch.setattr(usage_store, "hold", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("store down")))
         assert packs.task_settlement_facts(root, "paid")["money_open"] is None  # unknown never settles

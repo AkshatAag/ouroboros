@@ -1272,21 +1272,11 @@ def find_child_tasks(
                 if not existing:
                     # Queue lineage can recover a row skipped by the prefilter;
                     # retain its disk cost, result and artifacts as well.
-                    disk = load_effective_task_result(
+                    existing = load_effective_task_result(
                         pathlib.Path(drive_root), tid, materialize_artifacts=materialize_artifacts
                     )
-                    if disk:
-                        combined = dict(disk)
-                        for key, value in row.items():
-                            if key == "status":
-                                combined["status"] = _merge_queue_status(
-                                    str(disk.get("status") or ""), str(value or ""), row,
-                                )
-                            elif not combined.get(key) and value:
-                                combined[key] = value
-                        rows[tid] = combined
-                    else:
-                        rows[tid] = row
+                if not existing:
+                    rows[tid] = row
                     continue
                 combined = dict(existing)
                 for key, value in row.items():

@@ -394,7 +394,7 @@ def test_update_task_round_trips_the_document_and_projects_the_typed_columns(tmp
     with store.open_store(tmp_path, write=False) as txn:
         row = txn.conn.execute("SELECT * FROM tasks WHERE task_id='t1'").fetchone()
         assert (row["pending_drive"], row["has_pause_notices"]) == (1, 1)
-        assert txn.flagged("pause_notices") == ["t1"] and txn.flagged("synthesis") == []
+        assert txn.row("t1", "has_pause_notices") == 1 and txn.row("t1", "owes_synthesis") == 0
 
 
 def test_riders_share_the_write_transaction(tmp_path):

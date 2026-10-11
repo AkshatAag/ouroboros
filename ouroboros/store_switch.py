@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from ouroboros import evidence_packs, store, store_import, usage_store
 from ouroboros.store import EXPORTING, GENERATION_KEY, PUBLISHED, RETIRED
-from ouroboros.store_import import sha256_hex as _sha, supervisor_row, utc_stamp as _stamp
+from ouroboros.store_import import supervisor_row, utc_stamp as _stamp
 from ouroboros.usage_ledger import LEDGER_REL, UsageAccountingError
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
@@ -198,15 +198,11 @@ def _largest_result_bytes(roots: Sequence[pathlib.Path]) -> int:
     return largest
 
 
-def _handle_restore_bytes(root: pathlib.Path) -> int:
-    return evidence_packs.pending_restore_bytes(root)
-
-
 def _money_refusal(root: pathlib.Path, receipt: Dict[str, Any]) -> str:
     """The money exporter's own refusals, checked before anything moves (``usage_store.export_refusal``):
     a completed step whose journal is intact needs nothing; an interrupted one resumes."""
     step = receipt["steps"].get("money") or {}
-    if step.get("status") == "completed" and _sha256_file(root / LEDGER_REL) == step["journal"]["sha256"]:
+    if step.get("status") == "completed" and usage_store._sha256_file(root / LEDGER_REL) == step["journal"]["sha256"]:
         return ""
     if _nothing_to_export(root):
         return ""
@@ -218,18 +214,11 @@ def _nothing_to_export(root: pathlib.Path) -> bool:
     return not (root / usage_store.STORE_REL).exists() and not (root / LEDGER_REL).exists()
 
 
-def _sha256_file(path: pathlib.Path) -> Optional[str]:
-    try:
-        return _sha(path.read_bytes())
-    except FileNotFoundError:
-        return None
-
-
 def _preflight(root: pathlib.Path, needs: Dict[str, bool], receipt: Dict[str, Any], roots: Sequence[pathlib.Path]) -> str:
     """The exporters' own refusals, then the free space the export needs: the handles' raw bytes
     the restore writes, the money journal (bounded by the store file) and the largest single
     result file (one atomic temp file at a time). A real ENOSPC still arrives as ``OSError``."""
-    required = {"handles": _handle_restore_bytes(root) if needs["handles"] else 0,
+    required = {"handles": evidence_packs.pending_restore_bytes(root) if needs["handles"] else 0,
                 "largest_result": _largest_result_bytes(roots) if needs["facts"] else 0, "money": 0}
     if needs["facts"]:
         # The custody chain the old body will read must hold every event the store reduced: the
@@ -258,7 +247,7 @@ def _export_money(root: pathlib.Path, receipt: Dict[str, Any]) -> Dict[str, Any]
     is skipped; an interrupted step resumes through the store's own export mark (its journal
     recognised by the mark's digest, a landed rename completed from the retired copy)."""
     step = receipt["steps"].get("money") or {}
-    if step.get("status") == "completed" and _sha256_file(root / LEDGER_REL) == step["journal"]["sha256"]:
+    if step.get("status") == "completed" and usage_store._sha256_file(root / LEDGER_REL) == step["journal"]["sha256"]:
         return step
     if _nothing_to_export(root):
         return {"status": "nothing_to_export", "completed_at": utc_now_iso()}
@@ -310,12 +299,8 @@ def _refuse(root: pathlib.Path, intent: Dict[str, Any], receipt: Dict[str, Any],
 
 def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, blockers: Sequence[str] = (),
                     restore_handles: Optional[Callable[[pathlib.Path], Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """The export-then-switch at the restart exit (order and guarantees: the module docstring).
-
-    ``blockers`` are the names of writers whose stop the caller could not confirm (the
-    census of killed workers, the packer through process custody); any name refuses the
-    switch. ``owner`` defaults to the door's own switching owner; ``restore_handles`` is the
-    packing stage's A+ restore, including retained descendant drives."""
+    """Export then switch; order and durability: module docstring. Any unconfirmed blocker refuses.
+    Owner defaults to the door; restore_handles provides A+ across retained descendant drives."""
     root = pathlib.Path(root)
     intent = read_switch_intent(root)
     if intent is None:

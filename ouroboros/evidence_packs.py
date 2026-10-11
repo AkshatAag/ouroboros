@@ -229,12 +229,9 @@ def _index_valid(path: pathlib.Path, tier: str) -> bool:
     if store.header_tier(path, _APPLICATION_ID) != tier:
         return False
     try:
-        conn = store.connect(path, tier, wait_sec=INDEX_WAIT_SEC)
-        try:
+        with contextlib.closing(store.connect(path, tier, wait_sec=INDEX_WAIT_SEC)) as conn:
             ok = conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
             version = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-        finally:
-            conn.close()
     except sqlite3.Error:
         return False
     valid = ok and version is not None and version[0] == str(INDEX_SCHEMA_VERSION)
@@ -262,8 +259,7 @@ def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str) -> None:
     """Rebuild the cache from the sidecars (one listing) into a temp file published by rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
     def build(tmp):
-        conn = store.connect(tmp, tier, create=True)
-        try:
+        with contextlib.closing(store.connect(tmp, tier, create=True)) as conn:
             conn.execute(f"PRAGMA application_id = {_APPLICATION_ID[tier]}")
             conn.executescript(_INDEX_SCHEMA)
             with store.transaction(conn, write=True):
@@ -273,8 +269,6 @@ def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str) -> None:
                 for sidecar_path, sidecar in list_sidecars(root, errors=errors):
                     _index_rows(conn, sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])), sidecar)
                 conn.execute("INSERT INTO meta VALUES ('sidecar_errors', ?)", (json.dumps([str(e) for e in errors]),))
-        finally:
-            conn.close()
     _atomic_overwrite(path, build)
     store.fsync_directory(path.parent)
 
@@ -287,12 +281,9 @@ def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_S
     with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=wait_sec):
         if not _index_valid(path, tier):
             _rebuild_index(root, path, tier)
-        conn = store.connect(path, tier, wait_sec=wait_sec)
-        try:
+        with contextlib.closing(store.connect(path, tier, wait_sec=wait_sec)) as conn:
             with store.transaction(conn, write=write):
                 yield conn
-        finally:
-            conn.close()
 
 
 def index_upsert(root: Any, pack_path: pathlib.Path, sidecar: Dict[str, Any]) -> None:
@@ -898,8 +889,7 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
 
 
 def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list] = None, revision: Optional[str] = None,
-              obligation_cache: Optional[dict] = None,
-              record: Callable[..., None] = lambda **facts: None) -> Dict[str, Any]:
+              obligation_cache: Optional[dict] = None) -> Dict[str, Any]:
     """The per-task steps, each idempotent: new loose members -> next generation (write, publish,
     re-read + verify every member, index), then unlink loose files held by verified packs."""
     root = pathlib.Path(root)
@@ -927,7 +917,7 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
     write_unpacker(root)
     report.update(unlink_loose(root, task_id, generations, keep_shas=keep_shas, revision=revision,
                                obligation_cache=obligation_cache))
-    record(phase="packed", **report)
+    record_storage_pack(root, phase="packed", **report)
     return report
 
 

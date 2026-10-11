@@ -97,8 +97,7 @@ def descendant_drives(root: Any) -> List[pathlib.Path]:
 
 
 def ensure_current_store(root: Any, *, with_children: bool = True) -> Dict[str, Any]:
-    """The one creator and importer; idempotent on every boot door (details: the module
-    docstring). Returns the report it also writes to ``logs/supervisor.jsonl``."""
+    """Idempotent boot import; returns its logs/supervisor.jsonl report. Details above."""
     root = pathlib.Path(root)
     path = store.store_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -339,22 +338,6 @@ def _read_sets(root: pathlib.Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
     return sets
 
 
-def _pending_drive(root: pathlib.Path, task_id: str, document: Dict[str, Any]) -> bool:
-    """The boot classification's rule: nonterminal, or settled without its terminal files ready."""
-    from ouroboros.headless import terminal_task_files_ready
-    from ouroboros.task_status import SETTLED_STATUSES
-
-    status = document.get("status")
-    if status in {"running", "interrupted"}:
-        return True
-    if status in SETTLED_STATUSES:
-        try:
-            return not terminal_task_files_ready(root, {**document, "id": task_id}, document)
-        except Exception:
-            return True  # unknown readiness keeps the drive pending, as the boot classification does
-    return False
-
-
 OCCUPIED = "occupied"  # meta: the identities whose file the import refused or quarantined (ABI-2: not readmitted)
 
 
@@ -392,15 +375,14 @@ def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Recor
            occupied: Optional[Dict[str, str]] = None) -> None:
     from ouroboros.delegate_custody_current import CHAIN_BOUNDARY, write_fold
 
-    conn = store.connect(tmp, tier, create=True)
-    try:
+    with contextlib.closing(store.connect(tmp, tier, create=True)) as conn:
         conn.execute("PRAGMA synchronous = FULL")
         conn.executescript(store._SCHEMA)
         conn.execute(f"PRAGMA application_id = {store._APPLICATION_ID[tier]}")
         conn.execute("BEGIN IMMEDIATE")
         txn = Txn(conn, root)
         for task_id, document in records:
-            txn.store_task(document, pending_drive=_pending_drive(root, task_id, document))
+            txn.store_task(document, pending_drive=bool(o.pending_drive(root, task_id, document)))
         for name, rows in sets.items():
             txn.replace_set(name, rows)
         if folded:
@@ -411,8 +393,6 @@ def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Recor
                            (OCCUPIED, occupied or {})):
             txn.set_meta(key, value)
         store.commit(conn)
-    finally:
-        conn.close()
 
 
 def _quarantine_copy(root: pathlib.Path, task_id: str, body: str) -> None:
@@ -423,13 +403,8 @@ def _quarantine_copy(root: pathlib.Path, task_id: str, body: str) -> None:
 
 
 def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
-    """Per-row reconciliation of an out-of-band change against the content baseline (P6').
-
-    The budget is one listing plus one stat per file: a file whose ``(size, mtime_ns)``
-    equals its baseline is untouched WITHOUT being read (no supported actor rewrites a
-    result while preserving both — the one disclosed residual). Only a stat-changed file is
-    read: the same sha256 is a touch (the stored stat is refreshed, nothing else), a different
-    one is a change."""
+    """P6' per-row reconciliation; stat prefilter and same-stat residual: module docstring.
+    Stat-changed bytes are hashed; a matching digest refreshes only the stored stat."""
     baseline: Dict[str, Dict[str, Any]] = txn.meta("baseline") or {}
     present: Dict[str, Tuple[pathlib.Path, Optional[bytes]]] = {}
     changed: List[str] = []
@@ -482,7 +457,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
         body = _projected(txn, task_id)  # the store's version WITH its handoff rows (B5)
         if body is not None and sha256_hex(body.encode("utf-8")) != baseline.get(task_id, {}).get("body_sha256"):
             conflicts[task_id] = {"at": now, "db_body": body, "file_sha256": sha256_hex(raw)}
-        txn.store_task(document, pending_drive=_pending_drive(root, task_id, document))
+        txn.store_task(document, pending_drive=bool(o.pending_drive(root, task_id, document)))
         baseline[task_id] = _baseline_entry(path, raw, document, reason)
     for task_id in deleted:
         body = _projected(txn, task_id)

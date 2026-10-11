@@ -129,7 +129,7 @@ def live_manifest_shas(root: pathlib.Path, *, obligation_rows: Optional[dict] = 
 
 
 
-def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
+def run_pass(root: pathlib.Path) -> Dict[str, Any]:
     """Pack every settled candidate one task at a time, then the money archive and the unpacker."""
     root = pathlib.Path(root)
     report: Dict[str, Any] = {"status": "completed", "packed": 0, "candidates": 0, "raw": 0, "compressed": 0,
@@ -147,13 +147,9 @@ def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
     report["candidates"] = len(candidates)
     listing = packs.list_sidecars(root)
     for task, raw in candidates:
-        if stop():
-            report["status"] = "unknown"
-            break
         try:
             outcome = packs.pack_task(root, task, keep_shas=set(), listing=listing, revision=revisions[task],
-                                      obligation_cache=obligation_cache,
-                                      record=lambda **facts: packs.record_storage_pack(root, **facts))
+                                      obligation_cache=obligation_cache)
         except Exception as exc:
             report["faults"] += 1
             packs.record_storage_pack(root, phase="fault", task_id=task, exception_class=type(exc).__name__)
@@ -255,13 +251,10 @@ def _report_fields(raw: bytes) -> Dict[str, Any]:
         value = json.loads(raw) if len(raw) <= _REPORT_BYTES else None
         if not isinstance(value, dict) or value.get("status") not in {"completed", "unknown", "failed"}:
             return {}
-        fields: Dict[str, Any] = {"status": value["status"]}
-        for key in ("packed", "candidates", "raw", "compressed", "unlinked", "kept", "busy", "faults", "archived"):
-            number = value.get(key)
-            if type(number) is not int or number < 0:
-                return {}
-            fields[key] = number
-        return fields
+        keys = ("packed", "candidates", "raw", "compressed", "unlinked", "kept", "busy", "faults", "archived")
+        if any(type(value.get(key)) is not int or value[key] < 0 for key in keys):
+            return {}
+        return {key: value[key] for key in ("status", *keys)}
     except (ValueError, UnicodeError, TypeError):
         return {}
 

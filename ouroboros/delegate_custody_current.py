@@ -224,7 +224,6 @@ def _reduce(txn, event: Dict[str, Any], state: Dict[str, Any], marks_by_task: Di
                 and not txn.custody_rows("invocation_id=?", (iid,))):  # a replayed request of an answered invocation re-opens nothing
             txn.put_row("custody_open", key, {"request": event})
     before = {run_id: deepcopy(vars(entry)) for run_id, entry in state.items()}
-    _ensure_known_run(state, event)
     c._apply(state, event)
     if kind == c.STARTED and rid in state:
         request = txn.get_row("custody_open", f"invocation:{iid}") if iid else None
@@ -253,20 +252,6 @@ def _reduce(txn, event: Dict[str, Any], state: Dict[str, Any], marks_by_task: Di
         mark = marks_by_task.setdefault(tid, txn.get_row("custody_marks", tid) or {"task_id": tid})
         _mark(mark, event)
         txn.put_row("custody_marks", tid, mark)
-
-
-def _ensure_known_run(state: Dict[str, Any], event: Dict[str, Any]) -> None:
-    """A settlement or a containment incident names a run no STARTED row of ours bound (its
-    start was refused by a busy store, or it outlived its start in a chain an old body
-    rotated): the run stays visible under its own facts — the reducer otherwise skips rows of
-    unknown runs. Its ``source`` is the event's own, so a reviewer's settlement names itself."""
-    from ouroboros import delegate_custody as c
-
-    rid = str(event.get("run_id") or "")
-    if str(event.get("type") or "") in (c.SETTLED, c.CONTAINMENT_FAULT) and rid and rid not in state:
-        state[rid] = c.RunCustody(run_id=rid, task_id=str(event.get("task_id") or ""),
-                                  route_id=str(event.get("route") or ""), project_id=str(event.get("project_id") or ""),
-                                  source=str(event.get("source") or ""))
 
 
 def _mark(mark: Dict[str, Any], event: Dict[str, Any]) -> None:
@@ -311,12 +296,9 @@ def _loaded(txn, event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def publish(root, event: Dict[str, Any]) -> bool:
-    """Reduce + outbox in one transaction; append the chain; delete the outbox row after.
-
-    Returns whether the transaction COMMITTED — the custody landed in the authority. A
-    failed append leaves the outbox row for the next publication's flush (below), so the
-    chain is complete eventually and never ahead of the store.
-    """
+    """Returns whether custody + outbox COMMITTED; append failure does not undo custody.
+    A failed append keeps the outbox for the next flush, so the chain never leads the store.
+    Transaction/append ordering: module docstring."""
     try:
         with store.open_store(root, write=True) as txn:
             _reduce(txn, event, _loaded(txn, event), {})
@@ -403,7 +385,6 @@ def fold(rows) -> Dict[str, Any]:
         if kind == c.START_REQUESTED and iid and iid not in requests:
             requests[iid] = row
             pending_ids.append(iid)
-        _ensure_known_run(state, row)
         c._apply(state, row)
         if kind == c.STARTED and rid in state and iid in requests:
             state[rid].request_event = dict(requests[iid])
