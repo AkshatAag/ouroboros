@@ -93,6 +93,7 @@ from ouroboros.server_maintenance import (  # noqa: F401
     _startup_retired_settings_notice,
     _startup_environment_review_notice,
     _startup_review_pool_notice,
+    _startup_store_switch_notice,
     _startup_custody_sweep,
     _startup_prune_sweeps,
     _startup_worktree_prune,
@@ -740,6 +741,7 @@ def _run_supervisor(settings: dict) -> None:
         _startup_retired_settings_notice(settings)
         _startup_environment_review_notice()
         _startup_review_pool_notice(settings)
+        _startup_store_switch_notice()
         from ouroboros.upgrade_notices import startup_upgrade_notices
         startup_upgrade_notices(settings)
 
