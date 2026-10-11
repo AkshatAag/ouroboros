@@ -511,6 +511,41 @@ def test_a_row_changed_on_both_sides_lets_the_file_win_and_keeps_the_db_version(
     assert load(root, "child1")["db_only"] is True
 
 
+def test_p6_compares_and_preserves_the_whole_projected_document(tmp_path):
+    """B5: a handoff row the store wrote is part of its version — a file change over it is a
+    conflict whose copy carries the rows; a file an old body deleted leaves a quarantine copy of
+    the whole document (rows included), saved before the task and its handoffs go; an
+    unchanged document with handoffs is no false conflict."""
+    claim = {"kind": "launch", "ts": "2026-01-01T00:00:00+00:00"}
+    root = fixture_root(tmp_path)
+    write_result(root, result("done1", "failed", launch_handoffs={"op1": claim}))
+    write_result(root, result("child1", "completed", launch_handoffs={"op1": claim}))
+    ensure_current_store(root, with_children=False)
+    with store.open_store(root, write=True) as txn:  # a row-only mutation: the body text is untouched
+        txn.put_handoff("done1", "launch_handoffs", "op2", {**claim, "second": True})
+        txn.touch("done1")
+    atomic_write_json(task_result_path(root, "done1"), result("done1", "failed", launch_handoffs={"op1": claim}, file_side=True))
+    atomic_write_json(task_result_path(root, "child1"), result("child1", "completed", launch_handoffs={"op1": claim}, file_side=True))
+    task_result_path(root, "root1").unlink()
+    report = ensure_current_store(root, with_children=False)
+    assert (report["changed"], report["deleted"], report["conflicts"]) == (2, 1, 1), report
+    conflict = meta(root, "conflicts")["done1"]
+    assert set(json.loads(conflict["db_body"])["launch_handoffs"]) == {"op1", "op2"}
+    assert "child1" not in meta(root, "conflicts")  # the file's change over an unchanged document: no conflict
+    assert load(root, "done1")["launch_handoffs"] == {"op1": claim}
+    copies = list((root / "task_results" / "quarantine").glob("root1.deleted-*.json"))
+    assert len(copies) == 1 and json.loads(copies[0].read_text(encoding="utf-8"))["task_id"] == "root1"
+    write_result(root, result("fresh2", launch_handoffs={"op1": claim}))
+    ensure_current_store(root, with_children=False)
+    with store.open_store(root, write=True) as txn:
+        txn.put_handoff("fresh2", "launch_handoffs", "op2", claim)
+        txn.touch("fresh2")
+    task_result_path(root, "fresh2").unlink()
+    ensure_current_store(root, with_children=False)
+    copies = list((root / "task_results" / "quarantine").glob("fresh2.deleted-*.json"))
+    assert len(copies) == 1 and set(json.loads(copies[0].read_text(encoding="utf-8"))["launch_handoffs"]) == {"op1", "op2"}
+
+
 def test_set_file_edits_alone_are_not_detected_but_follow_a_result_change(tmp_path):
     root = fixture_root(tmp_path)
     ensure_current_store(root, with_children=False)

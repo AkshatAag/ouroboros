@@ -39,7 +39,7 @@ from ouroboros import obligations as o
 from ouroboros import store
 from ouroboros.store import (
     GENERATION, GENERATION_KEY, IMPORT_LOCK_NAME, LOCK_NAME, PUBLISHED, TIER_ENFORCED, TIER_NAME,
-    StoreLost, Txn, document_text, encode_document,
+    StoreLost, Txn, document_text,
 )
 from ouroboros.task_custody import HEADLESS_TASKS_DIR, TASK_DRIVES_DIR, own_child_drives
 from ouroboros.task_result_schema import (
@@ -257,7 +257,7 @@ def _baseline_entry(path: pathlib.Path, raw: bytes, document: Optional[Dict[str,
         return {**entry, "refused": reason}  # remembered, so an untouched refused file stays untouched
     if reason == "latch_stamped":
         entry["latch_stamped"] = True
-    return {**entry, "body_sha256": sha256_hex(encode_document(document).encode("utf-8"))}
+    return {**entry, "body_sha256": sha256_hex(document_text(document).encode("utf-8"))}  # the whole projected document
 
 
 def _read_result(path: pathlib.Path) -> Optional[bytes]:
@@ -458,15 +458,15 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
             continue
         if reason == "latch_stamped":
             latched.append(task_id)
-        body = txn.body_text(task_id)
+        body = _projected(txn, task_id)  # the store's version WITH its handoff rows (B5)
         if body is not None and sha256_hex(body.encode("utf-8")) != baseline.get(task_id, {}).get("body_sha256"):
             conflicts[task_id] = {"at": now, "db_body": body, "file_sha256": sha256_hex(raw)}
         txn.store_task(document, pending_drive=_pending_drive(root, task_id, document))
         baseline[task_id] = _baseline_entry(path, raw, document, reason)
     for task_id in deleted:
-        body = txn.body_text(task_id)
+        body = _projected(txn, task_id)
         if body is not None:
-            _quarantine_copy(root, task_id, body)
+            _quarantine_copy(root, task_id, body)  # saved before the task and its handoffs go
             quarantined.append({"task_id": task_id, "reason": "deleted_by_old_body"})
         txn.delete_task(task_id)
         baseline.pop(task_id, None)
@@ -478,6 +478,12 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
         txn.set_meta(key, value)
     return {"status": "reconciled", **counts, "quarantined": len(quarantined), "refused": len(refused),
             "conflicts": len(conflicts), "latched": latched, "set_rows": moved, "legacy_custody": legacy}, quarantined
+
+
+def _projected(txn: Txn, task_id: str) -> Optional[str]:
+    """The store's whole document (body plus handoff rows) as a file would hold it."""
+    document = txn.load(task_id)
+    return None if document is None else document_text(document)
 
 
 def _reconcile_sets(txn: Txn, files: Dict[str, Dict[str, Dict[str, Any]]]) -> int:
