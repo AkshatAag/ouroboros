@@ -1350,6 +1350,36 @@ def test_only_a_live_unconsumed_pause_of_this_attempt_keeps_the_death_for_recove
     assert death_returns_to_pause(pause, 1) is returns
 
 
+@pytest.mark.parametrize("attempt, pause, records", [
+    (1, {}, True),  # no pause: the exception is the task's own terminal
+    (2, {"state": "paused", "task_attempt": 2}, False),  # this attempt's live pause: recovery parks it
+    (1, {"state": "paused", "task_attempt": 2}, True),  # another attempt's pause does not own this death
+    (1, OSError("pause row unreadable"), False),  # unknown pause evidence: recovery decides, as before
+])
+def test_the_worker_reads_this_attempts_pause_from_the_budget_root_before_recording(tmp_path, monkeypatch,
+                                                                                    attempt, pause, records):
+    import ouroboros.agent as agent_module
+    import ouroboros.budget_pause as budget_pause
+    import supervisor.worker_process as WP
+
+    reads, written = [], []
+
+    def pause_row(root, task_id):
+        reads.append((str(root), task_id))
+        if isinstance(pause, BaseException):
+            raise pause
+        return dict(pause)
+
+    monkeypatch.setattr(budget_pause, "budget_pause_row", pause_row)
+    monkeypatch.setattr(agent_module, "_task_exception_terminal", lambda _env, task, *_a, **_k: written.append(task["id"]))
+    runner = SimpleNamespace(env=SimpleNamespace(drive_path=lambda name: tmp_path / "child" / name))
+
+    WP._record_task_exception(runner, {"id": "t", "_attempt": attempt}, ValueError("boom"), tmp_path)
+
+    assert reads == [(str(tmp_path), "t")]  # the pool drive is the budget root unless the task names its own
+    assert written == (["t"] if records else [])
+
+
 def test_a_late_handle_task_exception_never_replaces_an_earlier_terminal(tmp_path, monkeypatch):
     import supervisor.queue as q
     from ouroboros.task_results import load_task_result, write_task_result
