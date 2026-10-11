@@ -27,7 +27,7 @@ from ouroboros.server_auth import (
 )
 from ouroboros.server_entrypoint import bound_service_socket, find_free_port, parse_server_args, write_port_file
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
-from ouroboros import body_adoption
+from ouroboros import body_adoption, store_boot
 from ouroboros.server_web import NoCacheStaticFiles, make_index_page, resolve_web_dir
 from ouroboros.process_logging import configure_process_logging
 from ouroboros.task_finalization import host_operation_reply_kwargs
@@ -642,6 +642,7 @@ def _run_supervisor(settings: dict) -> None:
         _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "startup", new_tick=True), time.monotonic()
         _start_supervisor_liveness_watchdog(_loop_liveness, _watchdog_stop)
         run_startup_phase(_loop_liveness, "startup:usage_store", lambda: usage_store.migrate_from_journal(pathlib.Path(DATA_DIR)))
+        run_startup_phase(_loop_liveness, "startup:current_store", lambda: store_boot.wait_ready(DATA_DIR))  # published before any worker or recovery write
         from supervisor.state import control_is, load_state, save_state, update_state
         from supervisor.state import append_jsonl, update_budget_from_usage, rotate_chat_log_if_needed, rotate_jsonl_log_if_needed
         _initialize_runtime_state(settings, stop_requested=lambda stop=_watchdog_stop: any(e.is_set() for e in (stop, _supervisor_stop, _restart_requested, _exit_signalled)))
@@ -1301,8 +1302,7 @@ async def lifespan(app):
     if not pytest_default_real_data_dir:  # before admission and any extension/replacement process (§9)
         finish_unconfirmed_stops(lifespan_drive_root)
         start_inherited_import(lifespan_drive_root)  # the one-time disk walk, off the ready path
-        from ouroboros.startup_migrations import prepare_startup_state
-        prepare_startup_state(lifespan_drive_root, repo_dir=REPO_DIR, strict=False)
+        store_boot.start(lifespan_drive_root, repo_dir=REPO_DIR, request_restart=_request_restart_exit)  # a pending switch, then the import owner off the ready path (P1)
         try:  # the one journal import, on every door (providerless included), before any request
             usage_store.migrate_from_journal(lifespan_drive_root)
         except Exception:
@@ -1335,8 +1335,7 @@ async def lifespan(app):
         _supervisor_stop.clear()  # a fresh lifespan owns a fresh generation (symmetric with the teardown set)
     # A provider-ready boot starts the supervisor after the extension reload below.
     startup_provider_ready = has_startup_ready_provider(settings)
-    if not startup_provider_ready:
-        _supervisor_ready.set()
+    if not startup_provider_ready:  # readiness follows the store's publication (store_boot.when_ready below)
         _supervisor_init_done.set()
         log.info("No supported provider or local routing configured. Supervisor not started.")
     # P2: finalize a pending managed merge update (post-boot smoke / boot-loop rollback)
@@ -1415,11 +1414,11 @@ async def lifespan(app):
     # Startup-only: after the prior process generation is gone, finalize orphaned
     # RUNNING results and resolve an indeterminate post-task synthesis phase.
     # The periodic zombie sweep intentionally does not perform this recovery.
-    if not startup_provider_ready:
-        _run_startup_task_recovery(
+    if not startup_provider_ready:  # after the store's publication: the recovery writes, then readiness (P1)
+        store_boot.when_ready(lifespan_drive_root, lambda: _run_startup_task_recovery(
             lifespan_drive_root, REPO_DIR, skip_live_data=pytest_default_real_data_dir,
             prior_worker_pids=None if pytest_default_real_data_dir else _startup_worker_pids(lifespan_drive_root),
-        )
+        ), _supervisor_ready.set)
 
     # Reload enabled+reviewed extensions across restarts.
     try:
@@ -1597,8 +1596,8 @@ def _restart_cleanup_kwargs() -> dict:
     return {"retain_saved_work": True}
 
 
-def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:
-    """Kill child processes, workers, companions, and runtime port holders."""
+def _emergency_process_cleanup(*, port_sweep: bool = True) -> dict:
+    """Kill child processes, workers, companions, and runtime port holders; the kill census."""
     begin_owned_stop(DATA_DIR)  # the grace starts here; pending stops are recorded before any wait
     worker_exits = None  # the pool's own PID census; None until kill_workers ran to its end
     try:
@@ -1653,6 +1652,7 @@ def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:
             kill_process_on_port(host_service_port())
     except Exception:
         pass
+    return {"worker_exits": worker_exits, "live_children": multiprocessing.active_children(), "owned_stop": owned_stop}
 
 def main() -> int:
     # The server process is the single writer of logs/server.log; a test run on the
@@ -1731,7 +1731,7 @@ def main() -> int:
                         force_exit_timeout_sec)
         try:
             # Our listeners close on exit/exec; port sweeps add no ownership proof.
-            _emergency_process_cleanup(port_sweep=False)
+            store_boot.switch_at_restart(DATA_DIR, REPO_DIR, _emergency_process_cleanup(port_sweep=False))  # the seam: after every reader is dead, before the exit
             if not _LAUNCHER_MANAGED:
                 if _planned_delegate_restart_transaction_id:
                     from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV

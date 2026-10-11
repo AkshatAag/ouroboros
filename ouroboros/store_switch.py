@@ -1,9 +1,12 @@
-"""The authority switch of the current-facts store (dormant until the cutover wires the doors).
+"""The authority switch of the current-facts store.
 
 A door that moves the checkout to a tree WITHOUT the store (UI Rollback, the automatic
 boot-smoke rollback, an Update replace to an older official ref, the agent's rollback
-through the UI door) records an intent (``record_switch_intent``) instead of switching
-at once; the restart exit, after every worker is dead, runs ``run_switch_seam``:
+through the UI door) records an intent (``record_switch_intent``, one decision for every
+door: ``switch_or_reset``) instead of switching at once; the restart exit, after every
+worker is dead (``store_boot.switch_at_restart`` from ``server._check_restart``), runs
+``run_switch_seam``; a boot that finds a pending intent resumes it first
+(``store_boot.start`` -> ``resume_pending_switch``):
 
 preflight (nothing moves on failure; a refusal is a normal restart on the current code
 plus a reason for the owner) -> phase ``exporting`` in every store -> facts
@@ -95,6 +98,20 @@ def switch_needs(repo_dir: Any, target_sha: str) -> Dict[str, bool]:
     return {"facts": target_file_bytes(repo_dir, target_sha, "ouroboros/store.py") is None,
             "money": target_file_bytes(repo_dir, target_sha, "ouroboros/usage_store.py") is None,
             "handles": target_file_bytes(repo_dir, target_sha, "ouroboros/evidence_packs.py") is None}
+
+
+def switch_or_reset(root: Any, repo_dir: Any, *, target_sha: str, target_ref: str, reason: str, door: str,
+                    reset: Callable[[], Tuple[bool, str]]) -> Tuple[bool, str, bool]:
+    """A door's one decision after its writers are stopped: a target WITHOUT the store records
+    the intent and moves nothing (the seam exports and switches at the restart exit the door
+    requests next); a target with it runs the door's own reset now, as before the store.
+    Returns ``(ok, message, deferred)``."""
+    if switch_needs(repo_dir, target_sha)["facts"]:
+        record_switch_intent(root, target_sha=target_sha, target_ref=target_ref, reason=reason, door=door)
+        return True, (f"authority switch to {target_sha[:12]} recorded: the facts are exported and the checkout "
+                      "moves at the restart exit"), True
+    ok, message = reset()
+    return ok, message, False
 
 
 def next_engine_pin(repo_dir: Any, target_sha: str):

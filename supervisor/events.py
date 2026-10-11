@@ -213,6 +213,7 @@ from supervisor.events_runtime_controls import (  # noqa: E402, F401 -- intentio
     _handle_deep_self_review_request,
     _handle_owner_message_injected,
     _handle_promote_to_stable,
+    _handle_rollback_request,
     _handle_toggle_consciousness,
     _handle_toggle_evolution,
 )
@@ -284,6 +285,7 @@ EVENT_HANDLERS = {
     "task_metrics": _handle_task_metrics,
     "deep_self_review_request": _handle_deep_self_review_request,
     "promote_to_stable": _handle_promote_to_stable,
+    "rollback_request": _handle_rollback_request,
     # D06: the "schedule_task" key retired here had no producer anywhere in the
     # tree — it advertised a capability nothing could reach. The FUNCTION keeps
     # its name (its family and FUNCTION_DEBT key are pinned to it); only the

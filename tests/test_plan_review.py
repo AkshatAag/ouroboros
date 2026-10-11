@@ -689,10 +689,14 @@ class TestPlanReviewDispositionEnvelope(unittest.TestCase):
         """Schema-default goal/plan/spec beside a real disposition say NOTHING, so they
         reach disposition mode exactly like the bare envelope. The reciprocal (a vacuous
         disposition beside a real plan) was already tolerated; this is the other side."""
+        import tempfile
         import ouroboros.tools.plan_review as pr
         from ouroboros.tools.registry import ToolContext
 
-        ctx = ToolContext(repo_dir=pathlib.Path("."), drive_root=pathlib.Path("."))
+        scratch = tempfile.TemporaryDirectory()  # a real root: the store's first touch builds under it, never the cwd
+        self.addCleanup(scratch.cleanup)
+        root = pathlib.Path(scratch.name)
+        ctx = ToolContext(repo_dir=root, drive_root=root)
         ctx.task_id = "parent"
         disposition = {"review_fingerprint": "f" * 64, "items": []}
         for padding in (
@@ -736,10 +740,14 @@ class TestPlanReviewDispositionEnvelope(unittest.TestCase):
     def test_disposition_with_an_empty_item_beside_a_plan_is_not_vacuous(self):
         """``items=[{}]`` says something malformed, not nothing: beside a plan it is an answer
         with an envelope whose (malformed) form is refused typed, never plain review mode."""
+        import tempfile
         import ouroboros.tools.plan_review as pr
         from ouroboros.tools.registry import ToolContext
 
-        ctx = ToolContext(repo_dir=pathlib.Path("."), drive_root=pathlib.Path("."))
+        scratch = tempfile.TemporaryDirectory()  # a real root: the store's first touch builds under it, never the cwd
+        self.addCleanup(scratch.cleanup)
+        root = pathlib.Path(scratch.name)
+        ctx = ToolContext(repo_dir=root, drive_root=root)
         ctx.task_id = "parent"
         with patch.object(pr, "_run_plan_review_async") as run:
             out = pr._handle_plan_task(

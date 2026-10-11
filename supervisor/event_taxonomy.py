@@ -106,6 +106,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_project_routing", "ouroboros/agent_task_pipeline.py"),
     "promote_chat_to_task": _handled(
         "supervisor.events_project_routing", "ouroboros/tools/control_routing.py"),
+    "rollback_request": _handled("supervisor.events_runtime_controls", "ouroboros/tools/git_rollback.py"),
     "promote_to_stable": _handled(
         "supervisor.events_runtime_controls", "ouroboros/tools/control_runtime.py"),
     "review_late_result": _handled(

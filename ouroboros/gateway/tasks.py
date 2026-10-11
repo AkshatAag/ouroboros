@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ouroboros.gateway._helpers import coerce_int, json_error, json_exception, request_drive_root, request_json_or, request_repo_dir, run_sync_to_completion, stage_initial_task_attachments
+from ouroboros.gateway._helpers import coerce_int, json_error, json_exception, migrating_error, request_drive_root, request_json_or, request_repo_dir, run_sync_to_completion, stage_initial_task_attachments
 from ouroboros.gateway.cost_breakdown import _task_cost_breakdown_view  # noqa: F401
 from ouroboros.gateway.contracts import TaskCreateRequest
 from ouroboros.gateway.schema import validate_ingress
@@ -488,11 +488,10 @@ def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
     if not description:
         return json_error("description is required", 400)
 
-    ready_error = _supervisor_ready_error(request)
+    drive_root = request_drive_root(request)
+    ready_error = _supervisor_ready_error(request) or migrating_error(drive_root)  # P1: 503 while the store imports
     if ready_error:
         return ready_error
-
-    drive_root = request_drive_root(request)
     repo_dir = request_repo_dir(request)
     try:
         task_id = validate_task_id(body.get("task_id") or uuid.uuid4().hex[:16])
@@ -1158,6 +1157,8 @@ async def api_task_cancel(request: Request) -> JSONResponse:
     action_id = body.get("stop_action_id", "")
     if not isinstance(action_id, str) or len(action_id) > 200:
         return json_error("stop_action_id must be a string of at most 200 characters", 400, task_id=task_id)
+    if migrating := await run_sync_to_completion(migrating_error, request_drive_root(request)):
+        return migrating  # P1: Cancel writes the result's custody; 503 while the boot import owns the store
     if stop_policy_value == "finalize_then_cancel":
         # Graceful ingress: immediate typed pending acknowledgement; the
         # synchronous teardown contract below stays hard/legacy-only.

@@ -35,13 +35,12 @@ def test_bad_cancel_row_is_a_gap_while_good_row_migrates(tmp_path, monkeypatch):
 def test_unreadable_import_leaves_boot_available_and_explicit_repair_fails(tmp_path, monkeypatch):
     """The importer cannot read the result files: boot continues with an unavailable store
     (every door answers typed), no store generation is stamped, and the explicit repair fails."""
-    import server
-    from ouroboros import store, store_import
+    from ouroboros import store, store_boot, store_import
     def unreadable(root):
         raise PermissionError("directory unreadable")
     monkeypatch.setattr(store_import, "_read_results", unreadable)
     assert migrations.prepare_startup_state(tmp_path, strict=False)["status"] == "unavailable"
-    assert "strict=False" in inspect.getsource(server.lifespan)
+    assert "strict=False" in inspect.getsource(store_boot._run)  # the boot door's import owner
     with pytest.raises(o.ObligationsUnavailable):
         o.members(tmp_path, "nonterminal")
     assert not store.generation_stamped(tmp_path) and not store.store_path(tmp_path).exists()

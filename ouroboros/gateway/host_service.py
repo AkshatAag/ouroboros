@@ -41,7 +41,7 @@ from ouroboros.skill_loader import (
     load_enabled,
 )
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
-from ouroboros.store import StoreError
+from ouroboros import store
 
 log = logging.getLogger(__name__)
 _json_error = lambda message, status=500: JSONResponse({"ok": False, "error": message}, status_code=status)
@@ -53,10 +53,9 @@ AUTH_TOKEN_FILENAME = "auth_token.json"
 # so a skill degrades on an older host without a side-effecting probe.
 NOTIFY_VERSION = 1
 
-# The out-of-process WS progress relay (``POST /ui/ws-message``) is the one
-# token-bucket lane: a 60-message burst reserve that refills one message per
-# second (owner decision 2026-09-06: a burst must not silence a widget for the
-# rest of a minute). Every other Host Service lane keeps the sliding window.
+# The out-of-process WS progress relay (``POST /ui/ws-message``) is the one token-bucket lane: a
+# 60-message burst reserve that refills one message per second (owner decision 2026-09-06: a burst
+# must not silence a widget for the rest of a minute). Every other lane keeps the sliding window.
 
 
 class HostServiceAuthError(Exception):
@@ -881,6 +880,8 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
         return _presence_error("presence authentication unavailable", 500, "presence_auth_unavailable", "retry")
     if not ctx.rate_limiter.allow(f"{skill_name}:presence"):
         return _presence_error("rate limit exceeded", 429, "presence_rate_limited", "retry")
+    if await _bounded_host_read(ctx, functools.partial(store.migrating, ctx.data_dir)):  # P1: the turn writes its result
+        return _presence_error("the task store is importing; retry shortly", 503, "migrating", "retry")
     from ouroboros.presence_admission import PresenceAdmissionError
     from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_continuation import continuation_version, turn_response
@@ -1285,14 +1286,13 @@ def _operation_state(ctx: HostServiceContext, rows: list, inbound: Dict[str, Any
                 if owns(task):
                     queued[str(task.get("id") or "")] = dict(task)
     receipt = latest_chat_annotations(ctx.data_dir).get(client_message_id) or {}
-    targets = dict.fromkeys([*queued, str(receipt.get("target") or ""),
-                            *(str(row.get("task_id") or "") for row in reversed(rows))])
+    targets = dict.fromkeys([*queued, str(receipt.get("target") or ""), *(str(row.get("task_id") or "") for row in reversed(rows))])
     for target in targets:
         if not target:
             continue
         try:
             raw = queued.get(target) or load_task_result(ctx.data_dir, target, strict=True) or {}
-        except (ValueError, StoreError):
+        except (ValueError, store.StoreError):
             continue  # An unreadable/disallowed discovery hint carries no authority.
         if not owns(raw):
             continue

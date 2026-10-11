@@ -296,6 +296,24 @@ def store_ready(root: Any) -> bool:
         return False
 
 
+def migrating(root: Any) -> bool:
+    """The write doors' predicate (P1): True while ``store_ready`` is false because the boot
+    import owns ROOT or its first touch cannot publish. An absent store on an idle root is
+    first-touched here instead (milliseconds); the other typed answers stay the door's own."""
+    if store_ready(root):
+        return False
+    with _IMPORTING_GUARD:
+        if str(pathlib.Path(root)) in _IMPORTING:
+            return True
+    try:
+        with open_store(root, write=True):  # the door's own first touch: an idle absent root is imported now
+            return False
+    except StoreMigrating:
+        return True
+    except StoreError:
+        return False
+
+
 def _absent(root: pathlib.Path) -> None:
     """The typed answer for an absent store, or a first-touch import when nothing forbids one."""
     if generation_stamped(root):

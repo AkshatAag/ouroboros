@@ -336,10 +336,14 @@ def test_boot_migrates_the_latch_before_any_quarantining_read():
 
     recovery = inspect.getsource(server_maintenance._run_startup_task_recovery)
     assert "_migrate_startup_cancel_latches" not in recovery
+    # The import owner (store_boot: prepare_startup_state on its thread) starts first; the
+    # recovery and the supervisor each wait for its publication before their first read.
     import server
     lifespan = inspect.getsource(server.lifespan)
-    assert lifespan.index("prepare_startup_state") < lifespan.index("_run_startup_task_recovery")
-    assert lifespan.index("prepare_startup_state") < lifespan.index("_start_supervisor_if_needed")
+    assert lifespan.index("store_boot.start") < lifespan.index("_run_startup_task_recovery")
+    assert lifespan.index("store_boot.start") < lifespan.index("_start_supervisor_if_needed")
+    assert recovery.index("wait_ready(drive_root)") < recovery.index("_startup_live_task_ids")
+    assert "startup:current_store" in inspect.getsource(server._run_supervisor)
     assert "migrate_legacy_cancel_latches" not in inspect.getsource(server_maintenance._startup_custody_sweep)
 
 
