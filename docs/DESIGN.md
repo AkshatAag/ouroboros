@@ -237,7 +237,10 @@ validation, disabled and pending state decide what is sent, and a message is
 sent once. Shift+Enter inserts a line break; Ctrl, Cmd or Alt with Enter send
 like Enter. An Enter that commits an input-method composition sends nothing, a
 held Enter sends once, and an empty, disabled, read-only or settled field sends
-nothing; a rejected answer keeps its draft. The field requests a Send label
+nothing; a rejected answer keeps its draft. The Main and Project field grows with its
+wrapped text to one height cap, then scrolls with a caret at the end in view, and
+shrinks as text goes; while its text fits, or it is empty, it shows no scrollbar (a
+long placeholder may wrap). The field requests a Send label
 from touch keyboards; native keyboard support varies. Every other multiline field — file editors, JSON, settings and
 widget forms — keeps Enter as a line break.
 
