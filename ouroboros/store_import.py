@@ -135,8 +135,9 @@ def _ensure(root: pathlib.Path, path: pathlib.Path) -> Tuple[Dict[str, Any], lis
 def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tuple[Dict[str, Any], list]:
     from ouroboros.startup_migrations import boot_admissions, migrate_cancel_latches, stamp
 
-    records, baseline, quarantined, refused = _read_results(root)
     sets = _read_sets(root)
+    sets_baseline = _sets_baseline(sets)  # the same file snapshot, before boot/chain admissions
+    records, baseline, quarantined, refused = _read_results(root)
     for name, rows in boot_admissions(root).items():  # under the set files: an interrupted publication stays a candidate
         sets[name] = {**rows, **sets.get(name, {})}
     folded, custody = _custody_rows(root, records)
@@ -157,7 +158,7 @@ def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tup
     tmp = path.with_name(f"{path.name}.import-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     try:
         _build(tmp, tier, root, records, sets, baseline, provenance, folded,
-               sets_baseline=_sets_baseline(_read_sets(root)), chain_offset=folded.get("chain_offset", 0),
+               sets_baseline=sets_baseline, chain_offset=folded.get("chain_offset", 0),
                occupied={**{row["task_id"]: row["reason"] for row in quarantined}, **refused})
         os.replace(tmp, path)
     finally:
@@ -306,19 +307,29 @@ def set_file_path(root: pathlib.Path, name: str) -> pathlib.Path:
 
 
 def _read_sets(root: pathlib.Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """Every readable obligation set file, as the old body or the exporter left it."""
+    """One complete snapshot: missing files are absent; unreadable or malformed files abort
+    typed, leaving their bytes in place and published rows intact for a later retry."""
     sets: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    directory = set_file_path(root, "nonterminal").parent
     try:
-        paths = sorted(set_file_path(root, "nonterminal").parent.glob("*.json"))
-    except OSError:
+        with os.scandir(directory) as entries:  # Path.glob can suppress directory read errors
+            paths = sorted(pathlib.Path(entry.path) for entry in entries if entry.name.endswith(".json"))
+    except FileNotFoundError:
         return sets
+    except OSError as exc:
+        raise _unreadable(exc, directory, "obligation sets") from exc
     for path in paths:
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue  # an unreadable set file imports nothing: the derived half comes from the documents
-        if isinstance(value, dict) and all(isinstance(row, dict) for row in value.values()):
-            sets[path.stem] = value
+            if not isinstance(value, dict) or not all(isinstance(row, dict) for row in value.values()):
+                raise ValueError("expected an id-to-facts object")
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise _unreadable(exc, path, "obligation set") from exc
+        except ValueError as exc:
+            raise store.StoreError(f"obligation set malformed, import aborted: {path}") from exc
+        sets[path.stem] = value
     return sets
 
 
@@ -416,6 +427,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
     if not (changed or fresh or deleted):
         txn.set_meta("baseline", baseline)
         return {"status": "unchanged", **counts}, []
+    sets = _read_sets(root)  # validate before any result is moved into quarantine
     now = utc_now_iso()
     quarantined: List[Dict[str, str]] = []
     refused: Dict[str, str] = {}
@@ -450,7 +462,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
             quarantined.append({"task_id": task_id, "reason": "deleted_by_old_body"})
         txn.delete_task(task_id)
         baseline.pop(task_id, None)
-    moved = _reconcile_sets(txn, _read_sets(root))  # the old body maintained the set files too
+    moved = _reconcile_sets(txn, sets)  # the old body maintained the set files too
     legacy = _apply_legacy_custody(root, txn)
     for key, value in (("baseline", baseline), ("freeze_utc", now), ("conflicts", conflicts), (OCCUPIED, occupied),
                        ("reconciled", {"at": now, **counts, "quarantined": len(quarantined), "refused": refused,
