@@ -528,7 +528,7 @@ def test_exporting_phase_keeps_loose_evidence_until_published_again(root):
     report = packer.run_pass(root)
     assert report["faults"] == 0 and report["unlinked"] == 0
     assert _loose(refs[0]) and _handle_path(root, "phase", handle).exists()
-    with store.open_store(root, write=True) as txn:
+    with store.open_store(root, write=True, service=True) as txn:  # the seam's own mode: the gate refuses a public write here
         txn.set_meta("phase", store.PUBLISHED)
     assert packer.run_pass(root)["unlinked"] == 2
 

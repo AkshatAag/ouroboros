@@ -269,6 +269,7 @@ def name_lock(root: Any, filename: str, *, timeout_sec: float, stale_sec: float 
 _IMPORTING: set = set()  # roots this process's lifespan is importing: their readers see ``StoreMigrating``
 _IMPORTING_GUARD = threading.Lock()
 _FIRST_TOUCH = threading.local()  # roots THIS thread is importing on first touch: a nested open answers typed
+_SERVICE = threading.local()  # the import owner's thread: its own post-publication writes pass the window
 
 
 @contextlib.contextmanager
@@ -285,15 +286,38 @@ def importing(root: Any) -> Iterator[None]:
             _IMPORTING.discard(key)
 
 
-def store_ready(root: Any) -> bool:
-    """Whether a write door may proceed: the store is published and no import of it runs here."""
-    with _IMPORTING_GUARD:
-        if str(pathlib.Path(root)) in _IMPORTING:
-            return False
+@contextlib.contextmanager
+def service_thread() -> Iterator[None]:
+    """Service mode for every transaction THIS thread opens: the import owner's steps after
+    publication write through the public APIs (latch migration, obligations) past its own window."""
+    previous = getattr(_SERVICE, "active", False)
+    _SERVICE.active = True
     try:
-        return probe(root)[0] == "present"
+        yield
+    finally:
+        _SERVICE.active = previous
+
+
+def _in_window(root: Any) -> bool:
+    with _IMPORTING_GUARD:
+        return str(pathlib.Path(root)) in _IMPORTING
+
+
+def published(root: Any) -> bool:
+    """Whether a published store answers for ROOT: present and in phase PUBLISHED (readiness is
+    publication, never the file's existence)."""
+    try:
+        if probe(root)[0] != "present":
+            return False
+        with open_store(root, write=False) as txn:
+            return txn.phase() == PUBLISHED
     except StoreError:
         return False
+
+
+def store_ready(root: Any) -> bool:
+    """Whether a write door may proceed: no import of ROOT runs here and its store is published."""
+    return not _in_window(root) and published(root)
 
 
 def migrating(root: Any) -> bool:
@@ -302,9 +326,8 @@ def migrating(root: Any) -> bool:
     first-touched here instead (milliseconds); the other typed answers stay the door's own."""
     if store_ready(root):
         return False
-    with _IMPORTING_GUARD:
-        if str(pathlib.Path(root)) in _IMPORTING:
-            return True
+    if _in_window(root):
+        return True
     try:
         with open_store(root, write=True):  # the door's own first touch: an idle absent root is imported now
             return False
@@ -314,17 +337,16 @@ def migrating(root: Any) -> bool:
         return False
 
 
-def _absent(root: pathlib.Path) -> None:
-    """The typed answer for an absent store, or a first-touch import when nothing forbids one."""
+def _absent(root: pathlib.Path, *, first_touch: bool) -> None:
+    """The typed answer for an absent store, or a first-touch import when a public transaction
+    asks for one and nothing forbids it (a service transaction, the window, a nested open)."""
     if generation_stamped(root):
         raise StoreLost(f"current store missing beside its completed stamp: {store_path(root)}")
     retired = retired_sibling(root)
     if retired is not None:
         raise StoreRetired(f"current store retired by an export as {retired.name}: the files are the authority")
-    with _IMPORTING_GUARD:
-        window = str(root) in _IMPORTING
     entered = getattr(_FIRST_TOUCH, "roots", None) or set()
-    if window or str(root) in entered:
+    if not first_touch or _in_window(root) or str(root) in entered:
         raise StoreMigrating(f"current store not published yet: {store_path(root)}")
     from ouroboros.store_import import ensure_current_store
 
@@ -342,12 +364,20 @@ def _absent(root: pathlib.Path) -> None:
 
 
 @contextlib.contextmanager
-def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC) -> Iterator["Txn"]:
+def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC, service: bool = False) -> Iterator["Txn"]:
     """One transaction on the published store: ``StoreMigrating`` while the lifespan imports, a
     first-touch import for a never-imported root, ``StoreLost`` for a missing store beside its
     completed stamp, ``StoreRetired`` for one an export set aside (the files are the authority
-    until the next import), ``StoreBusy`` on contention; ``mode=rw``, never creating here."""
+    until the next import), ``StoreBusy`` on contention; ``mode=rw``, never creating here.
+
+    The one write gate: a public write (``write`` without ``service``) refuses ``StoreMigrating``
+    while ROOT is in the import window and ``StoreRetired`` inside the transaction when the phase
+    is not PUBLISHED. ``service`` is the importer's, the exporter's and the seam's mode (also the
+    import owner thread's, ``service_thread``): their transactions pass both checks."""
     root = pathlib.Path(root)
+    service = service or bool(getattr(_SERVICE, "active", False))
+    if write and not service and _in_window(root):
+        raise StoreMigrating(f"current store not published yet: the import of {root} runs")
     state, tier = probe(root)
     if state == "absent" and not write and not root.is_dir():
         # A root that does not exist holds nothing: a read answers empty and creates nothing.
@@ -361,7 +391,7 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC) -> I
             conn.close()
         return
     if state == "absent":
-        _absent(root)
+        _absent(root, first_touch=not service)
         state, tier = probe(root)
         if state == "absent":
             raise StoreMigrating(f"current store not published yet: {store_path(root)}")
@@ -376,6 +406,8 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC) -> I
         try:
             with transaction(conn, write=write, commit_wait_sec=wait_sec if tier == TIER_ENFORCED else None):
                 txn = Txn(conn, root)
+                if write and not service and (phase := txn.phase()) != PUBLISHED:
+                    raise StoreRetired(f"current store phase is {phase}: the files are the authority")
                 yield txn
                 if write and conn.total_changes:
                     txn.set_meta("commit_seq", txn.revision() + 1)
@@ -480,11 +512,6 @@ class Txn:
     def touch(self, task_id: str) -> None:
         """A row-only write still moves the task's signature (the memos re-read)."""
         self.conn.execute("UPDATE tasks SET write_seq = write_seq + 1 WHERE task_id=?", (task_id,))
-
-    def require_published(self) -> None:
-        phase = self.phase()
-        if phase != PUBLISHED:
-            raise StoreRetired(f"current store phase is {phase}: the files are the authority")
 
     def row(self, task_id: str, *columns: str) -> Any:
         """One task's typed columns (one value for one column, a tuple for several; ``None`` when absent)."""
@@ -628,13 +655,12 @@ class Txn:
 def update_task(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]], *,
                 riders: Tuple[Callable[[Txn, Dict[str, Any], Dict[str, Any]], None], ...] = (),
                 pending_drive: Any = None) -> Optional[Dict[str, Any]]:
-    """The write seam: ``BEGIN IMMEDIATE``; the phase read inside (``StoreRetired`` once an export
-    began, which a straggler's older connection sees in the retired inode); the mutator over the
-    current document (``None`` = no write: the read-only transaction commits empty); the
-    cutover's riders on the same connection; COMMIT. ``pending_drive`` is a value, or a callable
-    ``(txn, current, updated) -> Optional[bool]`` deciding it from the written document."""
+    """The write seam: ``BEGIN IMMEDIATE`` with the gate's phase read inside (``StoreRetired``
+    once an export began, which a straggler's older connection sees in the retired inode); the
+    mutator over the current document (``None`` = no write: the read-only transaction commits
+    empty); the cutover's riders on the same connection; COMMIT. ``pending_drive`` is a value, or
+    a callable ``(txn, current, updated) -> Optional[bool]`` deciding it from the written document."""
     with open_store(root, write=True) as txn:
-        txn.require_published()
         current = txn.load(task_id) or {}
         updated = mutator(json.loads(json.dumps(current)))
         if updated is None:

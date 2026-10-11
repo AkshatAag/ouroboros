@@ -127,7 +127,7 @@ def _ensure(root: pathlib.Path, path: pathlib.Path) -> Tuple[Dict[str, Any], lis
     tier = TIER_ENFORCED if kernel_file_locks_enforced(root / "state" / LOCK_NAME) else TIER_NAME
     if state == "present":
         retiered = {"retiered_from": header} if header != tier else {}
-        with store.open_store(root, write=True) as txn:  # opened under the header's protocol, left under today's
+        with store.open_store(root, write=True, service=True) as txn:  # opened under the header's protocol, left under today's
             if retiered:
                 txn.conn.execute(f"PRAGMA application_id = {store._APPLICATION_ID[tier]}")
                 txn.set_meta("lock_tier", tier)
@@ -479,7 +479,7 @@ def export_facts(root: Any) -> Dict[str, Any]:
     abandonment, so the store's own partial writes are never mistaken for an old body's."""
     root = pathlib.Path(root)
     names: List[str] = []
-    with store.open_store(root, write=True) as txn:  # T1: the plan, durable before the first write
+    with store.open_store(root, write=True, service=True) as txn:  # T1: the plan, durable before the first write
         baseline = txn.meta("baseline") or {}
         task_ids = txn.task_ids()
         names = sorted(set(txn.set_names()) | set(o.BOOT_SETS))  # an older body expects every set file
@@ -511,7 +511,7 @@ def export_facts(root: Any) -> Dict[str, Any]:
             task_result_path(root, task_id).unlink()
     store.fsync_directory(task_results_dir(root, create=False))
     store.fsync_directory(set_file_path(root, "nonterminal").parent)
-    with store.open_store(root, write=True) as txn:  # T2: the baseline follows what was written
+    with store.open_store(root, write=True, service=True) as txn:  # T2: the baseline follows what was written
         refused = {task_id: entry for task_id, entry in (txn.meta("baseline") or {}).items() if entry.get("refused")}
         txn.set_meta("baseline", {**refused, **entries})
         txn.set_meta("export_manifest", {**manifest, "status": "completed", "completed_at": utc_now_iso()})

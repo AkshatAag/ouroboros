@@ -214,6 +214,47 @@ def test_update_task_refuses_once_the_export_began_and_writes_nothing(tmp_path):
         assert txn.load("t1")["note"] == "before"
 
 
+def test_every_public_write_refuses_in_the_window_and_outside_published_while_service_mode_passes(tmp_path):
+    """The one gate (B1): custody emit, obligation rows, a document delete and a handoff row
+    all refuse typed while the import window is open for the root or the phase is not PUBLISHED;
+    readiness is publication; the importer/exporter/seam's service mode passes both checks."""
+    from ouroboros import delegate_custody_current as custody, obligations
+    from ouroboros.task_store import delete_document, patch_handoff
+
+    publish(tmp_path, document("t1"))
+    event = {"type": "delegate_run_containment_fault", "task_id": "t1", "run_id": "r1", "event_id": "e1",
+             "ts": "2026-10-10T00:00:00+00:00"}
+    with store.importing(tmp_path):
+        assert store.store_ready(tmp_path) is False and store.published(tmp_path) is True
+        with pytest.raises(StoreMigrating):
+            obligations.add(tmp_path, "custody_marks", "t1", {"task_id": "t1"})
+        with pytest.raises(StoreMigrating):
+            delete_document(tmp_path, "t1")
+        with pytest.raises(StoreMigrating):
+            patch_handoff(tmp_path, "t1", "model_waits", "op", lambda _row: {"state": "waiting"})
+        assert custody.publish(tmp_path, event) is False
+        with store.open_store(tmp_path, write=True, service=True) as txn:  # the importer's own mode
+            txn.set_meta("probe", 1)
+        with store.service_thread():  # the import owner's post-publication steps through public APIs
+            obligations.add(tmp_path, "custody_marks", "t1", {"task_id": "t1"})
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.load("t1") is not None and txn.custody_rows() == {} and txn.get_row("custody_marks", "t1") == {"task_id": "t1"}
+    assert store.store_ready(tmp_path) is True
+    with store.open_store(tmp_path, write=True, service=True) as txn:
+        txn.set_meta("phase", store.EXPORTING)
+    assert store.store_ready(tmp_path) is False and store.published(tmp_path) is False  # the file exists, not ready
+    with pytest.raises(StoreRetired):
+        obligations.remove(tmp_path, "custody_marks", "t1")
+    with pytest.raises(StoreRetired):
+        delete_document(tmp_path, "t1")
+    assert custody.publish(tmp_path, event) is False
+    with store.open_store(tmp_path, write=True, service=True) as txn:
+        txn.set_meta("phase", store.PUBLISHED)
+    assert custody.publish(tmp_path, event) is True and delete_document(tmp_path, "t1") is True
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.load("t1") is None and set(txn.custody_rows()) == {"r1"}
+
+
 def test_a_straggler_after_the_retirement_is_told_retired_not_migrating(tmp_path):
     """The seam commits ``phase=retired`` into the store, clears the stamp and renames it aside.
     A writer that opened the file earlier reads that phase inside its own transaction; a writer

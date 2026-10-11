@@ -834,11 +834,22 @@ def _member_key(member: Dict[str, Any]) -> tuple:
 
 @contextlib.contextmanager
 def _unlink_phase(root: Any) -> Iterator[tuple]:
-    """Serialize loose deletion with the switch's phase change, without creating a store."""
+    """Serialize loose deletion with the switch's phase change, without creating a store: the
+    write gate's typed refusal (an export began, the boot import runs) defers the deletion."""
     present, _ = store.probe(root)
-    with (store.open_store(root, write=True) if present == "present" else contextlib.nullcontext()) as txn:
-        yield (txn.phase() == store.PUBLISHED if txn is not None else
-               not (store.generation_stamped(root) or store.retired_sibling(root))), txn
+    if present != "present":
+        yield not (store.generation_stamped(root) or store.retired_sibling(root)), None
+        return
+    entered = False
+    try:
+        with store.open_store(root, write=True) as txn:
+            entered = True
+            yield True, txn
+            return
+    except (store.StoreRetired, store.StoreMigrating):
+        if entered:
+            raise
+    yield False, None
 
 
 def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set, revision: str,

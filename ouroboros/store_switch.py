@@ -80,7 +80,7 @@ def _receipt(root: pathlib.Path, intent: Dict[str, Any]) -> Dict[str, Any]:
 def _write_receipt(root: pathlib.Path, receipt: Dict[str, Any]) -> None:
     atomic_write_json(root / RECEIPT_REL, receipt, fsync=True)
     try:
-        with store.open_store(root, write=True) as txn:
+        with store.open_store(root, write=True, service=True) as txn:
             txn.set_meta("switch_receipt", receipt)
     except store.StoreError:
         pass  # a retired or absent store: the file is the receipt
@@ -285,7 +285,7 @@ def _abandon(root: pathlib.Path, receipt: Dict[str, Any]) -> Dict[str, Any]:
         if moved:
             restored["money"] = moved
     for drive in _roots(root)[0]:
-        with store.open_store(drive, write=True) as txn:
+        with store.open_store(drive, write=True, service=True) as txn:
             if txn.phase() != PUBLISHED:
                 absorbed = store_import.absorb_own_export(drive, txn)  # its own partial writes join the baseline
                 txn.set_meta("phase", PUBLISHED)
@@ -342,7 +342,7 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
         steps = receipt["steps"]
         if needs["facts"]:
             for drive in roots:
-                with store.open_store(drive, write=True) as txn:
+                with store.open_store(drive, write=True, service=True) as txn:
                     txn.set_meta("phase", EXPORTING)
                     txn.set_meta("export", {"status": "exporting", "started_at": utc_now_iso()})
             _progress(root, "exporting", roots=[str(drive) for drive in roots])
@@ -364,7 +364,7 @@ def run_switch_seam(root: Any, *, repo_dir: Any, owner: Optional[Owner] = None, 
         return {"status": "failed", "error": receipt["export"]["error"], "attempt": receipt["attempts"]}
     receipt["export"] = {"status": "completed", "completed_at": utc_now_iso(), "needs": needs}
     for drive in roots:
-        with store.open_store(drive, write=True) as txn:
+        with store.open_store(drive, write=True, service=True) as txn:
             txn.set_meta("export", receipt["export"])
     _write_receipt(root, receipt)
     os.unlink(root / INTENT_REL)  # consumed BEFORE the switch: the old body never sees an intent
@@ -389,7 +389,7 @@ def _retire(drive: pathlib.Path) -> str:
     absent beside the stamp therefore always means LOST). Returns the retired name."""
     from ouroboros.startup_migrations import stamp
 
-    with store.open_store(drive, write=True) as txn:
+    with store.open_store(drive, write=True, service=True) as txn:
         txn.set_meta("phase", RETIRED)
     path = store.store_path(drive)
     retired = path.with_name(f"{path.name}.exported-{_stamp()}")

@@ -105,7 +105,6 @@ def patch_handoff(root: Any, task_id: str, kind: str, op_id: str,
     row that is current when the transaction ends."""
     task_id, op_id = str(task_id), str(op_id)
     with open_store(root, write=True) as txn:
-        txn.require_published()
         if not txn.row(task_id, "status"):
             raise LookupError(f"task {task_id} has no lifecycle row")
         current = txn.handoff(task_id, op_id)
@@ -124,7 +123,6 @@ def put_handoffs(root: Any, task_id: str, kind: str, rows: Dict[str, Any]) -> No
     """Upsert several operation rows of one projection in one transaction (``LookupError`` as above)."""
     task_id = str(task_id)
     with open_store(root, write=True) as txn:
-        txn.require_published()
         if not txn.row(task_id, "status"):
             raise LookupError(f"task {task_id} has no lifecycle row")
         for op_id, facts in rows.items():
