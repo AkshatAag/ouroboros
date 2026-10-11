@@ -6,6 +6,7 @@ import pytest
 
 from ouroboros import store, store_import
 from ouroboros.utils import atomic_write_json
+from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_store_import import add_set_member, load, meta, result, write_result
 
 
@@ -117,3 +118,77 @@ def test_malformed_set_refused_in_place_without_losing_rows(tmp_path, published,
     write_result(root, result("task1", "completed"))
     store_import.ensure_current_store(root)
     assert set_rows(root) == {}
+
+
+@pytest.mark.parametrize("collision", [False, True], ids=["plain", "collision_suffix"])
+def test_interrupted_import_recovers_quarantined_identity(tmp_path, monkeypatch, collision):
+    root = tmp_path / "data"
+    path = write_result(root, {"task_id": "legacy", "status": "completed"})
+    original = path.read_bytes()
+    quarantine = path.parent / "quarantine"
+    if collision:
+        quarantine.mkdir()
+        (quarantine / path.name).write_bytes(original)
+    build = store_import._build
+
+    def crash(*args, **kwargs):
+        raise KeyboardInterrupt("stopped after quarantine, before publication")
+
+    monkeypatch.setattr(store_import, "_build", crash)
+    with pytest.raises(KeyboardInterrupt):
+        store_import.ensure_current_store(root)
+    assert not path.exists() and not store.generation_stamped(root)
+    if collision:
+        (quarantine / path.name).unlink()  # exercise recovery from the collision copy alone
+    assert len(list(quarantine.glob("*.json"))) == 1
+    assert next(quarantine.glob("*.json")).read_bytes() == original
+    monkeypatch.setattr(store_import, "_build", build)
+    store_import.ensure_current_store(root)
+    assert store_import.occupied_reason(root, "legacy") == "quarantined_before_import"
+    assert load_task_result(root, "legacy") is None
+    with pytest.raises(ValueError, match="unreadable or invalid"):
+        load_task_result(root, "legacy", strict=True)
+    with pytest.raises(ValueError, match="unreadable or invalid"):
+        write_task_result(root, "legacy", "running", create_only=True)
+    assert write_task_result(root, "fresh", "scheduled", create_only=True)["status"] == "scheduled"
+
+
+def test_admitted_file_wins_over_older_quarantine_copy(tmp_path):
+    root = tmp_path / "data"
+    path = write_result(root, result("restored"))
+    quarantine = path.parent / "quarantine"
+    quarantine.mkdir()
+    atomic_write_json(quarantine / path.name, {"task_id": "restored", "status": "completed"})
+    store_import.ensure_current_store(root)
+    assert load_task_result(root, "restored", strict=True)["status"] == "completed"
+    assert store_import.occupied_reason(root, "restored") == ""
+    assert store_import.ensure_current_store(root)["status"] == "unchanged"
+    assert store_import.occupied_reason(root, "restored") == ""
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["new_file", "changed_file"])
+def test_interrupted_p6_quarantine_keeps_identity_occupied(tmp_path, monkeypatch, existing):
+    root = tmp_path / "data"
+    if existing:
+        write_result(root, result("legacy"))
+    store_import.ensure_current_store(root)
+    write_result(root, {"task_id": "legacy", "status": "completed"})
+    apply_chain = store_import._apply_legacy_custody
+
+    def crash(*args):
+        raise KeyboardInterrupt("stopped after quarantine, before transaction commit")
+
+    monkeypatch.setattr(store_import, "_apply_legacy_custody", crash)
+    with pytest.raises(KeyboardInterrupt):
+        store_import.ensure_current_store(root)
+    assert (root / "task_results" / "quarantine" / "legacy.json").exists()
+    assert bool(load(root, "legacy")) is existing  # the transaction rolled back
+    monkeypatch.setattr(store_import, "_apply_legacy_custody", apply_chain)
+    store_import.ensure_current_store(root)
+    with pytest.raises(ValueError, match="unreadable or invalid"):
+        load_task_result(root, "legacy", strict=True)
+    with pytest.raises(ValueError, match="unreadable or invalid"):
+        write_task_result(root, "legacy", "running", create_only=True)
+    write_result(root, result("legacy"))
+    store_import.ensure_current_store(root)
+    assert load_task_result(root, "legacy", strict=True)["status"] == "completed"

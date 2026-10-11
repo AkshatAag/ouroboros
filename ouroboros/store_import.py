@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -159,7 +160,8 @@ def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tup
     try:
         _build(tmp, tier, root, records, sets, baseline, provenance, folded,
                sets_baseline=sets_baseline, chain_offset=folded.get("chain_offset", 0),
-               occupied={**{row["task_id"]: row["reason"] for row in quarantined}, **refused})
+               occupied={**_quarantined_occupied(root, [task_id for task_id, _ in records]),
+                         **{row["task_id"]: row["reason"] for row in quarantined}, **refused})
         os.replace(tmp, path)
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -336,6 +338,21 @@ def _read_sets(root: pathlib.Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
 OCCUPIED = "occupied"  # meta: the identities whose file the import refused or quarantined (ABI-2: not readmitted)
 
 
+def _quarantined_occupied(root: pathlib.Path, admitted: List[str]) -> Dict[str, str]:
+    """Recover reservations after a quarantine rename outlived an interrupted import/transaction.
+    Admitted rows win; deletion backups are evidence of retirement, not refused admission."""
+    directory = task_results_dir(root, create=False) / TASK_RESULT_QUARANTINE_DIR
+    try:
+        with os.scandir(directory) as entries:
+            identities = {re.sub(r"\.[0-9a-f]{8}$", "", pathlib.Path(entry.name).stem)
+                          for entry in entries if entry.name.endswith(".json") and not re.search(r"\.deleted-\d{8}T\d{6}Z\.json$", entry.name)}
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise _unreadable(exc, directory, "task result quarantine") from exc
+    return {task_id: "quarantined_before_import" for task_id in identities - set(admitted)}
+
+
 def occupied_reason(root: pathlib.Path, task_id: str, *, write: bool = False) -> str:
     """Why TASK_ID's identity is occupied without a row (its file was refused or quarantined by
     the import or a P6'), ``""`` for a free identity: what a strict read or a create-only write
@@ -426,6 +443,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
     counts = {"changed": len(changed), "new": len(fresh), "deleted": len(deleted), "results": len(baseline)}
     if not (changed or fresh or deleted):
         txn.set_meta("baseline", baseline)
+        txn.set_meta(OCCUPIED, {**_quarantined_occupied(root, txn.task_ids()), **(txn.meta(OCCUPIED) or {})})
         return {"status": "unchanged", **counts}, []
     sets = _read_sets(root)  # validate before any result is moved into quarantine
     now = utc_now_iso()
@@ -464,6 +482,7 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
         baseline.pop(task_id, None)
     moved = _reconcile_sets(txn, sets)  # the old body maintained the set files too
     legacy = _apply_legacy_custody(root, txn)
+    occupied = {**_quarantined_occupied(root, txn.task_ids()), **occupied}
     for key, value in (("baseline", baseline), ("freeze_utc", now), ("conflicts", conflicts), (OCCUPIED, occupied),
                        ("reconciled", {"at": now, **counts, "quarantined": len(quarantined), "refused": refused,
                                        "conflicts": len(conflicts), "set_rows": moved, "legacy_custody": legacy})):
