@@ -1096,11 +1096,11 @@ export function computeDerivedChatStatus({
     modelActivity = null,
 } = {}) {
     if (!isConnected) return { kind: 'offline', text: 'Reconnecting...', showDots: false };
-    if (modelActivity) return { kind: modelActivity.waiting ? 'online' : 'thinking', text: modelActivity.text, showDots: modelActivity.motion };
-    if (hasActiveLiveCard || activeManagedCount > 0) return { kind: 'thinking', text: 'Working...', showDots: !hasActiveLiveCard };
+    const observed = modelActivity && { kind: modelActivity.waiting ? 'online' : 'thinking', text: modelActivity.text, showDots: modelActivity.motion };
+    if (hasActiveLiveCard || activeManagedCount > 0) return (activeManagedCount > 0 && observed) || { kind: 'thinking', text: 'Working...', showDots: !hasActiveLiveCard };
     // Sent work still finishing under the owner's Pause: settling, not working.
     if (pausingManagedCount > 0) return { kind: 'thinking', text: 'Pausing…', showDots: true };
-    if (activeDirectCount > 0) return { kind: 'thinking', text: 'Thinking...', showDots: true };
+    if (activeDirectCount > 0) return observed || { kind: 'thinking', text: taskActivityPresentation({ phase: 'working' }).text, showDots: true };
     if (pendingSubmissionsCount > 0) return { kind: 'thinking', text: 'Sending...', showDots: true };
     if (waitingModelCount > 0) return { kind: 'online', text: 'Waiting for access', showDots: false };
     if (queuedManagedCount > 0) return { kind: 'thinking', text: 'Queued...', showDots: true };
@@ -1113,9 +1113,7 @@ export function computeDerivedChatStatus({
     return { kind: 'online', text: 'Online', showDots: false };
 }
 
-// The reducer's counted inputs: census activities not waiting on a model, and mounted unfinished
-// cards, where a managed root drives Working… and a direct turn keeps the census verdict (Thinking…);
-// a paused or pausing card (`task_phase_chip.syncParkedPhase`) is not working.
+// Count census activity and unfinished cards; parked/waiting rows retain their own state.
 export function chatStatusCounts(activities, records, isWaiting = () => false) {
     const counts = { activeDirectCount: 0, activeManagedCount: 0, queuedManagedCount: 0, pausingManagedCount: 0,
         pausedManagedCount: 0, unknownActivityCount: 0, hasActiveLiveCard: false, waitingModelCount: 0,
@@ -1139,7 +1137,8 @@ export function chatStatusCounts(activities, records, isWaiting = () => false) {
         else counts.activeManagedCount += 1;
         if (!entry?._activityUnconfirmed && ['preparing', 'thinking', 'working'].includes(entry?.phase)
             && !waitPhase && !projectHold) calls.set(id, modelActivityPresentation(
-                entry.phase === 'preparing' ? { phase: 'preparing' } : entry.model_activity));
+                entry.phase === 'preparing' ? { phase: 'preparing' } : entry.model_activity)
+                || (entry.kind !== 'managed_task' ? taskActivityPresentation({ phase: entry.phase }) : null));
     }
     if (pauseCauses.size === 1) counts.pausedCause = [...pauseCauses][0];
     for (const record of records) {
