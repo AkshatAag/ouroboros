@@ -3359,10 +3359,19 @@ textarea.chat-input {
     font-family: inherit;
     outline: none;
     resize: none;
+    /* Grows with its text or placeholder to this one cap, then scrolls;
+       chat_input_sizing.js picks content sizing, else writes the measured height. */
+    height: var(--chat-input-height, auto);
     min-height: 32px;
     max-height: 140px;
     line-height: 1.45;
 }
+#chat-input[data-sizing="content"],
+textarea.chat-input[data-sizing="content"] { field-sizing: content; }
+/* A measured box below the cap holds its whole text: a rounded scrollHeight must not
+   leave a sub-pixel scrollbar. */
+#chat-input[data-sizing="fit"],
+textarea.chat-input[data-sizing="fit"] { overflow-y: hidden; }
 #chat-input::placeholder,
 textarea.chat-input::placeholder { color: var(--text-muted); }
 
