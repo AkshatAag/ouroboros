@@ -270,14 +270,23 @@ def test_incident_toast_uses_host_display_without_changing_tone_or_authored_text
     server = direct_server_with_data
     with _browser(server, request, engine) as (page, evidence, errors):
         _open(page, server["url"])
-        raw = "❌ worker process crashed — retained details"
-        for index, (role, narration) in enumerate((("system", False), ("assistant", False), ("system", True))):
-            row = {"type": "chat", "role": role, "narration": narration, "system_type": "worker_failure",
+        crash = "❌ worker process crashed — retained details"
+        wrapped = "💬 ⚡ Fallback: route changed"
+        unknown = "💬 🦊 an unlisted host note"
+        samples = [("system", False, "worker_failure", crash, crash.split(" ", 1)[1]),
+                   ("assistant", False, "worker_failure", crash, crash),
+                   ("system", True, "worker_failure", crash, crash),
+                   ("system", False, "host_progress", wrapped, "Fallback: route changed"),
+                   ("system", True, "host_progress", wrapped, wrapped),
+                   ("system", False, "host_progress", unknown, unknown)]
+        for index, (role, narration, kind, raw, expected) in enumerate(samples):
+            row = {"type": "chat", "is_progress": True, "task_id": "emoji-toast", "role": role,
+                   "narration": narration, "system_type": kind,
                    "task_incident": "worker_crash", "toast_once": f"emoji-incident-{index}", "toast_tone": "error",
                    "content": raw, "chat_id": 1, "ts": f"2026-10-10T18:00:0{index}+00:00"}
             _emit_ws_frame(page, row)
             toast = page.locator('#toast-stack .toast').last
-            assert toast.inner_text() == (raw.split(" ", 1)[1] if index == 0 else raw)
+            assert toast.inner_text() == expected
             assert toast.get_attribute('role') == 'alert'
             assert 'toast-danger' in toast.get_attribute('class')
             count = page.locator('#toast-stack .toast').count()

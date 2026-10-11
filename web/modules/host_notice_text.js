@@ -55,12 +55,14 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
         '🌐 Stopped waiting for ', '🌐 Still waiting for ', '⚡ Fallback: ', '📐 Plan review:', '📐 Plan review so far:', '✅ PR #', '⚠️ PR #'],
 }));
 
+const prefixFor = (text, type) => (HOST_NOTICE_PREFIXES.get(String(type || '')) || []).find(entry => text.startsWith(entry));
+
 // `text` is the row as stored and decides the match; `shown` is what the caller would
 // otherwise paint (the translated sentence for a `tx` type), which loses the same mark.
 export function hostNoticeDisplayText(text, systemType, shown = text) {
     const source = String(text ?? '');
     const display = String(shown ?? '');
-    const prefix = (HOST_NOTICE_PREFIXES.get(String(systemType || '')) || []).find((entry) => source.startsWith(entry));
+    const prefix = prefixFor(source, systemType);
     if (!prefix) return display;
     const mark = prefix.slice(0, prefix.indexOf(' ') + 1);
     // The receipt's leading mark also carries severity; keep that meaning in words.
@@ -70,6 +72,13 @@ export function hostNoticeDisplayText(text, systemType, shown = text) {
 
 // Authored narration outranks a stale host type, on both bubble and timeline paths.
 export function hostRowDisplayText(row, shown = row.text ?? row.content ?? '') {
-    return row.role === 'system' && row.narration !== true
-        ? hostNoticeDisplayText(row.text ?? row.content, row.system_type, shown) : shown;
+    if (row.role !== 'system' || row.narration === true) return shown;
+    let text = String(row.text ?? row.content ?? '');
+    // A progress envelope is not authored content. Remove it only together with
+    // a recognized host opening; unknown and authored rows keep every character.
+    if (row.is_progress === true && text.startsWith('💬 ') && prefixFor(text.slice('💬 '.length), row.system_type)) {
+        text = text.slice('💬 '.length);
+        if (String(shown).startsWith('💬 ')) shown = String(shown).slice('💬 '.length);
+    }
+    return hostNoticeDisplayText(text, row.system_type, shown);
 }

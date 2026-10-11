@@ -7,7 +7,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import test from 'node:test';
 
 import { createChatInstance } from '../modules/chat.js';
-import { HOST_NOTICE_PREFIXES, hostNoticeDisplayText } from '../modules/host_notice_text.js';
+import { HOST_NOTICE_PREFIXES, hostNoticeDisplayText, hostRowDisplayText } from '../modules/host_notice_text.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { cardRowSummary } from '../modules/chat_activity.js';
 import { loadSkillReviewDetail, renderSkillReviewDisclosure, summarizeSkillReviewMessage } from '../modules/skill_review_card.js';
@@ -244,4 +244,17 @@ test('new warning words use the installed translation memory without translating
         assert.equal(hostNoticeDisplayText(raw, 'host_progress'), 'Внимание: PR #12 merge: quoted 🎉 evidence');
         assert.equal(hostNoticeDisplayText(raw, 'reminder'), raw);
     } finally { applyPayload(prior); }
+});
+
+test('a progress wrapper is removed only with a known host opening', () => {
+    const text = '💬 ⚡ Fallback: route changed';
+    const row = { role: 'system', narration: false, is_progress: true, system_type: 'host_progress', text };
+    assert.equal(hostRowDisplayText(row), 'Fallback: route changed');
+    for (const other of [{ narration: true }, { role: 'assistant' }, { system_type: 'reminder' }, { is_progress: false }]) {
+        assert.equal(hostRowDisplayText({ ...row, ...other }), text);
+    }
+    const unknown = '💬 🦊 an unlisted host note';
+    assert.equal(hostRowDisplayText({ ...row, text: unknown }), unknown);
+    assert.equal(hostRowDisplayText({ ...row, text: unknown }, '💬 translated unknown'), '💬 translated unknown');
+    assert.equal(row.text, text);
 });
