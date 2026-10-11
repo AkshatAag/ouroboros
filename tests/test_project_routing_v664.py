@@ -131,7 +131,8 @@ def test_project_fast_route_stages_attachment_in_actor_child_drive(tmp_path):
     assert "child-drive-readable" in _read_file(
         tool_ctx, manifest[0]["relpath"], root="artifact_store",
     )
-    assert notices and "status=staged" in notices[-1]
+    # A landed delivery publishes no row: the receipt the caller records carries the stashed report.
+    assert notices == [] and "status=staged" in metadata["_attachment_report"]
 
 
 def test_project_swarm_bypasses_single_root_mailbox_for_new_managed_root(tmp_path, monkeypatch):
