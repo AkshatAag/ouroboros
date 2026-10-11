@@ -1289,7 +1289,7 @@ def _persist_cancel_receipt(
     no contract change): full-copy path + size + full sha256 (or an honest
     unreadable/unpreserved marker), exact preview-omitted count, the stop
     reason when the intent is still readable, and the historical children
-    digest for a cascade root. Never creates the result file (a later full
+    digest for a cascade root. Never creates the result record (a later full
     write would clobber a block-only row) and never clobbers previously
     persisted non-empty facts with an emptier rebuild. Fail-soft.
     ``files_rescued`` (TZ-2 C2) is the typed stat-only store count the receipt text speaks.

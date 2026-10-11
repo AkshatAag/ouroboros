@@ -400,7 +400,7 @@ def observe_cancellation_target(
 ) -> Dict[str, Any]:
     """Read separate source facts about the resolved target, never cancel authority.
 
-    The result file, queue snapshot and custody rows are separate observations;
+    The stored result, queue snapshot and custody rows are separate observations;
     their own timestamps/freshness survive. A failed liveness probe is UNKNOWN,
     never the fail-open ownership hint used to admit an actual cancellation.
     """
@@ -689,11 +689,11 @@ def reconcile_orphaned_running_tasks(
     expired_quizzes: Optional[List[Any]] = None,
     write_guard: Optional[Callable[[str], Any]] = None, boot: bool = True,
 ) -> int:
-    """Durably finalize on-disk RUNNING task results the effective-status
+    """Durably finalize stored RUNNING task results the effective-status
     projection already considers terminal.
 
     A task whose worker crashed / was SIGKILLed / manually stopped can leave
-    ``task_results/<id>.json`` at ``running`` forever (a misleading zombie). The
+    a task-store record at ``running`` forever (a misleading zombie). The
     read-time ``effective_task_result`` already projects such an orphan to a
     terminal status, but never persists it, so a headless/no-UI run that never
     re-reads the result keeps the stale ``running`` on disk.

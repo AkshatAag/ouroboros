@@ -7,7 +7,7 @@ the terminal reconciliation — so the pinned surfaces (the escalate tool, the
 decision ingress, ``supervisor/queue_transitions``) keep thin dispatch only,
 mirroring ``ouroboros/owner_hurry.py``.
 
-Shape inside ``task_results/<task_id>.json`` (canonical drive root, exactly
+Shape inside the current task-store record (canonical drive root, exactly
 like the hurry projection):
 
     "owner_quiz": {
