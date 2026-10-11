@@ -198,11 +198,10 @@ def test_lineage_discovery_reads_typed_facts_and_sees_a_changed_lineage(tmp_path
 
     root = seed(tmp_path / "data")
     write_task_result(root, "child", "running", delegation_role="subagent", parent_task_id="aaaa")
-    monkeypatch.setattr(task_store, "_documents", lambda *a, **kw: pytest.fail("lineage discovery decoded a body"))
+    monkeypatch.setattr(task_store, "_decode", lambda *a, **kw: pytest.fail("lineage discovery decoded a body"))
     follower = _TaskEventCursorFollower(root, "root", {"v": 2, "seq": 0, "view": "", "positions": {}})
     follower.refresh_view()
     assert "child" not in follower.task_filter_ids
-    monkeypatch.undo()
     write_task_result(root, "child", "running", delegation_role="subagent", parent_task_id="root")
     follower.refresh_view()
     assert "child" in follower.task_filter_ids
@@ -334,8 +333,8 @@ def test_reconnect_gets_fresh_terminal_result_without_replaying_consumed_logs(tm
 @pytest.mark.parametrize("schema", [None, 999])
 def test_a_refused_legacy_result_file_never_reaches_the_lineage(tmp_path, schema):
     """A file the importer refuses (unstamped, or a future schema) is not a row: discovery
-    never lists it, the strict reader does not admit it, and the bytes stay where the
-    importer left them (quarantine for the unstamped row, in place for the future schema)."""
+    never lists it, the strict reader and create-only writer refuse the occupied identity,
+    and the bytes stay where the importer left them."""
     from ouroboros.task_results import load_task_result
     path = tmp_path / "data" / "task_results" / "child.json"
     path.parent.mkdir(parents=True)
@@ -348,7 +347,11 @@ def test_a_refused_legacy_result_file_never_reaches_the_lineage(tmp_path, schema
     for _ in range(3):
         follower.refresh_view()
         assert "child" not in follower.task_filter_ids
-    assert load_task_result(root, "child", strict=True) is None
+    assert load_task_result(root, "child") is None
+    with pytest.raises(ValueError, match="authority is unreadable or invalid"):
+        load_task_result(root, "child", strict=True)
+    with pytest.raises(ValueError, match="authority is unreadable or invalid"):
+        write_task_result(root, "child", "running", create_only=True)
     kept = path if path.exists() else next((root / "task_results" / "quarantine").glob("child*.json"))
     assert json.loads(kept.read_text(encoding="utf-8")) == raw
     write_task_result(root, "child", "running", parent_task_id="root", delegation_role="subagent")
