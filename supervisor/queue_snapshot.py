@@ -200,7 +200,14 @@ def persist_queue_snapshot(reason: str = "") -> bool:
         try:
             if changed:
                 # A partial publish must not certify the old no-fence document.
-                (state / "queue.alive").unlink(missing_ok=True)
+                for attempt in range(3):
+                    try:
+                        (state / "queue.alive").unlink(missing_ok=True)
+                        break
+                    except PermissionError:
+                        if attempt == 2:
+                            raise
+                        time.sleep(0.01)  # Windows readers briefly deny delete sharing.
                 for name, document in documents.items():
                     published = {**document, "generation": generation, "ts": utc_now_iso(), "reason": reason}
                     if _queue().atomic_write_text(state / name, json.dumps(published, ensure_ascii=False, separators=(",", ":"))) is False:

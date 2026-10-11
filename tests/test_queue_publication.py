@@ -3,6 +3,7 @@
 import copy
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -100,6 +101,52 @@ def test_failed_publish_never_refreshes_liveness_and_retries(published, monkeypa
     assert all(_read(root, name)["generation"] == generation for name in
                ("queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"))
     assert task_status.task_has_live_queue_ownership(root, "missing") is False
+
+
+@pytest.mark.parametrize("busy_attempts", [0, 1, 2, 3])
+def test_stamp_revocation_retries_before_writing_documents(published, monkeypatch, busy_attempts):
+    root, _now = published
+    assert queue.persist_queue_snapshot()
+    scope = usage.UsageScope(task_id="child", root_task_id="root")
+    usage._check_dispatch_fences(scope, root)
+    old = copy.deepcopy(queue.QUEUE_PUBLICATION)
+    stamp = root / "state/queue.alive"
+    before = {name: (root / "state" / name).read_bytes() for name in
+              ("queue_snapshot.json", "queue_dispatch.json", "direct_roots.json", "queue.alive")}
+    queue.BUDGET_ROOT_FENCES["root"] = {"root_task_id": "root", "fence_id": "fence", "status": "active"}
+    attempts, pauses, writes = [], [], []
+    unlink, writer = Path.unlink, queue.atomic_write_text
+
+    def busy(path, *args, **kwargs):
+        if path == stamp:
+            attempts.append(path)
+            if len(attempts) <= busy_attempts:
+                raise PermissionError("fixture sharing violation")
+        return unlink(path, *args, **kwargs)
+
+    def record(path, content):
+        assert not stamp.exists(), "documents must wait until the old certificate is revoked"
+        writes.append(path.name)
+        return writer(path, content)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", busy)
+        patch.setattr(queue, "atomic_write_text", record)
+        patch.setattr(queue_snapshot, "time", SimpleNamespace(sleep=pauses.append))
+        assert queue.persist_queue_snapshot() is (busy_attempts < 3)
+    assert len(attempts) == min(busy_attempts + 1, 3)
+    assert len(pauses) == min(busy_attempts, 2)
+    assert all(0 < pause <= 0.05 for pause in pauses)
+    if busy_attempts == 3:
+        assert not writes and queue.QUEUE_PUBLICATION == old
+        assert before == {name: (root / "state" / name).read_bytes() for name in before}
+        usage._check_dispatch_fences(scope, root)  # disclosed residual: old fences remain in force
+        assert queue.persist_queue_snapshot()
+    else:
+        assert writes == list(before)
+    assert _read(root, "queue.alive")["generation"] != old[2]
+    with pytest.raises(usage.BudgetExceeded):
+        usage._check_dispatch_fences(scope, root)
 
 
 @pytest.mark.parametrize("blocked", [{}, {"_budget_pause": {}}, {"_budget_pause_consumed": True},
