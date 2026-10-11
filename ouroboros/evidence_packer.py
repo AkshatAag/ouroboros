@@ -20,20 +20,19 @@ log = logging.getLogger(__name__)
 
 
 
-def task_stamps(root: pathlib.Path, task_id: str, *, obligation_rows: Optional[dict] = None, txn=None) -> str:
+def task_stamps(root: pathlib.Path, task_id: str, *, obligation_rows: Optional[dict] = None,
+                external: Optional[dict] = None, txn=None) -> str:
     """Evidence and settlement-source revisions, including owner-held duties and outbox sends."""
     from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.task_store import signature
-    from ouroboros.usage_store import STORE_REL
-    from ouroboros.usage_ledger import LEDGER_REL
 
     if obligation_rows is None:
         obligation_rows = packs.settlement_obligations(root, txn=txn)
+    external = packs.settlement_external(root) if external is None else external
     stamps = [("task", signature(root, task_id, txn=txn)), ("obligations", obligation_rows.get(task_id, {}))]
+    stamps.extend((name, None if tasks is None else task_id in tasks) for name, tasks in external.items())
     paths = [root / "observability" / "calls" / task_id,
-                 task_artifact_dir_path(root, task_id, create=False).joinpath(*packs.CHECKPOINTS_REL.parts),
-                 root / "state/terminal_deliveries.json",
-                 root / STORE_REL, root / (str(STORE_REL) + "-wal"), root / LEDGER_REL]
+             task_artifact_dir_path(root, task_id, create=False).joinpath(*packs.CHECKPOINTS_REL.parts)]
     for path in paths:
         try:
             stat = path.stat()
@@ -71,15 +70,18 @@ def record_swept(root: pathlib.Path, task_id: str, stamps: str) -> None:
             conn.execute("INSERT OR REPLACE INTO swept VALUES (?,?)", (task_id, stamps))
 
 
-def changed_tasks(root: pathlib.Path, *, obligation_rows: Optional[dict] = None) -> List[str]:
+def changed_tasks(root: pathlib.Path, *, obligation_rows: Optional[dict] = None,
+                  external: Optional[dict] = None) -> List[str]:
     """Tasks with loose evidence whose directories or result changed since a sweep recorded them."""
     root = pathlib.Path(root)
     ids = _loose_task_ids(root)
     if ids and obligation_rows is None:
         obligation_rows = packs.settlement_obligations(root)
+    if ids and external is None:
+        external = packs.settlement_external(root)
     swept = swept_stamps(root) if ids else {}
     return sorted(task for task in ids if swept is None or swept.get(task) !=
-                  task_stamps(root, task, obligation_rows=obligation_rows))
+                  task_stamps(root, task, obligation_rows=obligation_rows, external=external))
 
 
 def archive_pending(root: pathlib.Path) -> bool:
@@ -115,8 +117,9 @@ def live_manifest_shas(root: pathlib.Path, *, obligation_rows: Optional[dict] = 
     keep: set = set()
     if obligation_rows is None:
         obligation_rows = packs.settlement_obligations(root, txn=txn)
+    external = packs.settlement_external(root)
     for task in _loose_task_ids(root):
-        if not packs.task_settled(root, task, obligation_rows=obligation_rows, txn=txn):
+        if not packs.task_settled(root, task, obligation_rows=obligation_rows, external=external, txn=txn):
             keep.update(sha256 for _, sha256, _ in packs.manifest_blob_refs(root, task))
     return keep
 
@@ -129,12 +132,13 @@ def run_pass(root: pathlib.Path) -> Dict[str, Any]:
                               "unlinked": 0, "kept": 0, "busy": 0, "faults": 0, "archived": 0}
     obligation_cache: dict = {}
     duties = packs.settlement_obligations(root, cache=obligation_cache)
-    revisions = {task: task_stamps(root, task, obligation_rows=duties)
-                 for task in changed_tasks(root, obligation_rows=duties)}
-    facts = {task: packs.task_settlement_facts(root, task, obligation_rows=duties) for task in revisions}
+    external = packs.settlement_external(root)
+    revisions = {task: task_stamps(root, task, obligation_rows=duties, external=external)
+                 for task in changed_tasks(root, obligation_rows=duties, external=external)}
+    facts = {task: packs.task_settlement_facts(root, task, obligation_rows=duties, external=external) for task in revisions}
     settled = {task for task, fact in facts.items() if packs.facts_settled(fact)}
     for task, fact in facts.items():
-        if task not in settled and fact["money_open"] is False and "unknowns" not in fact["obligations"]:
+        if task not in settled and fact["money_open"] is not None and "unknowns" not in fact["obligations"]:
             record_swept(root, task, revisions[task])
     candidates = ordered_candidates(root, sorted(settled))
     report["candidates"] = len(candidates)

@@ -134,6 +134,15 @@ def _capture_emitted_answer(drive_root: Any, delivery_id: str, emitted: Dict[str
             "basis": record["basis"], "source_ref": ref}
 
 
+def _read_registry(drive_root: Any) -> Dict[str, Any]:
+    from ouroboros.utils import read_json_dict
+    path = pathlib.Path(drive_root) / "state" / "terminal_deliveries.json"
+    data = read_json_dict(path) if path.is_file() else {}
+    if data is None:
+        raise ValueError("registry file is malformed or is not an object")
+    return data
+
+
 def terminal_answer_receipts(drive_root: Any, task_id: str) -> Dict[str, Any]:
     """What the host can PROVE it emitted as one task's terminal answer.
 
@@ -145,12 +154,7 @@ def terminal_answer_receipts(drive_root: Any, task_id: str) -> Dict[str, Any]:
     fact: Dict[str, Any] = {"source": "terminal_delivery_registry", "state": "unknown", "delivered": [],
                             "unverified_delivery_ids": [], "owed_delivery_ids": []}
     try:
-        from ouroboros.utils import read_json_dict
-
-        path = pathlib.Path(drive_root) / "state" / "terminal_deliveries.json"
-        data = read_json_dict(path) if path.is_file() else {}
-        if data is None:
-            raise ValueError("registry file is malformed or is not an object")
+        data = _read_registry(drive_root)
         receipts, pending = _mapping_rows(data, "receipts", strict=True), _mapping_rows(data, "pending", strict=True)
         delivered = _delivered_rows(data, strict=True)
     except Exception:
@@ -356,24 +360,23 @@ def _log_unregistered_delivery(drive_root: Any, event: Dict[str, Any], did: str)
 
 
 def pending_deliveries(
-    drive_root: Any, *, disclose_corruption: bool = False,
+    drive_root: Any, *, disclose_corruption: bool = False, strict: bool = False,
 ) -> List[Dict[str, Any]]:
     """Read owed sends, excluding delivered ids, with disclosed corruption.
 
     An absent registry is empty. Unreadable/malformed data logs an error and
     returns []; malformed individual rows are skipped with their bytes intact.
-    ``disclose_corruption`` also emits the durable corruption event for replay."""
-    path = pathlib.Path(drive_root) / "state" / "terminal_deliveries.json"
-    if not path.is_file():
-        return []
+    ``disclose_corruption`` emits the corruption event; ``strict`` refuses an
+    unreadable registry (including receipts) for evidence settlement."""
     try:
-        from ouroboros.utils import read_json_dict
-
-        data = read_json_dict(path)
-        if data is None:
-            raise ValueError("registry file is malformed or is not an object")
+        data = _read_registry(drive_root)
         pending = _mapping_rows(data, "pending", strict=True)
+        if strict:
+            _mapping_rows(data, "receipts", strict=True)
+            _delivered_rows(data, strict=True)
     except Exception as exc:
+        if strict:
+            raise
         log.error(
             "terminal-delivery registry is unreadable/malformed (%s); the owed "
             "outbox reads as EMPTY until the file is repaired", exc,

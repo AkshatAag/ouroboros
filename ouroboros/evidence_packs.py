@@ -609,7 +609,7 @@ def settlement_obligations(root: Any, *, txn: Optional[store.Txn] = None, cache:
 
 
 def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None,
-                          txn: Optional[store.Txn] = None) -> Dict[str, Any]:
+                          external: Optional[dict] = None, txn: Optional[store.Txn] = None) -> Dict[str, Any]:
     """The facts the settle predicate reads, through the current store: terminal status,
     every obligation flag, open review operations / undischarged acceptance debt, and unresolved
     money attempts (``None`` = unknown, which never settles). No timer anywhere."""
@@ -617,7 +617,6 @@ def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[
     from ouroboros.review_projection import _actor_pending
     from ouroboros.task_store import read_document
     from ouroboros.task_status import SETTLED_STATUSES
-    from supervisor.terminal_delivery import pending_deliveries, terminal_answer_receipts
 
     root = pathlib.Path(root)
     row, owed = {}, set()
@@ -643,9 +642,11 @@ def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[
         panel = next((p for p in panels if p.get("panel_id") == receipt.get("panel_id")), {})
         late_open |= (receipt.get("custody") != "terminal_outbox"
                       or receipt.get("settled_at") != (panel.get("late_settlement") or {}).get("settled_at"))
-    if terminal_answer_receipts(root, task_id).get("registry") == "unreadable":
+    external = settlement_external(root) if external is None else external
+    if external["delivery"] is None:
         owed.add("unknowns")
-    late_open |= any(str(event.get("task_id") or "") == str(task_id) for event in pending_deliveries(root))
+    else:
+        late_open |= str(task_id) in external["delivery"]
     return {
         "status": str(row.get("status") or ""),
         "terminal": bool(row) and str(row.get("status") or "") in SETTLED_STATUSES,
@@ -653,23 +654,31 @@ def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[
         "open_operations": any(isinstance(e, dict) and e.get("state") in _OPEN_STATES for e in operations.values()),
         "open_acceptance": open_debt,
         "open_late_receipts": late_open,
-        "money_open": _money_open(root, str(task_id)),
+        "money_open": None if external["money"] is None else str(task_id) in external["money"],
     }
 
 
-def _money_open(root: pathlib.Path, task_id: str) -> Optional[bool]:
+def settlement_external(root: Any) -> dict:
+    """One money query and one outbox read for every task in a pass; None stays unknown."""
     from ouroboros import usage_store
     from ouroboros.usage_ledger import LEDGER_REL
+    from supervisor.terminal_delivery import pending_deliveries
 
-    if not (root / usage_store.STORE_REL).exists() and not (root / LEDGER_REL).exists():
-        return False  # no money record of any kind on this root
+    root = pathlib.Path(root)
+    money = set()
+    if (root / usage_store.STORE_REL).exists() or (root / LEDGER_REL).exists():
+        try:
+            with usage_store.hold(root, write=False, migrate=False) as txn:
+                money = {row[0] for row in txn.conn.execute(
+                    "SELECT DISTINCT task_id FROM attempts WHERE kind='attempt' "
+                    "AND state IN ('reserved','dispatched','unresolved')")}
+        except Exception:
+            money = None
     try:
-        with usage_store.hold(root, write=False, migrate=False) as txn:
-            return txn.conn.execute(
-                "SELECT 1 FROM attempts WHERE task_id=? AND kind='attempt' "
-                "AND state IN ('reserved','dispatched','unresolved') LIMIT 1", (task_id,)).fetchone() is not None
+        delivery = {str(event.get("task_id") or "") for event in pending_deliveries(root, strict=True)}
     except Exception:
-        return None
+        delivery = None
+    return {"money": money, "delivery": delivery}
 
 
 def facts_settled(facts: Dict[str, Any]) -> bool:
@@ -678,8 +687,8 @@ def facts_settled(facts: Dict[str, Any]) -> bool:
 
 
 def task_settled(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None,
-                 txn: Optional[store.Txn] = None) -> bool:
-    return facts_settled(task_settlement_facts(root, task_id, obligation_rows=obligation_rows, txn=txn))
+                 external: Optional[dict] = None, txn: Optional[store.Txn] = None) -> bool:
+    return facts_settled(task_settlement_facts(root, task_id, obligation_rows=obligation_rows, external=external, txn=txn))
 
 
 
