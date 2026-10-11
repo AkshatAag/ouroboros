@@ -408,6 +408,7 @@ from ouroboros.delegate_registration_policy import (
     STARTED_OPTION_FIELDS as _STARTED_OPTION_FIELDS,
     STARTED_FIRST_WINS_FACTS as _STARTED_FIRST_WINS_FACTS,
     STARTED_PROGRESS_FLAGS as _STARTED_PROGRESS_FLAGS,
+    STARTED_SETTLEMENT_FACTS as _STARTED_SETTLEMENT_FACTS,
     STARTED_STR_FIELDS as _STARTED_STR_FIELDS,
     review_owned_source,
 )
@@ -425,14 +426,17 @@ def _merge_started_into(entry: RunCustody, previous: RunCustody) -> None:
     """Project a duplicate STARTED fact set onto an existing run — the ONE
     merge, used by both the durable replay and the in-process memo (gate fix 8).
 
-    Progress always carries forward; binding facts are truthy-first-wins per
-    field; the SHAPE GROUP (access/mode/isolation/delegated) plus the resource
+    Progress, the settlement's closing facts (cost, disclosure, model/profile,
+    terminal state) and an unresolved containment fault always carry forward;
+    binding facts are truthy-first-wins per field; the SHAPE GROUP (access/mode/isolation/delegated) plus the resource
     reference is first-wins as a UNIT, keyed on the first row that CARRIED a
     shape — so a recorded ``delegated=False`` survives a later ``True`` and an
     empty ``resource_ref`` is never "filled" by a later row.
     """
-    for attr in _STARTED_PROGRESS_FLAGS:
+    for attr in (*_STARTED_PROGRESS_FLAGS, *_STARTED_SETTLEMENT_FACTS):
         setattr(entry, attr, getattr(previous, attr))
+    if previous.containment_fault:
+        entry.containment_fault = dict(previous.containment_fault)
     entry.output_reader_receipts = previous.output_reader_receipts
     entry.patch_apply_key = previous.patch_apply_key
     entry.project_owned = previous.project_owned and entry.project_owned

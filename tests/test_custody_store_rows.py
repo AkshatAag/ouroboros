@@ -116,6 +116,32 @@ def test_the_outbox_delete_follows_a_locked_fsynced_append_on_a_restored_line_bo
     assert [row["type"] for row in c.custody_rows(tmp_path)] == [c.STARTED, c.SETTLED]  # one row per event id
 
 
+def test_a_repeated_started_keeps_the_settlement_and_the_containment_fault(tmp_path):
+    """M6: an idempotent re-start after SETTLED keeps the run's cost, spend disclosure,
+    engine model/profile and terminal state; one after CONTAINMENT_FAULT keeps the fault —
+    on the live reducer and on the importer's fold alike."""
+    settled = {"run_id": "run", "task_id": "task", "state": "failed", "outcome_reason": "timeout", "model": "engine-m",
+               "access_profile": "profile-a", "cost_usd": 0.75, "spend_disclosed": True, "spend_estimated": True}
+    assert c.emit(tmp_path, c.STARTED, {"run_id": "run", "task_id": "task", "model": "requested-m"})
+    assert c.emit(tmp_path, c.SETTLED, settled)
+    assert c.emit(tmp_path, c.STARTED, {"run_id": "run", "task_id": "task", "model": "requested-m"})
+    assert c.emit(tmp_path, c.STARTED, {"run_id": "faulted", "task_id": "task"})
+    assert c.emit(tmp_path, c.CONTAINMENT_FAULT, {"run_id": "faulted", "task_id": "task", "reason": "cancel_unverified"})
+    assert c.emit(tmp_path, c.STARTED, {"run_id": "faulted", "task_id": "task"})
+
+    def facts(run):
+        return (run.settled, run.terminal_state, run.terminal_reason, run.engine_model, run.access_profile,
+                run.cost_usd, run.spend_disclosed, run.spend_estimated, run.containment_fault.get("reason"))
+
+    expected = {"run": (True, "failed", "timeout", "engine-m", "profile-a", 0.75, True, True, None),
+                "faulted": (False, "", "", "", "", None, False, False, "cancel_unverified")}
+    live = c.replay(tmp_path)
+    assert {rid: facts(run) for rid, run in live.items()} == expected
+    folded = c.replay(tmp_path, rows=list(c.custody_rows(tmp_path)))
+    assert {rid: facts(run) for rid, run in folded.items()} == expected
+    assert sorted(run.run_id for run in c.open_runs(tmp_path)) == ["faulted"]  # the settled run stays closed
+
+
 def test_the_first_custody_append_fsyncs_the_logs_directory(tmp_path, monkeypatch):
     synced, logs = [], c.event_log_path(tmp_path).parent
     monkeypatch.setattr(store, "fsync_directory", lambda directory: synced.append(directory))
