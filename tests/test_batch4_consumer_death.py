@@ -72,7 +72,7 @@ def test_confirmed_death_retires_only_exact_consumer(tmp_path, monkeypatch, evid
     elif evidence == 'wrong_task':
         job['task']['id'] = 'other-task'
     elif evidence == 'write_failed':
-        monkeypatch.setattr(model_wait, 'patch_document', lambda *_a, **_k: (_ for _ in ()).throw(OSError('disk')))
+        monkeypatch.setattr(model_wait, 'put_handoffs', lambda *_a, **_k: (_ for _ in ()).throw(OSError('disk')))
     monkeypatch.setattr('ouroboros.headless.prepare_terminal_task_files',
                         lambda *_a, **_k: {'terminal_source_present': False})
     worker_health.recover_confirmed_dead_worker(job)

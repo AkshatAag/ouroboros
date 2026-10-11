@@ -451,10 +451,10 @@ def test_escaping_tool_exception_keeps_unknown_effects_after_owner_terminal(tmp_
         with tool_handoff(source, "external_write"):
             with operation_start(source):
                 raise TimeoutError("request sent, response unknown")
-    claim = load_task_result(tmp_path, "root")["launch_handoffs"]
+    claim = load_task_result(tmp_path, "root").get("launch_handoffs", {})
     assert claim
     write_task_result(tmp_path, "root", "cancelled")
-    assert load_task_result(tmp_path, "root")["launch_handoffs"] == claim
+    assert load_task_result(tmp_path, "root").get("launch_handoffs", {}) == claim
     assert any(b["kind"] == "tool_handoff" for b in conflicting_writers(queue, "root"))
 
 

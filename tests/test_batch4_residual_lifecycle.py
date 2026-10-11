@@ -74,7 +74,7 @@ def test_unwound_command_error_keeps_error_without_ghost_custody(tmp_path, monke
     result = registry.execute_result('run_command', {'cmd': ['ambiguous']})
     assert result.status != 'ok'
     assert result.meta.get('operation_outcome') != 'completed_no_effect'
-    assert not load_task_result(tmp_path, 'root')['launch_handoffs']
+    assert not load_task_result(tmp_path, 'root').get('launch_handoffs', {})
     assert not any(b['kind'] == 'tool_handoff' for b in conflicting_writers(q, 'root'))
 
 

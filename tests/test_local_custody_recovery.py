@@ -158,8 +158,8 @@ def test_a_closed_receiver_whose_retirement_write_failed_keeps_a_witness_the_nex
                 ua.execute_physical_attempt(ua.AttemptRequest(model="m", provider="t", reservation_usd=.2),
                                             lambda: (_ for _ in ()).throw(RuntimeError("response unknown")))
     money = ua.read_usage_records(tmp_path, final_only=True)
-    real_update = model_wait.patch_document
-    monkeypatch.setattr(model_wait, "patch_document",
+    real_update = model_wait.put_handoffs
+    monkeypatch.setattr(model_wait, "put_handoffs",
                         lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk")))
     owner.close()  # a closed receiver on a live host; its retirement write fails
     witness = next(iter(_witnesses(tmp_path).values()))
@@ -169,7 +169,7 @@ def test_a_closed_receiver_whose_retirement_write_failed_keeps_a_witness_the_nex
     assert any(b["kind"] == "model_handoff" for b in conflicting_writers(queue, "root"))
     assert _witnesses(tmp_path), "a passive census discharges nothing"
 
-    monkeypatch.setattr(model_wait, "patch_document", real_update)
+    monkeypatch.setattr(model_wait, "put_handoffs", real_update)
     assert not any(b["kind"] == "model_handoff" for b in action_writers(queue, "root"))
     assert _witnesses(tmp_path) == {}, "discharged only by the writer that landed"
     assert owner.answer_consumer_id in load_task_result(tmp_path, "root")["retired_model_consumers"]
@@ -281,5 +281,5 @@ def test_a_malformed_neighbor_claim_does_not_erase_or_prevent_exact_retirement(t
     blockers = action_writers(queue, "root")
     row = load_task_result(tmp_path, "root")
     assert "op-root" in row.get("retired_tool_invocations", {})
-    assert row["launch_handoffs"] == {"malformed": "unreadable"}
+    assert row.get("launch_handoffs", {}) == {"malformed": "unreadable"}
     assert "tree_census_unreadable" in [b["kind"] for b in blockers], "the malformed independent claim stays held"

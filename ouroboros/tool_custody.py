@@ -23,21 +23,17 @@ def invocation_binding() -> dict:
 
 def _update_active_claim(update) -> None:
     from ouroboros.owner_pause import _TOOL_OPERATION
-    from ouroboros.task_results import stamp_task_result_schema
-    from ouroboros.task_store import patch_document
+    from ouroboros.task_store import patch_handoff
 
     active = _TOOL_OPERATION.get()
     if not active or not active[2].get("claim_task"):
         return
     outcome = active[2]
-    def change(current):
-        claims = dict(current.get("launch_handoffs") or {})
-        claim = claims.get(outcome["operation_id"])
-        if claim is None:
-            return None  # A standalone/unbound tool has no durable task claim.
-        claims[outcome["operation_id"]] = update(dict(claim))
-        return stamp_task_result_schema({**current, "launch_handoffs": claims})
-    patch_document(outcome["claim_root"], outcome["claim_task"], change, strict_existing_dict=True)
+    try:  # one `launch_handoffs` row; a standalone/unbound tool has no durable task claim (no row: no write)
+        patch_handoff(outcome["claim_root"], outcome["claim_task"], "launch_handoffs", outcome["operation_id"],
+                      lambda claim: None if claim is None else update(dict(claim)))
+    except LookupError:
+        return
 
 
 def retain_unconfirmed_host_operation(reason: str) -> None:

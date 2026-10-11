@@ -588,8 +588,7 @@ def tool_handoff(source: Any, name: str):
     Pending host receipts and independently owned executors remain custody;
     neither a result code nor metadata can certify their completion.
     """
-    from ouroboros.task_results import stamp_task_result_schema
-    from ouroboros.task_store import exists, patch_document
+    from ouroboros.task_store import DELETE_ROW, exists, patch_handoff
     from ouroboros.utils import utc_now_iso
 
     outcome: Dict[str, Any] = {"not_started": True}
@@ -602,14 +601,9 @@ def tool_handoff(source: Any, name: str):
     outcome["operation_id"] = op_id
     outcome["claim_root"], outcome["claim_task"] = root_drive, holder
     token = _TOOL_OPERATION.set((source, name, outcome))
-    def claim(current):
-        if not current.get("status") or current.get("task_id") != holder:
-            raise OwnerPauseRefused("owner_pause_authority_unreadable")
-        outstanding = dict(current.get("launch_handoffs") or {})
-        outstanding[op_id] = {"tool": name, "task_id": task_id, "root_task_id": root_id,
-                              "state": "claimed", "claimed_at": utc_now_iso(),
-                              **({"local_owner": local_owner} if local_owner else {})}
-        return stamp_task_result_schema({**current, "launch_handoffs": outstanding})
+    def claim(_current):  # the claim is one `launch_handoffs` row of the holder, never a body write
+        return {"tool": name, "task_id": task_id, "root_task_id": root_id, "state": "claimed",
+                "claimed_at": utc_now_iso(), **({"local_owner": local_owner} if local_owner else {})}
     from ouroboros.model_wait import current_model_wait
     owner = current_model_wait()
     local_owner = ({"pid": os.getpid(), "process_birth": owner.answer_owner_birth,
@@ -636,26 +630,22 @@ def tool_handoff(source: Any, name: str):
                 holder = root_id
                 outcome["claim_task"] = holder
             if exists(root_drive, holder):
-                patch_document(root_drive, holder, claim, strict_existing_dict=True)
+                try:
+                    patch_handoff(root_drive, holder, "launch_handoffs", op_id, claim)
+                except LookupError as exc:  # a row without a lifecycle status is no authority
+                    raise OwnerPauseRefused("owner_pause_authority_unreadable") from exc
                 claimed = True
             elif getattr(source, "task_lifecycle_bound", None) is not False:
                 raise OwnerPauseRefused("owner_pause_authority_unreadable")
         yield outcome
     finally:
         _TOOL_OPERATION.reset(token)
-        def settle(current):
-            if not current.get("status") or current.get("task_id") != holder:
-                raise OwnerPauseRefused("owner_pause_authority_unreadable")
-            outstanding = dict(current.get("launch_handoffs") or {})
-            claim = outstanding.get(op_id)
-            if claim is not None:
-                claim = {**claim, "state": "returned", "returned_at": utc_now_iso()}
-                from ouroboros.tool_custody import claim_still_owns_effect
-                if claim_still_owns_effect(root_drive, claim):
-                    outstanding[op_id] = claim
-                else:
-                    outstanding.pop(op_id, None)
-            return stamp_task_result_schema({**current, "launch_handoffs": outstanding})
+        def settle(claim):
+            if claim is None:
+                return None
+            claim = {**claim, "state": "returned", "returned_at": utc_now_iso()}
+            from ouroboros.tool_custody import claim_still_owns_effect
+            return claim if claim_still_owns_effect(root_drive, claim) else DELETE_ROW
         # Close local admission even if durable cleanup cannot acquire its lock.
         # Failure retains custody; it must not replace an executed result with
         # a false NOT STARTED answer. Settlement still serializes with starts.
@@ -663,7 +653,7 @@ def tool_handoff(source: Any, name: str):
         try:
             with launch_lock(root_drive, root_id):
                 if claimed and (outcome.get("settled") is True or outcome.get("not_started") is True):
-                    patch_document(root_drive, holder, settle, strict_existing_dict=True)
+                    patch_handoff(root_drive, holder, "launch_handoffs", op_id, settle)
         except Exception:
             log.warning("Tool %s custody could not settle (%s)", name, op_id, exc_info=True)
 

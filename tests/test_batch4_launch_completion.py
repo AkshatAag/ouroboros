@@ -134,7 +134,7 @@ def test_exact_consumer_retirement_releases_writer_not_cash(tmp_path, monkeypatc
             write_task_result(tmp_path, 'root', 'failed', reason_code='provider_unavailable')
             assert any(b['kind'] == 'model_handoff' for b in conflicting_writers(q, 'root'))
             if retirement == 'write_failed':
-                monkeypatch.setattr(model_wait, 'patch_document', lambda *_a, **_k: (_ for _ in ()).throw(OSError('disk')))
+                monkeypatch.setattr(model_wait, 'put_handoffs', lambda *_a, **_k: (_ for _ in ()).throw(OSError('disk')))
         row = load_task_result(tmp_path, 'root')
         retired = row.get('retired_model_consumers', {})
         if retirement in {'other_consumer', 'other_attempt', 'missing'}:

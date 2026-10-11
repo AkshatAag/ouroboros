@@ -168,11 +168,11 @@ def test_tool_body_is_owned_before_pause_and_until_its_return(tmp_path):
         assert entered.wait(4)
         try:
             install_fence(tmp_path, "root", request_id="pause")
-            assert load_task_result(tmp_path, "root")["launch_handoffs"]
+            assert load_task_result(tmp_path, "root").get("launch_handoffs", {})
         finally:
             release.set()
         assert future.result(timeout=4).text == "done"
-    assert not load_task_result(tmp_path, "root")["launch_handoffs"]
+    assert not load_task_result(tmp_path, "root").get("launch_handoffs", {})
     assert registry.execute_result("knowledge_read", {"topic": "x"}).code == "OWNER_PAUSE_NOT_STARTED"
 
 

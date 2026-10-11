@@ -47,7 +47,11 @@ TYPED_COLUMNS = ("status", "parent_task_id", "root_task_id", "delegation_role", 
 FLAG_COLUMNS = {"synthesis": "owes_synthesis", "terminal_projection": "owes_terminal_projection",
                 "promotions": "has_pending_promotion", "pause_notices": "has_pause_notices",
                 "delegated_runs": "delegated_runs_unreconciled", "pending_drives": "pending_drive"}
-ROW_BACKED_FIELDS: Tuple[str, ...] = ()  # document fields that live only in rows (the cutover names them)
+# The per-operation projections of a document that live in ``task_handoffs`` rows (``kind`` = the
+# field): a claim, a wait or a retirement writes its one row, never the body. The body keeps a
+# present key as ``{}`` (its place and presence); ``load`` puts the rows back there, so a document
+# round-trips byte for byte. A key the body never had appears while it has rows.
+ROW_BACKED_FIELDS: Tuple[str, ...] = ("launch_handoffs", "model_waits", "retired_model_consumers")
 _SCHEMA = """
 CREATE TABLE tasks (
   task_id TEXT PRIMARY KEY, status TEXT, parent_task_id TEXT, root_task_id TEXT, delegation_role TEXT,
@@ -365,8 +369,9 @@ def document_text(document: Dict[str, Any]) -> str:
 
 
 def encode_document(document: Dict[str, Any]) -> str:
-    """The body text stored in ``task_bodies``: the document minus its row-backed fields."""
-    return document_text({key: value for key, value in document.items() if key not in ROW_BACKED_FIELDS})
+    """The body text stored in ``task_bodies``: the document with each present row-backed field
+    emptied (the rows hold its content)."""
+    return document_text({key: ({} if key in ROW_BACKED_FIELDS else value) for key, value in document.items()})
 
 
 def typed_columns(document: Dict[str, Any], *, pending_drive: Optional[bool] = None) -> Dict[str, Any]:
@@ -395,6 +400,14 @@ def typed_columns(document: Dict[str, Any], *, pending_drive: Optional[bool] = N
     return columns
 
 
+def project_handoffs(document: Dict[str, Any], rows: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """The body's emptied keys take their rows back; a key the body lacks appears only with rows."""
+    for kind, held in rows.items():
+        if held or kind in document:
+            document[kind] = held
+    return document
+
+
 class Txn:
     """One store transaction: documents, obligation rows, meta; riders of the cutover
     (handoffs, custody, outbox) share the same connection."""
@@ -421,20 +434,14 @@ class Txn:
         return None if record is None else record["body"]
 
     def load(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """The document: its body plus the row-backed fields read from ``tasks``."""
-        record = self.conn.execute(
-            "SELECT b.body, t.* FROM task_bodies AS b JOIN tasks AS t ON t.task_id = b.task_id WHERE b.task_id=?",
-            (task_id,)).fetchone()
-        if record is None:
-            return None
-        document = json.loads(record["body"])
-        for field in ROW_BACKED_FIELDS:
-            document[field] = record[field]
-        return document
+        """The document: its body with the row-backed fields projected from ``task_handoffs``."""
+        body = self.body_text(task_id)
+        return None if body is None else project_handoffs(json.loads(body), self.handoffs(task_id))
 
     def store_task(self, document: Dict[str, Any], *, pending_drive: Optional[bool] = None) -> None:
-        """Upsert the body and the typed columns of one document; ``write_seq`` counts the writes
-        (the row signature the memos that used to key on a file's stat compare)."""
+        """Upsert the body and the typed columns of one document and sync its handoff rows;
+        ``write_seq`` counts the writes (the row signature the memos that used to key on a file's
+        stat compare)."""
         task_id = str(document["task_id"])
         columns = typed_columns(document, pending_drive=pending_drive)
         columns["write_seq"] = (self.row(task_id, "write_seq") or 0) + 1
@@ -443,6 +450,16 @@ class Txn:
         names = ("task_id", *columns)
         self.conn.execute(f"INSERT OR REPLACE INTO tasks ({','.join(names)}) VALUES ({','.join('?' * len(names))})",
                           (task_id, *columns.values()))
+        self.sync_handoffs(task_id, document)
+
+    def touch(self, task_id: str) -> None:
+        """A row-only write still moves the task's signature (the memos re-read)."""
+        self.conn.execute("UPDATE tasks SET write_seq = write_seq + 1 WHERE task_id=?", (task_id,))
+
+    def require_published(self) -> None:
+        phase = self.phase()
+        if phase != PUBLISHED:
+            raise StoreRetired(f"current store phase is {phase}: the files are the authority")
 
     def row(self, task_id: str, *columns: str) -> Any:
         """One task's typed columns (one value for one column, a tuple for several; ``None`` when absent)."""
@@ -452,8 +469,8 @@ class Txn:
         return record[0] if len(columns) == 1 else tuple(record)
 
     def delete_task(self, task_id: str) -> None:
-        self.conn.execute("DELETE FROM task_bodies WHERE task_id=?", (task_id,))
-        self.conn.execute("DELETE FROM tasks WHERE task_id=?", (task_id,))
+        for table in ("task_bodies", "tasks", "task_handoffs"):
+            self.conn.execute(f"DELETE FROM {table} WHERE task_id=?", (task_id,))
 
     def set_names(self) -> List[str]:
         return [record["set_name"] for record in
@@ -492,6 +509,57 @@ class Txn:
         column = FLAG_COLUMNS[set_name]
         return [record["task_id"] for record in
                 self.conn.execute(f"SELECT task_id FROM tasks WHERE {column}=1 ORDER BY task_id")]
+
+    # -- handoff rows: one row per operation of a task's ``ROW_BACKED_FIELDS`` projection, keyed
+    #    (task_id, op_id); ``kind`` names the field. Insertion order is the dict order the document had.
+    def handoffs_of(self, task_ids: List[str]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """``{task_id: {kind: {op_id: facts}}}`` for the given tasks (one query), every kind present."""
+        rows = {task_id: {kind: {} for kind in ROW_BACKED_FIELDS} for task_id in task_ids}
+        for start in range(0, len(task_ids), 500):
+            chunk = task_ids[start:start + 500]
+            for record in self.conn.execute(
+                    f"SELECT task_id, kind, op_id, facts FROM task_handoffs WHERE task_id IN "
+                    f"({','.join('?' * len(chunk))}) ORDER BY rowid", chunk):
+                rows[record["task_id"]].setdefault(record["kind"], {})[record["op_id"]] = json.loads(record["facts"])
+        return rows
+
+    def handoffs(self, task_id: str) -> Dict[str, Dict[str, Any]]:
+        return self.handoffs_of([task_id]).get(task_id, {})
+
+    def handoff(self, task_id: str, op_id: str) -> Optional[Any]:
+        record = self.conn.execute("SELECT facts FROM task_handoffs WHERE task_id=? AND op_id=?",
+                                   (task_id, op_id)).fetchone()
+        return None if record is None else json.loads(record["facts"])
+
+    def put_handoff(self, task_id: str, kind: str, op_id: str, facts: Any) -> None:
+        """Upsert one operation row (an existing row keeps its place); the typed columns are read
+        from a dict's ``state`` / ``claimed_at`` / ``returned_at`` / ``local_owner`` when present."""
+        typed = facts if isinstance(facts, dict) else {}
+        owner = typed.get("local_owner")
+        self.conn.execute(
+            "INSERT INTO task_handoffs (task_id, op_id, kind, state, claimed_at, returned_at, owner, facts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id, op_id) DO UPDATE SET kind=excluded.kind, "
+            "state=excluded.state, claimed_at=excluded.claimed_at, returned_at=excluded.returned_at, "
+            "owner=excluded.owner, facts=excluded.facts",
+            (task_id, op_id, kind, *(None if typed.get(key) is None else str(typed[key])
+                                     for key in ("state", "claimed_at", "returned_at")),
+             machine_json(owner) if isinstance(owner, dict) else None, machine_json(facts)))
+
+    def delete_handoff(self, task_id: str, op_id: str) -> None:
+        self.conn.execute("DELETE FROM task_handoffs WHERE task_id=? AND op_id=?", (task_id, op_id))
+
+    def sync_handoffs(self, task_id: str, document: Dict[str, Any]) -> None:
+        """The rows follow a whole-document write (the importer, a mutator over the projected
+        fields): rows the document no longer names go, changed or new ones are written."""
+        held = self.handoffs(task_id)
+        for kind in ROW_BACKED_FIELDS:
+            wanted = document.get(kind) if isinstance(document.get(kind), dict) else {}
+            current = held.get(kind, {})
+            for op_id in current.keys() - wanted.keys():
+                self.delete_handoff(task_id, str(op_id))
+            for op_id, facts in wanted.items():
+                if str(op_id) not in current or current[str(op_id)] != facts:
+                    self.put_handoff(task_id, kind, str(op_id), facts)
 
     # -- custody rows: one row per delegated run, the reducer's output, indexed by task / project /
     #    invocation; ``state`` is the custody hold (``held`` while the run owes work, ``closed`` after).
@@ -541,9 +609,7 @@ def update_task(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Opt
     cutover's riders on the same connection; COMMIT. ``pending_drive`` is a value, or a callable
     ``(txn, current, updated) -> Optional[bool]`` deciding it from the written document."""
     with open_store(root, write=True) as txn:
-        phase = txn.phase()
-        if phase != PUBLISHED:
-            raise StoreRetired(f"current store phase is {phase}: the files are the authority")
+        txn.require_published()
         current = txn.load(task_id) or {}
         updated = mutator(json.loads(json.dumps(current)))
         if updated is None:

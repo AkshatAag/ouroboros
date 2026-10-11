@@ -7,9 +7,11 @@ row the same transaction writes. Readers ask the row (``task_facts``,
 ``signature``, ``exists``) and read a body only for the documents they need.
 ``patch_document`` is the locked read-modify-write every result patch used to do
 on a file: the mutator sees CURRENT, returns the new document or ``None`` for no
-write, and ``after_write`` runs inside the transaction. Nothing here touches
-``task_results/*.json``: the importer reads those files once, the exporter writes
-them back for an older body.
+write, and ``after_write`` runs inside the transaction. ``patch_handoff`` /
+``put_handoffs`` write one operation row of the ``store.ROW_BACKED_FIELDS``
+projections (a tool claim, a model wait, a retired consumer) without a body write;
+``load`` projects the rows back. Nothing here touches ``task_results/*.json``: the
+importer reads those files once, the exporter writes them back for an older body.
 """
 
 from __future__ import annotations
@@ -83,13 +85,47 @@ def _documents(txn: Txn, where: str = "", params: Iterable[Any] = (), order: str
     rows = txn.conn.execute(
         f"SELECT b.body, t.* FROM tasks AS t JOIN task_bodies AS b ON b.task_id = t.task_id {clause} {order}",
         tuple(params)).fetchall()
-    documents = []
-    for record in rows:
-        document = json.loads(record["body"])
-        for field in store.ROW_BACKED_FIELDS:
-            document[field] = record[field]
-        documents.append(document)
-    return documents
+    handoffs = txn.handoffs_of([record["task_id"] for record in rows])
+    return [store.project_handoffs(json.loads(record["body"]), handoffs[record["task_id"]]) for record in rows]
+
+
+DELETE_ROW = object()  # a handoff mutator's answer: drop the row
+
+
+def patch_handoff(root: Any, task_id: str, kind: str, op_id: str,
+                  mutator: Callable[[Optional[Dict[str, Any]]], Any]) -> Optional[Dict[str, Any]]:
+    """One operation row of a task's projection ``kind`` (a ``store.ROW_BACKED_FIELDS`` name) in
+    its own write transaction, no body write: the mutator sees the current row (``None`` when
+    absent) and returns the new row, ``None`` to leave the store untouched, or ``DELETE_ROW``.
+    ``LookupError`` when the task has no lifecycle row: a projection needs its owner. Returns the
+    row that is current when the transaction ends."""
+    task_id, op_id = str(task_id), str(op_id)
+    with open_store(root, write=True) as txn:
+        txn.require_published()
+        if not txn.row(task_id, "status"):
+            raise LookupError(f"task {task_id} has no lifecycle row")
+        current = txn.handoff(task_id, op_id)
+        updated = mutator(json.loads(json.dumps(current)) if current is not None else None)
+        if updated is None:
+            return current
+        if updated is DELETE_ROW:
+            txn.delete_handoff(task_id, op_id)
+        else:
+            txn.put_handoff(task_id, kind, op_id, updated)
+        txn.touch(task_id)
+        return None if updated is DELETE_ROW else updated
+
+
+def put_handoffs(root: Any, task_id: str, kind: str, rows: Dict[str, Any]) -> None:
+    """Upsert several operation rows of one projection in one transaction (``LookupError`` as above)."""
+    task_id = str(task_id)
+    with open_store(root, write=True) as txn:
+        txn.require_published()
+        if not txn.row(task_id, "status"):
+            raise LookupError(f"task {task_id} has no lifecycle row")
+        for op_id, facts in rows.items():
+            txn.put_handoff(task_id, kind, str(op_id), facts)
+        txn.touch(task_id)
 
 
 def list_documents(root: Any, *, statuses: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:

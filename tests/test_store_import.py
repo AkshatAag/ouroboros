@@ -274,19 +274,26 @@ def test_the_export_writes_derived_sets_in_full_from_the_columns(tmp_path):
     assert set(pending) == {"root1", "done1"}
 
 
-def test_the_export_writes_the_whole_document_once_fields_live_in_rows(tmp_path, monkeypatch):
-    monkeypatch.setattr(store, "ROW_BACKED_FIELDS", ("status",))  # the cutover's first candidate
+def test_the_export_writes_the_whole_document_once_fields_live_in_rows(tmp_path):
     root = fixture_root(tmp_path)
+    claim = {"tool": "write_file", "task_id": "done1", "state": "claimed"}
+    write_result(root, result("done1", "failed", launch_handoffs={"op1": claim}, model_waits={}, tail=1))
+    original = task_result_path(root, "done1").read_bytes()
     ensure_current_store(root, with_children=False)
     with store.open_store(root, write=False) as txn:
-        assert "status" not in json.loads(txn.body_text("done1"))  # the body holds the rest
-        assert txn.load("done1")["status"] == "failed"
+        body = json.loads(txn.body_text("done1"))
+        assert body["launch_handoffs"] == {} and body["model_waits"] == {}  # the keys keep their place, emptied
+        assert txn.handoffs("done1") == {"launch_handoffs": {"op1": claim}, "model_waits": {},
+                                         "retired_model_consumers": {}}
+        assert txn.load("done1")["launch_handoffs"] == {"op1": claim}
+        assert "retired_model_consumers" not in txn.load("done1")  # a key the file lacked stays absent
     for task_id in ("root1", "child1", "done1"):
         task_result_path(root, task_id).unlink()
     export_facts(root)
-    for task_id in ("root1", "child1", "done1"):
+    assert task_result_path(root, "done1").read_bytes() == original  # rows back in place: byte for byte
+    for task_id in ("root1", "child1"):
         written = json.loads(task_result_path(root, task_id).read_text(encoding="utf-8"))
-        assert written == load(root, task_id) and "status" in written  # the exact inverse of load, not the body
+        assert written == load(root, task_id)  # the exact inverse of load
 
 
 def test_the_export_removes_stale_admissible_files_and_keeps_the_evidence(tmp_path):

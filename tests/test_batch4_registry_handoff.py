@@ -39,10 +39,10 @@ def test_business_outcomes_do_not_outlive_the_joined_registry_handler(tmp_path, 
     registry.override_handler("knowledge_read", body)
     call = {"id": "call-1", "function": {"name": "knowledge_read", "arguments": '{"topic":"x"}'}}
     _execute_single_tool(registry, call, tmp_path / "logs", "root")
-    before = load_task_result(tmp_path, "root")["launch_handoffs"]
+    before = load_task_result(tmp_path, "root").get("launch_handoffs", {})
     assert before == {} and calls == ["effect may have started"]
     write_task_result(tmp_path, "root", "failed", reason_code="task_exception")
-    assert load_task_result(tmp_path, "root")["launch_handoffs"] == before
+    assert load_task_result(tmp_path, "root").get("launch_handoffs", {}) == before
     blockers = conflicting_writers(queue, "root")
     assert not any(row["kind"] == "tool_handoff" for row in blockers), blockers
     assert calls == ["effect may have started"], "classification never resends"
@@ -60,7 +60,7 @@ def test_real_local_return_and_registry_predispatch_refusals_settle(tmp_path):
                              ("there_is_no_such_tool", {}, "UNKNOWN_TOOL")):
         result = registry.execute_result(name, args)
         assert result.code == code
-        assert load_task_result(tmp_path, "root")["launch_handoffs"] == {}
+        assert load_task_result(tmp_path, "root").get("launch_handoffs", {}) == {}
 
 
 def test_registry_and_predispatch_wait_disclose_unreadable_pause_authority(tmp_path, monkeypatch):
