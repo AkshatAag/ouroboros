@@ -2287,6 +2287,7 @@ export function createChatInstance({
         // Render-only: Copy below keeps `shown`, the pre-cleanup sentence.
         const painted = hostRowDisplayText({ text: stored, role, system_type: systemType, narration: opts.narration }, text);
         const skillReview = role === 'system' && systemType === 'skill_review' && opts.narration !== true;
+        if (skillReview) bubble.classList.add('chat-skill-review');
         const richMarkdown = role !== 'user' && !skillReview && (role !== 'system' || markdown === true);
         // Only the web composer writes the file-name tail; a Telegram/skill caption is kept word for word.
         const shown = attachments.length ? attachmentCaption(text, attachments,

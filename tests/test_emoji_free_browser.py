@@ -213,7 +213,10 @@ def test_authored_narration_with_stale_host_type(direct_server_with_data, reques
         _persist(server["data_dir"], [row])
         _open(page, server["url"], reload=True)
         replay = page.locator(f'.chat-bubble[data-system-type="{kind}"] .message').inner_text()
-        facts = {"row": row, "live": live, "history": replay}
+        inset = page.locator(f'.chat-bubble[data-system-type="{kind}"]').evaluate(
+            "node => parseFloat(getComputedStyle(node).paddingLeft)")
+        assert inset > 0, "an authored row keeps ordinary bubble geometry, not disclosure padding"
+        facts = {"row": row, "live": live, "history": replay, "inset": inset}
         (evidence / "narration.json").write_text(json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8")
         assert live == replay == text, facts
         assert not errors, errors
