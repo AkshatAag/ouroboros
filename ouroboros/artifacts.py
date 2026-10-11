@@ -1188,7 +1188,9 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     def identity(observation: os.stat_result) -> tuple:
         return (observation.st_dev, observation.st_ino, observation.st_size,
                 observation.st_mtime_ns, observation.st_ctime_ns)
-    with source_path.open("rb") if source_path is not None else nullcontext(path) as handle:
+    from ouroboros.store import open_for_read  # a held store file keeps its locks (no new descriptor to close)
+
+    with open_for_read(source_path) if source_path is not None else nullcontext(path) as handle:
         before = os.fstat(handle.fileno())
         if not stat.S_ISREG(before.st_mode):
             raise OSError(f"artifact source is not a regular file: {path}")

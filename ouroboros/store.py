@@ -152,28 +152,54 @@ def held_descriptor(path: Any) -> Optional[int]:
         return _HEADER_FDS.get((info.st_dev, info.st_ino))
 
 
-def iter_file_bytes(path: Any, *, limit: Optional[int] = None, chunk: int = 1 << 20) -> Iterator[bytes]:
-    """A file's bytes (the first ``limit``, or all) for any reader in a process that may hold a
-    store: a held store file is read through its kept descriptor, never a new one that a close
-    would turn into a lock release; any other file is opened and closed as usual."""
+class _KeptReader:
+    """A binary reader over a kept store descriptor; leaving or closing it keeps the descriptor."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd, self._offset = fd, 0
+
+    def __enter__(self) -> "_KeptReader":
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def fileno(self) -> int:
+        return self._fd
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        self._offset = offset if whence == os.SEEK_SET else self._offset + offset
+        return self._offset
+
+    def read(self, size: Optional[int] = -1) -> bytes:
+        if size is None or size < 0:
+            size = max(0, os.fstat(self._fd).st_size - self._offset)
+        data = os.pread(self._fd, size, self._offset)
+        self._offset += len(data)
+        return data
+
+
+def open_for_read(path: Any) -> Any:
+    """``open(path, "rb")`` for any reader in a process that may hold a store: a held store file
+    is read through its kept descriptor, never a new one whose close would release the process's
+    locks on it; any other file is opened and closed as usual."""
     fd = held_descriptor(path)
-    if fd is None:
-        with open(path, "rb") as handle:
-            while limit is None or limit > 0:
-                data = handle.read(chunk if limit is None else min(chunk, limit))
-                if not data:
-                    return
-                if limit is not None:
-                    limit -= len(data)
-                yield data
-        return
-    offset = 0
-    while limit is None or offset < limit:
-        data = os.pread(fd, chunk if limit is None else min(chunk, limit - offset), offset)
-        if not data:
-            return
-        offset += len(data)
-        yield data
+    return pathlib.Path(path).open("rb") if fd is None else _KeptReader(fd)
+
+
+def iter_file_bytes(path: Any, *, limit: Optional[int] = None, chunk: int = 1 << 20) -> Iterator[bytes]:
+    """A file's bytes (the first ``limit``, or all), read through ``open_for_read``."""
+    with open_for_read(path) as handle:
+        while limit is None or limit > 0:
+            data = handle.read(chunk if limit is None else min(chunk, limit))
+            if not data:
+                return
+            if limit is not None:
+                limit -= len(data)
+            yield data
 
 
 def read_file_bytes(path: Any, *, limit: Optional[int] = None) -> bytes:
@@ -188,6 +214,8 @@ def copy_file_bytes(source: Any, destination: Any) -> Any:
     target = pathlib.Path(destination)
     if target.is_dir():
         target = target / pathlib.Path(source).name
+    if target.exists() and os.path.samefile(source, target):
+        raise shutil.SameFileError(f"{source!r} and {str(target)!r} are the same file")
     with open(target, "wb") as handle:
         for data in iter_file_bytes(source):
             handle.write(data)
