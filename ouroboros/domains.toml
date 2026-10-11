@@ -521,6 +521,7 @@ D20 = "Presence"
 "ouroboros/task_finalization.py" = "D01"
 "ouroboros/task_pacing.py" = "D01"
 "ouroboros/store.py" = "D17"
+"ouroboros/store_boot.py" = "D11"
 "ouroboros/store_import.py" = "D17"
 "ouroboros/store_switch.py" = "D10"
 "ouroboros/task_results.py" = "D17"
@@ -819,6 +820,7 @@ allowed = [
   "D03->D04",
   "D03->D12",
   "D03->D15",
+  "D03->D17",
   "D03->D18",
   "D03->D19",
   "D04->D05",
@@ -857,7 +859,6 @@ allowed = [
   "D07->D05",
   "D07->D06",
   "D07->D08",
-  "D07->D11",
   "D07->D12",
   "D07->D13",
   "D07->D15",
@@ -882,6 +883,7 @@ allowed = [
   "D09->D06",
   "D09->D08",
   "D09->D16",
+  "D09->D17",
   "D09->D18",
   "D10->D04",
   "D10->D05",
@@ -957,7 +959,6 @@ allowed = [
   "D17->D16",
   "D17->D18",
   "D17->D19",
-  "D17->D20",
   "D18->D09",
   "D18->D10",
   "D18->D12",
@@ -992,7 +993,6 @@ lazy_only = [
   "D03->D13",
   "D03->D14",
   "D03->D16",
-  "D03->D17",
   "D03->D20",
   "D04->D01",
   "D04->D06",
@@ -1016,6 +1016,7 @@ lazy_only = [
   "D07->D03",
   "D07->D09",
   "D07->D10",
+  "D07->D11",
   "D07->D14",
   "D07->D20",
   "D08->D02",
@@ -1030,7 +1031,6 @@ lazy_only = [
   "D09->D12",
   "D09->D14",
   "D09->D15",
-  "D09->D17",
   "D10->D01",
   "D10->D07",
   "D10->D09",
@@ -1078,6 +1078,7 @@ lazy_only = [
   "D17->D09",
   "D17->D12",
   "D17->D13",
+  "D17->D20",
   "D18->D01",
   "D18->D07",
   "D18->D11",

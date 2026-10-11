@@ -742,7 +742,11 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # ``observability/packs/index.sqlite`` (``ouroboros/evidence_packs.py``; one section-2 row).
 # 359 -> 360 (S5 FIX): the settlement census now names the existing state/obligations
 # directory itself, in addition to its already documented members; no new durable plane.
-EXPECTED_SCAN_PATHS = 360
+# INT1: the integrated scan was actually 362 (the inherited 360 pin was stale).
+# Store-backed packing removes state/obligations, state/obligations/* and
+# state/obligations/rebuild.owed. The remaining 359 are S3's 356 plus the three
+# documented evidence-pack paths above; no new durable plane or exemption.
+EXPECTED_SCAN_PATHS = 359
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
