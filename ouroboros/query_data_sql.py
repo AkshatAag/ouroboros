@@ -43,8 +43,8 @@ def _source(root, db, seconds):
             yield usage_store.store_tier(root, wait_sec=seconds, migrate=False)
     else:
         from ouroboros import evidence_packs
-        # The packing module's rule: its name lock around every index access, on both tiers.
-        with store.name_lock(root, evidence_packs.INDEX_LOCK_NAME, timeout_sec=seconds):
+        # The owner rebuilds the cache and holds its one lock through the SQL read.
+        with evidence_packs.open_index(root, wait_sec=seconds):
             yield evidence_packs.index_tier(root)
 
 

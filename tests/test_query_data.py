@@ -307,19 +307,55 @@ def test_money_defaults_snapshot_and_missing_packs_are_typed(ctx, monkeypatch):
     assert not (ctx.drive_root / "observability/packs").exists()
 
 
-def test_pack_index_sql(ctx):
-    from ouroboros import evidence_packs
-    path = evidence_packs.packs_dir(ctx.drive_root) / evidence_packs.INDEX_NAME
-    path.parent.mkdir(parents=True)
-    conn = sqlite3.connect(path)
-    try:
-        conn.execute("CREATE TABLE members(name TEXT)")
-        conn.execute("INSERT INTO members VALUES ('one')")
-        conn.commit()
-    finally:
-        conn.close()
-    result = call(ctx, op="sql", db="packs", query="SELECT name FROM members")
-    assert result["data"]["rows"] == [["one"]], result
+@pytest.mark.parametrize("cache", ["valid", "missing", "old_version", "quick_check"])
+def test_pack_index_sql_recovers_from_sidecars(ctx, cache):
+    from ouroboros import evidence_packs as packs
+    from tests.test_evidence_packs import _task
+
+    raw = b'{"same": true}'
+    _task(ctx.drive_root, "packed", blobs=1, payloads=[raw], handle=raw)
+    pack_path, sidecar = packs.write_pack(ctx.drive_root, "packed", 1, packs.loose_members(ctx.drive_root, "packed"))
+    packs.index_upsert(ctx.drive_root, pack_path, sidecar)
+    path = packs.packs_dir(ctx.drive_root) / packs.INDEX_NAME
+    authority = {p: p.read_bytes() for p in (pack_path, path.parent / "packed.members.json")}
+    if cache == "missing":
+        path.unlink()
+    elif cache == "old_version":
+        with sqlite3.connect(path) as conn:
+            conn.executescript("""
+                ALTER TABLE members RENAME TO previous_members;
+                CREATE TABLE members (sha256 TEXT, task_id TEXT, generation INTEGER, offset INTEGER,
+                    size INTEGER, kind TEXT, PRIMARY KEY (sha256, task_id, generation));
+                INSERT OR REPLACE INTO members SELECT * FROM previous_members;
+                DROP TABLE previous_members;
+                UPDATE meta SET value='1' WHERE key='schema_version';
+            """)
+            assert conn.execute("SELECT count(*) FROM members").fetchone() == (1,)
+    elif cache == "quick_check":
+        with sqlite3.connect(path) as conn:
+            conn.executescript("""
+                CREATE TABLE damaged(value INTEGER CHECK(value=0));
+                PRAGMA ignore_check_constraints=ON;
+                INSERT INTO damaged VALUES (1);
+                DELETE FROM members WHERE kind='checkpoint';
+                PRAGMA ignore_check_constraints=OFF;
+            """)
+            assert conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]
+    result = call(ctx, op="sql", db="packs", query="SELECT kind, size FROM members ORDER BY kind")
+    assert result["status"] == "ok", result
+    assert result["data"]["rows"] == [["checkpoint", len(raw)], ["json", len(raw)]], result
+    assert authority == {p: p.read_bytes() for p in authority}
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA quick_check").fetchall() == [("ok",)]
+        assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() == (str(packs.INDEX_SCHEMA_VERSION),)
+
+
+def test_no_packs_depends_on_sidecars_not_an_empty_cache(ctx):
+    from ouroboros import evidence_packs as packs
+    with packs.open_index(ctx.drive_root):
+        pass
+    result = call(ctx, op="sql", db="packs", query="SELECT count(*) FROM members")
+    assert result["status"] == "unavailable" and result["code"] == "no_packs", result
 
 
 @pytest.mark.parametrize("kwargs", [

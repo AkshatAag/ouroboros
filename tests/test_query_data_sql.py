@@ -258,3 +258,23 @@ def test_name_tier_money_and_index_reads_share_writer_locks(tmp_path, monkeypatc
         result = run(ctx, "SELECT 1", db=db, timeout_sec=0.05)
         assert result["status"] == "error" and "lock" in result["message"], result
     assert run(ctx, "SELECT 2", db=db, snapshot=True)["data"]["rows"] == [[2]]
+
+
+@pytest.mark.parametrize("tier", [store.TIER_ENFORCED, store.TIER_NAME])
+def test_pack_sql_holds_the_index_owner_lock(ctx, monkeypatch, tier):
+    from ouroboros import evidence_packs as packs
+    from tests.test_evidence_packs import _task
+
+    monkeypatch.setattr(packs, "index_tier", lambda _root: tier)
+    _task(ctx.drive_root, "packed", blobs=1)
+    packs.write_pack(ctx.drive_root, "packed", 1, packs.loose_members(ctx.drive_root, "packed"))
+    with packs.open_index(ctx.drive_root, write=True):
+        result = run(ctx, "SELECT count(*) FROM members", db="packs", timeout_sec=0.05)
+        assert result["status"] == "error" and "lock" in result["message"], result
+    assert run(ctx, "SELECT count(*) FROM members", db="packs")["data"]["rows"] == [[2]]
+    # Admission retains the owner's one lock through the read-only query scope.
+    with sql._source(ctx.drive_root, "packs", 0.05) as observed:
+        assert observed == tier
+        with pytest.raises(store.StoreBusy):
+            with store.name_lock(ctx.drive_root, packs.INDEX_LOCK_NAME, timeout_sec=0.01):
+                pytest.fail("index owner lock was released before SQL")

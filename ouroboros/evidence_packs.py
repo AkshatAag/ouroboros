@@ -279,15 +279,15 @@ def _rebuild_index(root: pathlib.Path, path: pathlib.Path, tier: str) -> None:
     store.fsync_directory(path.parent)
 
 @contextlib.contextmanager
-def open_index(root: Any, *, write: bool = False) -> Iterator[sqlite3.Connection]:
+def open_index(root: Any, *, write: bool = False, wait_sec: float = INDEX_WAIT_SEC) -> Iterator[sqlite3.Connection]:
     """One transaction on the index cache under the name lock; a missing, damaged or
     other-version cache is rebuilt from the sidecars first. ``store.StoreBusy`` on contention."""
     root = pathlib.Path(root)
     path, tier = packs_dir(root) / INDEX_NAME, index_tier(root)
-    with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=INDEX_WAIT_SEC):
+    with store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=wait_sec):
         if not _index_valid(path, tier):
             _rebuild_index(root, path, tier)
-        conn = store.connect(path, tier, wait_sec=INDEX_WAIT_SEC)
+        conn = store.connect(path, tier, wait_sec=wait_sec)
         try:
             with store.transaction(conn, write=write):
                 yield conn

@@ -186,7 +186,8 @@ def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", i
             if db not in {"current", "money", "packs"} or not isinstance(query, str) or not query.strip() or len(query) > 16384:
                 raise ValueError("sql requires db=current|money|packs and one query of at most 16384 characters")
             path = _path(ctx, root, sql.database_path(root, db).relative_to(root))
-            if not path.is_file():
+            absent = not any(path.parent.glob("*.members.json")) if db == "packs" else not path.is_file()
+            if absent:
                 result = {"status": "unavailable", "code": "no_packs" if db == "packs" else "not_found", "source": {"db": db}}
             else:
                 use_snapshot = db == "money" if snapshot is None else snapshot
