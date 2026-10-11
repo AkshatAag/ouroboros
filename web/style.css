@@ -1192,6 +1192,11 @@ body.resizing-panels { user-select: none; }
 .status-badge.starting { color: var(--status-warn-fg); }
 .status-badge.error { color: var(--status-error-fg); }
 .status-badge.offline { color: var(--text-muted); }
+.chat-page-header .status-badge,
+.chat-panel-statusbar .status-badge {
+    max-width: 100%;
+    white-space: normal;
+}
 .status-badge.thinking {
     color: var(--accent);
     animation: thinking-pulse 1.5s ease-in-out infinite;
@@ -1843,6 +1848,8 @@ body.resizing-panels { user-select: none; }
     align-items: center;
     gap: 8px;
     flex: 0 0 auto;
+    max-width: 100%;
+    min-width: 0;
 }
 
 .chat-live-summary-side {
