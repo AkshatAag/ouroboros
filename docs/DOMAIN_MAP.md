@@ -18,17 +18,17 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D08 | Supervisor: queue, workers, events & runtime control | 59 | 0 |
 | D09 | Cancellation, owner control & process custody | 16 | 0 |
 | D10 | Git, update & release machinery | 32 | 0 |
-| D11 | Gateway, server & Web UI | 77 | 0 |
+| D11 | Gateway, server & Web UI | 78 | 0 |
 | D12 | Settings & configuration | 20 | 0 |
 | D13 | Safety, guards & runtime mode | 9 | 0 |
 | D14 | Skills & extensions | 58 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 28 | 0 |
-| D16 | Observability, usage accounting & cost | 16 | 0 |
+| D16 | Observability, usage accounting & cost | 17 | 0 |
 | D17 | Projects, workspaces & task results | 30 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 23 | 0 |
 | D19 | Frozen contracts (ABI) | 11 | 0 |
 | D20 | Presence | 12 | 0 |
-| **total** | | **703** | **0** |
+| **total** | | **705** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -697,6 +697,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/settings_secrets.py`
 - `ouroboros/gateway/skill_publish.py`
 - `ouroboros/gateway/state.py`
+- `ouroboros/gateway/storage.py`
 - `ouroboros/gateway/task_archive.py`
 - `ouroboros/gateway/task_continue.py`
 - `ouroboros/gateway/task_decision.py`
@@ -870,6 +871,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/observability.py`
 - `ouroboros/process_logging.py`
 - `ouroboros/source_retention.py`
+- `ouroboros/storage.py`
 - `ouroboros/usage_accounting.py`
 - `ouroboros/usage_admission.py`
 - `ouroboros/usage_journal.py`

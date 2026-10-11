@@ -73,6 +73,7 @@ def collect_routes(
     )
     from ouroboros.gateway.history import make_chat_history_endpoint, make_cost_breakdown_endpoint
     from ouroboros.gateway.logs import api_logs_tail
+    from ouroboros.gateway.storage import storage_routes
     from ouroboros.gateway.marketplace import (
         api_marketplace_info,
         api_marketplace_install,
@@ -280,6 +281,7 @@ def collect_routes(
         Route("/api/update/preflight", endpoint=api_update_preflight, methods=["POST"]),
         Route("/api/update/apply", endpoint=api_update_apply, methods=["POST"]),
         Route("/api/cost-breakdown", endpoint=make_cost_breakdown_endpoint(data_dir)),
+        *storage_routes(data_dir),
         Route("/api/evolution-data", endpoint=api_evolution_data),
         Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
         Route("/api/logs/{name}", endpoint=api_logs_tail, methods=["GET"]),
