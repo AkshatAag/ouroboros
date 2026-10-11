@@ -594,35 +594,47 @@ def pending_restore_bytes(root: Any) -> int:
 
 
 
-def task_settlement_facts(root: Any, task_id: str) -> Dict[str, Any]:
-    """The facts the settle predicate reads, through the CURRENT file readers: terminal status,
+def settlement_obligations(root: Any, *, txn: Optional[store.Txn] = None) -> dict:
+    """Read every non-receipt set once, indexed by all of its recorded task owners.
+
+    Reuse this snapshot for a candidate pass or a fresh unlink census; never scan
+    every set again for each task. The task-local rows also form its revision key.
+    """
+    from ouroboros import obligations
+
+    if txn is None:
+        with store.open_store(root, write=False) as txn:
+            return settlement_obligations(root, txn=txn)
+    by_task: dict = {}
+    names = set(obligations.BOOT_SETS) | set(store.FLAG_COLUMNS) | set(txn.set_names())
+    for name in sorted(names - set(obligations.RECEIPT_SETS)):
+        for identity, entry in obligations.members_in(txn, name).items():
+            owners = {str(identity)} | {str(f.get("task_id") or "") for f in
+                                      (entry, entry.get("custody") or {}, entry.get("request") or {})}
+            for owner in owners - {""}:
+                by_task.setdefault(owner, {}).setdefault(name, {})[identity] = entry
+    return by_task
+
+
+def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None) -> Dict[str, Any]:
+    """The facts the settle predicate reads, through the current store: terminal status,
     every obligation flag, open review operations / undischarged acceptance debt, and unresolved
     money attempts (``None`` = unknown, which never settles). No timer anywhere."""
-    from ouroboros import obligations
     from ouroboros.review_operation import _OPEN_STATES
     from ouroboros.review_projection import _actor_pending
-    from ouroboros.task_results import load_task_result
+    from ouroboros.task_store import read_document
     from ouroboros.task_status import SETTLED_STATUSES
     from supervisor.terminal_delivery import pending_deliveries, terminal_answer_receipts
 
     root = pathlib.Path(root)
-    row = load_task_result(root, task_id) or {}
-    owed = obligations.result_memberships(row)
+    row, owed = {}, set()
     try:
-        marker = root / "state" / "migrations.json"
-        if ((marker.exists() and json.loads(marker.read_text()).get("obligations_available") is False)
-                or (root / "state" / "obligations" / obligations.REBUILD_MARK).exists()):
-            owed.add("unknowns")
-        with obligations.locked(root):
-            for path in sorted((root / "state" / "obligations").glob("*.json")):
-                if path.stem in obligations.RECEIPT_SETS:
-                    continue  # discharged chat receipts, not open obligations
-                entries = obligations._read(root, path.stem)
-                if any(identity == str(task_id) or any(str(f.get("task_id") or "") == str(task_id)
-                       for f in (entry, entry.get("custody") or {}, entry.get("request") or {}))
-                       for identity, entry in entries.items()):
-                    owed.add(path.stem)
-    except (OSError, ValueError, TypeError, AttributeError):
+        with store.open_store(root, write=False) as txn:
+            row = read_document(root, task_id, txn=txn) or {}
+            if obligation_rows is None:
+                obligation_rows = settlement_obligations(root, txn=txn)
+            owed.update(obligation_rows.get(str(task_id), {}))
+    except (store.StoreError, OSError, ValueError, TypeError, AttributeError):
         owed.add("unknowns")
     operations = row.get("review_operations") if isinstance(row.get("review_operations"), dict) else {}
     debt = row.get("acceptance_debt") if isinstance(row.get("acceptance_debt"), dict) else {}
@@ -672,8 +684,8 @@ def facts_settled(facts: Dict[str, Any]) -> bool:
                 and not facts["open_acceptance"] and not facts["open_late_receipts"] and facts["money_open"] is False)
 
 
-def task_settled(root: Any, task_id: str) -> bool:
-    return facts_settled(task_settlement_facts(root, task_id))
+def task_settled(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None) -> bool:
+    return facts_settled(task_settlement_facts(root, task_id, obligation_rows=obligation_rows))
 
 
 
@@ -822,19 +834,19 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
     manifests still reference (``keep_shas``) stays loose. A busy file is retried next pass."""
     from ouroboros.evidence_packer import live_manifest_shas, task_stamps
     from ouroboros.task_custody import task_custody_lock
-    from ouroboros.task_results import task_result_path
-    from ouroboros.utils import update_json_locked
 
     root = pathlib.Path(root)
     packed = {_member_key(m) for s in sidecars for m in s["members"]}
     report = {"unlinked": 0, "kept": 0, "busy": 0, "deferred": 1}
 
-    def remove(_current):
-        if task_stamps(root, task_id) != revision or not task_settled(root, task_id):
+    def remove():
+        duties = settlement_obligations(root)
+        if (task_stamps(root, task_id, obligation_rows=duties) != revision
+                or not task_settled(root, task_id, obligation_rows=duties)):
             return
-        keep = keep_shas | live_manifest_shas(root)
+        keep = keep_shas | live_manifest_shas(root, obligation_rows=duties)
         members = loose_members(root, task_id)
-        if task_stamps(root, task_id) != revision:
+        if task_stamps(root, task_id, obligation_rows=duties) != revision:
             return
         report["deferred"] = 0
         for member in members:
@@ -851,27 +863,24 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
             except PermissionError:
                 report["busy"] += 1
 
-    def locked_remove(current):
-        with store.name_lock(root, PUBLICATION_LOCK_NAME, timeout_sec=INDEX_WAIT_SEC):
-            return remove(current)
-
-    # Compression precedes custody -> result -> manifest publication locks.
-    with _unlink_phase(root) as allowed:
-        if allowed:
-            with task_custody_lock(root, task_id) as acquired:
-                if acquired:
-                    update_json_locked(task_result_path(root, task_id, create=False), locked_remove, strict_existing_dict=True)
+    # Compression precedes custody -> store write -> manifest publication locks.
+    with task_custody_lock(root, task_id) as acquired:
+        if acquired:
+            with _unlink_phase(root) as allowed:
+                if allowed:
+                    with store.name_lock(root, PUBLICATION_LOCK_NAME, timeout_sec=INDEX_WAIT_SEC):
+                        remove()
     return report
 
 
-def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list] = None,
+def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list] = None, revision: Optional[str] = None,
               record: Callable[..., None] = lambda **facts: None) -> Dict[str, Any]:
     """The per-task steps, each idempotent: new loose members -> next generation (write, publish,
     re-read + verify every member, index), then unlink loose files held by verified packs."""
     root = pathlib.Path(root)
     from ouroboros.evidence_packer import task_stamps
 
-    revision = task_stamps(root, task_id)
+    revision = task_stamps(root, task_id) if revision is None else revision
     generations = published_generations(root, task_id, listing)
     already = {_member_key(m) for s in generations for m in s["members"]}
     fresh = [m for m in loose_members(root, task_id) if _member_key(m) not in already]

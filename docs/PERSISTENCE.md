@@ -42,8 +42,8 @@ scanned data-relative path to be covered by a row here (count-anchored both ways
   and known (no timer). The maintenance child (`ouroboros/evidence_packer.py`, never
   at boot) writes checkpoints then manifest blobs into one xz stream under
   `observability/packs/`. It re-verifies every member from disk on every unlink pass,
-  indexes it, and rechecks facts/refs under publication/result locks with store phase
-  published. Only loose placements go; bytes stay forever. Readers try loose → indexed
+  indexes it, and rechecks row revisions/facts/refs under publication/store locks in
+  published phase. Loose placements go; bytes stay forever. Readers try loose → indexed
   packs → retained roots; exhausted corrupt placements raise `evidence_corrupt`.
 
 ## 1. Root files

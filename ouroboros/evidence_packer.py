@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import json
 import logging
 import os
@@ -18,27 +19,27 @@ log = logging.getLogger(__name__)
 
 
 
-def task_stamps(root: pathlib.Path, task_id: str) -> str:
+def task_stamps(root: pathlib.Path, task_id: str, *, obligation_rows: Optional[dict] = None) -> str:
     """Evidence and settlement-source revisions, including owner-held duties and outbox sends."""
     from ouroboros.artifacts import task_artifact_dir_path
-    from ouroboros.task_results import task_result_path
+    from ouroboros.task_store import signature
     from ouroboros.usage_store import STORE_REL
     from ouroboros.usage_ledger import LEDGER_REL
 
-    stamps = []
+    if obligation_rows is None:
+        obligation_rows = packs.settlement_obligations(root)
+    stamps = [("task", signature(root, task_id)), ("obligations", obligation_rows.get(task_id, {}))]
     paths = [root / "observability" / "calls" / task_id,
                  task_artifact_dir_path(root, task_id, create=False).joinpath(*packs.CHECKPOINTS_REL.parts),
-                 task_result_path(root, task_id, create=False), root / "state/terminal_deliveries.json",
-                 root / "state/migrations.json", root / "state/obligations/rebuild.owed",
+                 root / "state/terminal_deliveries.json",
                  root / STORE_REL, root / (str(STORE_REL) + "-wal"), root / LEDGER_REL]
-    paths.extend(sorted((root / "state/obligations").glob("*.json")))
     for path in paths:
         try:
             stat = path.stat()
             stamps.append((str(path.relative_to(root)), stat.st_ino, stat.st_size, stat.st_mtime_ns))
         except OSError:
             stamps.append((str(path.relative_to(root)), 0))
-    return json.dumps(stamps, separators=(",", ":"))
+    return json.dumps(stamps, sort_keys=True, separators=(",", ":"))
 
 
 def _loose_task_ids(root: pathlib.Path) -> set:
@@ -77,12 +78,15 @@ def record_swept(root: pathlib.Path, task_id: str, stamps: str) -> None:
             conn.execute("INSERT OR REPLACE INTO swept VALUES (?,?)", (task_id, stamps))
 
 
-def changed_tasks(root: pathlib.Path) -> List[str]:
+def changed_tasks(root: pathlib.Path, *, obligation_rows: Optional[dict] = None) -> List[str]:
     """Tasks with loose evidence whose directories or result changed since a sweep recorded them."""
     root = pathlib.Path(root)
     ids = _loose_task_ids(root)
+    if ids and obligation_rows is None:
+        obligation_rows = packs.settlement_obligations(root)
     swept = swept_stamps(root) if ids else {}
-    return sorted(task for task in ids if swept is None or swept.get(task) != task_stamps(root, task))
+    return sorted(task for task in ids if swept is None or swept.get(task) !=
+                  task_stamps(root, task, obligation_rows=obligation_rows))
 
 
 def archive_pending(root: pathlib.Path) -> bool:
@@ -93,27 +97,33 @@ def archive_pending(root: pathlib.Path) -> bool:
 def ordered_candidates(root: pathlib.Path, settled: List[str]) -> List[Tuple[str, int]]:
     """Settled tasks with their loose raw size: the ones whose result changed after the newest
     published pack first (newest result first), then the backfill by descending raw size."""
-    from ouroboros.task_results import task_result_path
+    from ouroboros.task_store import signature
 
-    newest_pack = max((path.stat().st_mtime_ns for path, _ in packs.list_sidecars(root)), default=0)
+    def timestamp(value):
+        try:
+            return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            return 0
+
+    newest_pack = max((timestamp(sidecar.get("created_at")) for _, sidecar in packs.list_sidecars(root)), default=0)
     recent, backfill = [], []
     for task in settled:
         raw = sum(int(m["size"]) for m in packs.loose_members(root, task))
-        try:
-            touched = task_result_path(root, task, create=False).stat().st_mtime_ns
-        except (OSError, ValueError):
-            touched = 0
+        revision = signature(root, task)
+        touched = timestamp(revision[1]) if revision else 0
         (recent if newest_pack and touched > newest_pack else backfill).append((task, raw, touched))
     recent.sort(key=lambda item: (-item[2], item[0]))
     backfill.sort(key=lambda item: (-item[1], item[0]))
     return [(task, raw) for task, raw, _ in recent + backfill]
 
 
-def live_manifest_shas(root: pathlib.Path) -> set:
+def live_manifest_shas(root: pathlib.Path, *, obligation_rows: Optional[dict] = None) -> set:
     """Shas any NON-settled task's manifests reference: those loose blobs stay."""
     keep: set = set()
+    if obligation_rows is None:
+        obligation_rows = packs.settlement_obligations(root)
     for task in _loose_task_ids(root):
-        if not packs.task_settled(root, task):
+        if not packs.task_settled(root, task, obligation_rows=obligation_rows):
             keep.update(sha256 for _, sha256, _ in packs.manifest_blob_refs(root, task))
     return keep
 
@@ -124,8 +134,10 @@ def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
     root = pathlib.Path(root)
     report: Dict[str, Any] = {"status": "completed", "packed": 0, "candidates": 0, "raw": 0, "compressed": 0,
                               "unlinked": 0, "kept": 0, "busy": 0, "faults": 0, "archived": 0}
-    revisions = {task: task_stamps(root, task) for task in changed_tasks(root)}
-    facts = {task: packs.task_settlement_facts(root, task) for task in revisions}
+    duties = packs.settlement_obligations(root)
+    revisions = {task: task_stamps(root, task, obligation_rows=duties)
+                 for task in changed_tasks(root, obligation_rows=duties)}
+    facts = {task: packs.task_settlement_facts(root, task, obligation_rows=duties) for task in revisions}
     settled = {task for task, fact in facts.items() if packs.facts_settled(fact)}
     for task, fact in facts.items():
         if task not in settled and fact["money_open"] is False and "unknowns" not in fact["obligations"]:
@@ -138,7 +150,7 @@ def run_pass(root: pathlib.Path, *, stop=lambda: False) -> Dict[str, Any]:
             report["status"] = "unknown"
             break
         try:
-            outcome = packs.pack_task(root, task, keep_shas=set(), listing=listing,
+            outcome = packs.pack_task(root, task, keep_shas=set(), listing=listing, revision=revisions[task],
                                       record=lambda **facts: packs.record_storage_pack(root, **facts))
         except Exception as exc:
             report["faults"] += 1

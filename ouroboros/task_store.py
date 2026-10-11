@@ -28,8 +28,10 @@ FACT_KEYS = ("task_id", "ts", "updated_at", "delegation_role", "parent_task_id",
 _NEWEST_ORDER = "ORDER BY ts DESC, task_id DESC"  # NULL ts sorts last: a row without one is oldest
 
 
-def read_document(root: Any, task_id: str) -> Optional[Dict[str, Any]]:
+def read_document(root: Any, task_id: str, *, txn: Optional[Txn] = None) -> Optional[Dict[str, Any]]:
     """The whole current document, ``None`` when the store holds no such task."""
+    if txn is not None:
+        return txn.load(str(task_id))
     with open_store(root, write=False) as txn:
         return txn.load(str(task_id))
 

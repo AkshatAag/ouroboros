@@ -37,9 +37,12 @@ def _blob(root, raw, kind="json"):
 
 
 def _result(root, task_id, status="completed", **fields):
-    (root / "task_results").mkdir(parents=True, exist_ok=True)
-    row = {"task_id": task_id, "status": status, "_schema_version": 1, **fields}
-    (root / "task_results" / f"{task_id}.json").write_text(json.dumps(row), encoding="utf-8")
+    from ouroboros import store
+    from ouroboros.utils import utc_now_iso
+
+    row = {"task_id": task_id, "status": status, "_schema_version": 1, "updated_at": utc_now_iso(), **fields}
+    with store.open_store(root, write=True) as txn:
+        txn.store_task(row)
 
 
 def _task(root, task_id, *, status="completed", blobs=3, payloads=None, handle=b"# focus\n" + b"y" * 3000, **fields):
@@ -106,7 +109,10 @@ def test_pack_format_sidecar_prefix_and_shared_sha_duplicated(root):
     sidecar_b = json.loads((root / "observability" / "packs" / "task-b.members.json").read_text(encoding="utf-8"))
     assert shared in {m["sha256"] for m in sidecar["members"]} and shared in {m["sha256"] for m in sidecar_b["members"]}
     assert not any(_loose(ref) for ref in refs_a + refs_b) and not _handle_path(root, "task-a", handle_a).exists()
-    assert not (root / "state" / "current.sqlite").exists()  # veto: the index is never inside current.sqlite
+    from ouroboros import store
+    with store.open_store(root, write=False) as txn:
+        tables = {row[0] for row in txn.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert not tables.intersection({"packs", "members", "handles", "swept"})  # separate cache, never in current.sqlite
     assert (root / "observability" / "packs" / "index.sqlite").exists()
     assert len(set(sidecar["members"][0].keys()) & {"sha256", "kind", "size", "offset", "path"}) == 5
 

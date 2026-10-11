@@ -306,9 +306,19 @@ def test_acceptance_debt_blocks_without_delivery_and_late_notice_requires_receip
 
 
 @pytest.mark.parametrize("source", ["obligations", "terminal_deliveries"])
-def test_unknown_settlement_sources_block_until_repaired(root, source):
+def test_unknown_settlement_sources_block_until_repaired(root, source, monkeypatch):
+    from ouroboros import obligations, store
+
     _task(root, "unknown", blobs=1)
-    path = root / "state" / ("obligations/pending_drives.json" if source == "obligations" else "terminal_deliveries.json")
+    if source == "obligations":
+        with monkeypatch.context() as patch:
+            def unavailable(*args):
+                raise store.StoreBusy("simulated unreadable obligations")
+            patch.setattr(obligations, "members_in", unavailable)
+            assert not packs.task_settled(root, "unknown")
+        assert packs.task_settled(root, "unknown")
+        return
+    path = root / "state" / "terminal_deliveries.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{", encoding="utf-8")
     assert not packs.task_settled(root, "unknown")
@@ -345,8 +355,7 @@ def test_unlink_rereads_facts_and_references_after_compression(root, monkeypatch
 
 
 def test_compression_is_outside_result_and_publication_locks(root, monkeypatch):
-    from ouroboros import task_custody, utils
-    from ouroboros.task_results import task_result_path
+    from ouroboros import task_custody, store
 
     _task(root, "unlocked", blobs=1)
     write = packs.write_pack
@@ -354,7 +363,10 @@ def test_compression_is_outside_result_and_publication_locks(root, monkeypatch):
     def compress(*args, **kwargs):
         with task_custody.task_custody_lock(root, "unlocked", timeout_sec=0) as acquired:
             assert acquired
-            utils.update_json_locked(task_result_path(root, "unlocked"), lambda current: None, timeout_sec=0)
+            with store.open_store(root, write=True, wait_sec=0) as txn:
+                assert txn.load("unlocked")
+                with store.name_lock(root, packs.PUBLICATION_LOCK_NAME, timeout_sec=0):
+                    pass
         return write(*args, **kwargs)
 
     monkeypatch.setattr(packs, "write_pack", compress)
@@ -416,12 +428,8 @@ def test_restore_and_preflight_cover_all_descendants_but_not_symlink_drives(root
 
 
 def test_first_backfill_by_size_then_new_settlements_before_backlog(root):
-    from ouroboros.task_results import task_result_path
-
-    _task(root, "large", blobs=1, payloads=[b"x" * 10000])
-    _task(root, "small", blobs=1, payloads=[b"small"])
-    os.utime(task_result_path(root, "large"), ns=(10, 10))
-    os.utime(task_result_path(root, "small"), ns=(20, 20))
+    _task(root, "large", blobs=1, payloads=[b"x" * 10000], updated_at="2026-01-01T00:00:00Z")
+    _task(root, "small", blobs=1, payloads=[b"small"], updated_at="2026-01-02T00:00:00Z")
     assert [task for task, _ in packer.ordered_candidates(root, ["small", "large"])] == ["large", "small"]
     _task(root, "published", blobs=1)
     packs.pack_task(root, "published", keep_shas=set())
