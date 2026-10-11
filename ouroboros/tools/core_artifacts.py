@@ -188,7 +188,9 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
         # older caller's artifact context is unavailable. No uncaptured URL or
         # reference is published, and source-read failures still refuse delivery.
         try:
-            with fp.open("rb") as source:
+            from ouroboros.store import open_for_read
+
+            with open_for_read(fp) as source:
                 raw = source.read(_MAX_DOCUMENT_FILE_BYTES + 1)
             if len(raw) > _MAX_DOCUMENT_FILE_BYTES:
                 raise OSError(f"large file requires artifact capture: {exc}")
