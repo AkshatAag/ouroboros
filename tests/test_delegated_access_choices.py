@@ -96,7 +96,8 @@ def test_lowering_and_legacy_snapshots_never_widen():
     readonly = runtime.validate_subagent_snapshot(lower, access='readonly')
     assert runtime.validate_subagent_snapshot(readonly, access='inherit') == readonly
     assert runtime.validate_subagent_snapshot(readonly, access='workspace_write')['access'] == 'readonly'
-    assert delegated_run_shape(False, 'full').access == 'readonly'
+    # An explicit read-only lowering stays read-only whatever the assignment (#1609).
+    assert delegated_run_shape(False, readonly['access']).access == 'readonly'
     legacy = {key: value for key, value in lower.items() if key != 'access'}
     assert runtime.validate_subagent_snapshot(legacy).get('access', 'workspace_write') == 'workspace_write'
     assert runtime.validate_subagent_snapshot(legacy, access='inherit') == legacy
@@ -140,14 +141,18 @@ def test_full_route_health_requires_advertised_full(route):
 
 
 def test_converting_a_session_reviewer_to_api_drops_only_its_session_access():
+    """A review pool seat IS its catalog row: the wait card's ``reviewer:<id>``
+    changes that row's route (a session row becomes an API row without a session
+    access profile) and leaves the mark and every other field as saved."""
     from ouroboros.model_slots import apply_model_role_override
 
-    actor = _settings('full')['OUROBOROS_SUBAGENTS']['items'][0]
-    original = {'OUROBOROS_SUBAGENTS': json.dumps({'enabled': True, 'items': [actor]}),
-                'OUROBOROS_REVIEWER_SLOTS': json.dumps({group: [{'slot_id': group, 'subagent_id': 'coder'}]
-                                                       for group in ('triad', 'scope')})}
-    saved = apply_model_role_override(original, role='reviewer:triad', model='openai::review',
+    actor = {**_settings('full')['OUROBOROS_SUBAGENTS']['items'][0], 'review_eligible': True}
+    original = {'OUROBOROS_SUBAGENTS': json.dumps({'enabled': True, 'items': [actor]})}
+    saved = apply_model_role_override(original, role='reviewer:coder', model='openai::review',
                                       credential_profile_id='', use_local=False)
     rows = json.loads(saved['OUROBOROS_SUBAGENTS'])['items']
-    assert rows[0] == actor
-    assert rows[1]['route']['kind'] == 'api_model' and 'access' not in rows[1]
+    assert len(rows) == 1 and 'OUROBOROS_REVIEWER_SLOTS' not in saved
+    assert rows[0]['route'] == {'kind': 'api_model', 'target_id': 'openai::review'}
+    assert 'access' not in rows[0]
+    assert {key: rows[0][key] for key in ('subagent_id', 'recommended_use', 'effort', 'review_eligible')} == {
+        'subagent_id': 'coder', 'recommended_use': actor['recommended_use'], 'effort': 'max', 'review_eligible': True}

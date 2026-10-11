@@ -469,6 +469,39 @@ test('a child frame that outruns the first history load leaves no root control i
     } finally { f.close(); }
 });
 
+for (const replay of [false, true]) {
+    test(`optional child roles keep neutral titles, separate models and twin ids (${replay ? 'replay' : 'live'})`, async () => {
+        const children = [
+            ['omitted-child', {}, 'Subagent'],
+            ['null-child', { subagent_role: null }, 'Subagent'],
+            ['empty-child', { subagent_role: '' }, 'Subagent'],
+            ['spaces-child', { subagent_role: ' \t ' }, 'Subagent'],
+            ['named-child', { subagent_role: 'interface reviewer' }, 'interface reviewer'],
+            ['historic-child', { subagent_role: 'researcher' }, 'researcher'],
+        ];
+        const frames = children.map(([id, role]) => ({
+            role: 'system', system_type: 'subagent_started', is_progress: true,
+            text: `Subagent ${id} running.`, content: `Subagent ${id} running.`,
+            chat_id: 1, ts: TS, task_id: id, subagent_task_id: id,
+            subagent_event: 'running', parent_task_id: TASK, root_task_id: TASK,
+            delegation_role: 'subagent', model: 'openai/gpt-5.6-sol', ...role,
+        }));
+        const f = fixture(replay ? frames : []);
+        try {
+            if (replay) await f.instance.refreshHistory({ revision: 1 });
+            else for (const frame of frames) f.emit('chat', frame);
+            for (const [id, , role] of children) {
+                const card = f.card(id);
+                assert.ok(card, `child ${id} is rendered`);
+                const title = role === 'Subagent' ? `${role} (${id.slice(0, 8)})` : role;
+                assert.equal(card.querySelector('[data-live-title]').textContent, title);
+                assert.match(f.meta(id), /Agent model: gpt-5\.6-sol/);
+                assert.equal(card.dataset.parentTaskId, TASK);
+            }
+        } finally { f.close(); }
+    });
+}
+
 test('a wake-up is an ordinary direct block: an empty frame mints nothing, a tool call mints the block', () => {
     const f = fixture();
     try {
@@ -488,11 +521,11 @@ test('the header keeps the census verdict beside a block: Thinking… for a dire
     const f = fixture();
     try {
         f.census(direct());
-        assert.equal(f.status(), 'Thinking...');
+        assert.equal(f.status(), 'Thinking');
         assert.equal(f.typingHidden(), false, 'a zero-tool turn shows the thinking indicator only');
         f.log({ type: 'tool_call_started', tool: 'read_file', tool_call_id: 'c1' });
         assert.ok(f.card());
-        assert.equal(f.status(), 'Thinking...', 'a direct block is not a managed live card');
+        assert.equal(f.status(), 'Thinking', 'a direct block is not a managed live card');
         assert.equal(f.typingHidden(), true, 'the block hosts its own running indicator');
         f.emit('chat', { ...final, tool_calls: 1 });
         f.census([]);
@@ -717,7 +750,7 @@ test('a wait-only block carries no title and no conversion until its first row o
         f.log({ type: 'tool_call_started', tool: 'read_file', tool_call_id: 'c1', args: { path: 'README.md' } });
         assert.equal(f.card().querySelector('[data-live-title]').textContent, '', 'work arrived, but the chip already says Working (#1369)');
         assert.ok(f.card().querySelector('[data-turn-into-project]'));
-        assert.equal(f.status(), 'Thinking...', 'the header keeps the census verdict for a direct turn');
+        assert.equal(f.status(), 'Thinking', 'the header keeps the census verdict for a direct turn');
     } finally { f.close(); }
 });
 

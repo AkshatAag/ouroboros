@@ -281,7 +281,7 @@ def acceptance_settlement_message(request: Any, wave: Dict[str, Any]) -> str:
     early = len(wave.get("answered_before_release_ids") or ())
     head = ACCEPTANCE_SETTLEMENT_WAKE.format(
         retry_key=str(getattr(request, "retry_key", "") or ""),
-        settled=early + sum(1 for status in slots.values() if status),
+        settled=early + sum(1 for status in slots.values() if status and status != "unresolved"),
         total=max(int(wave.get("total") or 0), len(slots) + early),
     )
     lines = _reviewer_lines(wave)
@@ -766,15 +766,14 @@ def canonical_acceptance_trace(root: Any, task_id: str, retry_key: str, *,
 
 def _collected_wave(run: Dict[str, Any]) -> Dict[str, Any]:
     """The reviewers' own lines for a wave whose release roster died with its worker."""
-    from ouroboros.review_custody import _settled_slot_verdict
+    from ouroboros.review_custody import RELEASED_UNRESOLVED, _settled_slot_verdict
 
     slots, verdicts = {}, {}
-    for actor in run.get("actors") or []:
-        if not isinstance(actor, dict):
-            continue
+    for actor in (row for row in run.get("actors") or [] if isinstance(row, dict)):
         slot_id = str(actor.get("slot_id") or "")
-        slots[slot_id] = "" if actor.get("operation_state") in {"pending_dispatch", "in_flight"} else str(actor.get("status") or "settled")
-        if slots[slot_id]:
+        slots[slot_id] = {"pending_dispatch": "", "in_flight": "", "custody_lost": RELEASED_UNRESOLVED}.get(
+            actor.get("operation_state"), str(actor.get("status") or "settled"))  # unknown is not settled (#1547)
+        if slots[slot_id] not in {"", RELEASED_UNRESOLVED}:
             verdicts[slot_id] = _settled_slot_verdict(SimpleNamespace(**{"raw_text": "", "error": "", **actor}))
     return {"slots": slots, "verdicts": verdicts, "total": len(slots)}
 
@@ -821,13 +820,12 @@ def settle_acceptance_operation(usage_ctx: Any, *, retry_key: str, task_id: str,
                                 controller: Any = None) -> str:
     """Collect one wave of a terminal task purely, publish it and announce it once.
 
-    Returns ``announced`` (publication read back, row enqueued), ``published``
-    (read back; the row was already owed or delivered),
-    ``settled`` (nothing was pending), ``pending`` (still in flight),
-    ``unpublished`` (the canonical record or durable notice custody did not
-    take the settlement; retry duty remains), ``source_unreadable`` (a published source exists but cannot
-    be read: never duplicated from the checkpoint) or ``unavailable`` (no trace
-    and no canonical source).
+    A completed ``historical_acceptance`` run without a ``late_settlement`` is stamped and published as if advanced.
+    Returns ``announced`` (publication read back, row enqueued), ``published`` (read back; the row
+    was already owed or delivered), ``settled`` (nothing was pending), ``pending`` (still in
+    flight), ``unpublished`` (the canonical record or durable notice custody did not take the
+    settlement; retry duty remains), ``source_unreadable`` (a published source exists but cannot
+    be read: never duplicated from the checkpoint) or ``unavailable`` (no trace and no canonical source).
     """
     from ouroboros.loop_acceptance_review import acceptance_run_pending
     from ouroboros.review_dispatch import reconcile_pending_acceptance_runs

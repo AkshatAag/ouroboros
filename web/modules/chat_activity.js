@@ -2,19 +2,19 @@
 // live-card presentation projections (moved verbatim from chat.js) plus the
 // in-flight direct/ephemeral turn status reducer and snapshot hydration.
 import { executorIdentityMarkup, joinMetaParts } from './harness_presentation.js';
+import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
-import { taskSourceDownloadUrl } from './api_client.js';
+import { taskSourceDownloadUrl, apiFetch } from './api_client.js';
 import { compactModel, formatLogDuration, modelExecutionLabel } from './log_events.js';
 import { createSystemMessageActions } from './ui_helpers.js';
 import { projectReference } from './project_reference.js';
 import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from './delegated_activity.js';
-import { joinMarkdownHeadings, MARKDOWN_FENCED_CODE } from './utils.js';
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
-import { activityWaitPhase, pausePhaseLabel } from './task_phase_chip.js';
-import { apiFetch } from './api_client.js';
+import { activityWaitPhase, pausePhaseLabel, modelActivityPresentation, taskActivityPresentation } from './task_phase_chip.js';
 import { currentLanguage, fmt, isEnglish, tr, tx } from './i18n.js';
+import { hostRowDisplayText } from './host_notice_text.js';
 import {
-    accountedUpperBound,
+    joinMarkdownHeadings, MARKDOWN_FENCED_CODE, accountedUpperBound,
     accountedUpperBoundWithChildren,
     escapeHtmlAttr,
     escapeHtmlText as escapeHtml,
@@ -55,11 +55,11 @@ export function senderLabel(role, isProgress = false, systemType = '', opts = {}
         return opts.senderLabel || 'You';
     }
     if (role === 'system') {
-        if (systemType === 'task_summary') return '📋 Task Summary';
-        if (systemType === 'skill_review') return '📋 Skill Review';
-        return '📋 System';
+        if (systemType === 'task_summary') return 'Task Summary';
+        if (systemType === 'skill_review') return 'Skill Review';
+        return 'System';
     }
-    if (isProgress) return '💬 Thought';
+    if (isProgress) return 'Thought';
     // A self-initiated turn (a consciousness wake-up) signs its final bubble
     // through the same sender line the user bubble uses for its source.
     if (opts.initiator === 'consciousness') return 'Ouroboros · Consciousness';
@@ -99,7 +99,7 @@ export function evidenceLinkHtml(evidenceRef) {
 // retain their record link. Only typed host pause copy enters the translator.
 export function cardRowSummary(msg, phase, rawTs = '') {
     const text = String(msg.text ?? msg.content ?? '');
-    const lines = (msg.role === 'system' && msg.system_type === 'task_pause_notice' ? tx(text) : text).split('\n');
+    const lines = hostRowDisplayText(msg, msg.role === 'system' && msg.system_type === 'task_pause_notice' ? tx(text) : text).split('\n');
     const rowId = String(msg.card_row_id || '').trim() || `${String(msg.system_type || '').trim()}|${rawTs}`;
     return {
         phase, headline: lines[0].trim(), body: lines.slice(1).join('\n').trim(), dedupeKey: `cardrow|${rowId}`,
@@ -416,8 +416,8 @@ const PAUSING_PHASES = new Set(['budget_pausing', 'pausing']);
  */
 export function restartConfirmBody(activities) {
     const lines = [
-        'Running tasks stop. Tasks already paused stay paused.',
-        'Queued tasks that have not started are kept on hold under the same task, and wait for your Resume.',
+        'Running tasks stop, then eligible saved work resumes after the restart. Tasks already paused stay paused.',
+        'Runnable queued tasks return to the queue. Existing holds and limits still apply.',
         'Saved settings apply after the restart.',
     ];
     if (!Array.isArray(activities) || activities.some((row) => row?.phase === 'unknown')) {
@@ -820,8 +820,7 @@ export function clearStickyCardState(record) {
     // A recycled slot must not inherit the previous cycle's finalizing hold —
     // nor the outcome observed under it (#1110), which would otherwise paint the
     // new cycle's chip with the old cycle's Failed.
-    record.finalizingHold = false;
-    record.observedOutcome = '';
+    Object.assign(record, { finalizingHold: false, censusPhase: '', observedOutcome: '' });
     // The activity clock is cycle state too: a recycled slot ('active') would
     // otherwise open showing the previous cycle's "updated" time.
     record.latestActivityTs = '';
@@ -830,6 +829,7 @@ export function clearStickyCardState(record) {
         record.activityEl.removeAttribute('title');
     }
     record.modelExecution = null;
+    record.effort = null;
     record.toolCalls = null;
     record.toolErrors = null;
     // The folded evidence is cycle state too: a recycled slot must not count
@@ -1084,31 +1084,26 @@ export function unkeyedFrameEndsTurn(row) {
 export function computeDerivedChatStatus({
     isConnected = true,
     hasActiveLiveCard = false,
-    activeDirectCount = 0,
-    activeManagedCount = 0,
-    queuedManagedCount = 0,
-    pausingManagedCount = 0,
+    activeDirectCount = 0, activeManagedCount = 0,
+    queuedManagedCount = 0, pausingManagedCount = 0,
     pausedManagedCount = 0,
     pausedCause = '',
-    waitingOwnerCount = 0,
-    unknownActivityCount = 0,
+    waitingOwnerCount = 0, unknownActivityCount = 0,
     waitingModelCount = 0,
     projectWaitLabel = '',
     pendingSubmissionsCount = 0,
     supervisorStarting = false,
+    modelActivity = null,
 } = {}) {
     if (!isConnected) return { kind: 'offline', text: 'Reconnecting...', showDots: false };
-    if (hasActiveLiveCard) return { kind: 'thinking', text: 'Working...', showDots: false };
-    if (activeManagedCount > 0) return { kind: 'thinking', text: 'Working...', showDots: true };
+    const observed = modelActivity && { kind: modelActivity.waiting ? 'online' : 'thinking', text: modelActivity.text, showDots: modelActivity.motion };
+    if (hasActiveLiveCard || activeManagedCount > 0) return (activeManagedCount > 0 && observed) || { kind: 'thinking', text: 'Working...', showDots: !hasActiveLiveCard };
     // Sent work still finishing under the owner's Pause: settling, not working.
     if (pausingManagedCount > 0) return { kind: 'thinking', text: 'Pausing…', showDots: true };
-    if (activeDirectCount > 0) return { kind: 'thinking', text: 'Thinking...', showDots: true };
+    if (activeDirectCount > 0) return observed || { kind: 'thinking', text: taskActivityPresentation({ phase: 'working' }).text, showDots: true };
     if (pendingSubmissionsCount > 0) return { kind: 'thinking', text: 'Sending...', showDots: true };
-    if (queuedManagedCount > 0) {
-        if (waitingModelCount > 0) return { kind: 'online', text: 'Waiting for access', showDots: false };
-        return { kind: 'thinking', text: 'Queued...', showDots: true };
-    }
     if (waitingModelCount > 0) return { kind: 'online', text: 'Waiting for access', showDots: false };
+    if (queuedManagedCount > 0) return { kind: 'thinking', text: 'Queued...', showDots: true };
     if (waitingOwnerCount > 0) return { kind: 'online', text: tr('task.chip.waiting_for_answer', 'Waiting for your answer'), showDots: false };
     if (unknownActivityCount > 0) return { kind: 'online', text: 'Activity unconfirmed', showDots: false };
     // Mixed or unknown causes stay generic; paused work never claims Running.
@@ -1118,14 +1113,12 @@ export function computeDerivedChatStatus({
     return { kind: 'online', text: 'Online', showDots: false };
 }
 
-// The reducer's counted inputs: census activities not waiting on a model, and mounted unfinished
-// cards, where a managed root drives Working… and a direct turn keeps the census verdict (Thinking…);
-// a paused or pausing card (`task_phase_chip.syncParkedPhase`) is not working.
+// Count census activity and unfinished cards; parked/waiting rows retain their own state.
 export function chatStatusCounts(activities, records, isWaiting = () => false) {
     const counts = { activeDirectCount: 0, activeManagedCount: 0, queuedManagedCount: 0, pausingManagedCount: 0,
         pausedManagedCount: 0, unknownActivityCount: 0, hasActiveLiveCard: false, waitingModelCount: 0,
         projectWaitLabel: '', waitingOwnerCount: 0, pausedCause: '' };
-    const pauseCauses = new Set();
+    const pauseCauses = new Set(), calls = new Map();
     for (const [id, entry] of activities) {
         // A Project verification hold is a static wait: never queued or working,
         // while its pause/pausing/unknown census phase still counts as itself.
@@ -1133,7 +1126,7 @@ export function chatStatusCounts(activities, records, isWaiting = () => false) {
         if (projectHold) counts.projectWaitLabel = projectHold;
         else if (isWaiting(id)) continue;
         const waitPhase = activityWaitPhase(entry);
-        if (entry?.phase === 'unknown') counts.unknownActivityCount += 1;
+        if (entry?._activityUnconfirmed || entry?.phase === 'unknown') counts.unknownActivityCount += 1;
         else if (entry?.phase === 'budget_pausing') counts.pausingManagedCount += 1;
         else if (entry?.phase === 'budget_paused') { counts.pausedManagedCount += 1; pauseCauses.add(entry.pause_cause || ''); }
         else if (waitPhase === 'unknown') counts.unknownActivityCount += 1;
@@ -1142,6 +1135,10 @@ export function chatStatusCounts(activities, records, isWaiting = () => false) {
         else if (String(entry?.kind || '') !== 'managed_task') counts.activeDirectCount += 1;
         else if (String(entry?.phase || '') === 'queued') counts.queuedManagedCount += 1;
         else counts.activeManagedCount += 1;
+        if (!entry?._activityUnconfirmed && ['preparing', 'thinking', 'working'].includes(entry?.phase)
+            && !waitPhase && !projectHold) calls.set(id, modelActivityPresentation(
+                entry.phase === 'preparing' ? { phase: 'preparing' } : entry.model_activity)
+                || (entry.kind !== 'managed_task' ? taskActivityPresentation({ phase: entry.phase }) : null));
     }
     if (pauseCauses.size === 1) counts.pausedCause = [...pauseCauses][0];
     for (const record of records) {
@@ -1151,9 +1148,14 @@ export function chatStatusCounts(activities, records, isWaiting = () => false) {
             continue;
         }
         if (activities.get(record.groupId)?.project_admission_hold) continue;
+        if (record.cancelPendingPolicy && calls.has(record.groupId)) calls.set(record.groupId,
+            taskActivityPresentation({ phase: 'working', stopPolicy: record.cancelPendingPolicy }));
         if (record.modelWaiting) counts.waitingModelCount += 1;
         else if (!record.direct && !record.parkedPhase) counts.hasActiveLiveCard = true;
     }
+    const views = [...calls.values()];
+    if (views.length && views.length === counts.activeDirectCount + counts.activeManagedCount
+        && views.every(view => view && view.text === views[0]?.text)) counts.modelActivity = views[0];
     return counts;
 }
 
@@ -1212,8 +1214,8 @@ export function buildMessageKey(role, text, timestamp, opts = {}) {
 }
 
 export function reconnectBannerText(reason = '') {
-    if (reason === 'sha-change') return '♻️ Restart complete';
-    if (reason) return '♻️ Reconnected';
+    if (reason === 'sha-change') return 'Restart complete';
+    if (reason) return 'Reconnected';
     return '';
 }
 
@@ -1310,8 +1312,8 @@ export function routingAnnotationText(annotation) {
  * authority follows from that — on a
  * `complete` snapshot every id the census does not list is gone, whatever its
  * kind, with no wall-clock barrier and no generation marker. An incomplete
- * snapshot (supervisor not ready, or a source failed) is a partial listing and
- * deletes nothing.
+ * snapshot retains omitted rows as unconfirmed; only its positive rows can
+ * affirm current activity.
  *
  * `concludedIds` (Set/Map with .has) is the client-side conclusion ledger: a
  * turn already concluded by its keyed final must never be re-inserted by a
@@ -1319,7 +1321,8 @@ export function routingAnnotationText(annotation) {
  * never restart, so conclusion is final).
  */
 export function computeHydratedDirectActivities(existingMap, turnsList, chatId, concludedIds = null, complete = true) {
-    const nextMap = new Map(existingMap || []);
+    const nextMap = new Map(Array.from(existingMap || [], ([id, row]) => [id,
+        complete ? row : { ...row, _activityUnconfirmed: true }]));
     if (!Array.isArray(turnsList)) return nextMap;
     const listed = new Set();
     for (const turn of turnsList) {
@@ -1328,14 +1331,10 @@ export function computeHydratedDirectActivities(existingMap, turnsList, chatId, 
         if (!aid || (concludedIds && concludedIds.has(aid))) continue;
         listed.add(aid);
         nextMap.set(aid, {
+            ...turn, _activityUnconfirmed: false,
             activityId: aid,
             kind: turn.kind || 'direct_chat',
             phase: turn.phase || 'thinking',
-            ...(turn.pause_cause ? { pause_cause: turn.pause_cause } : {}),
-            ...(turn.required_question ? { required_question: turn.required_question } : {}),
-            ...(turn.owner_wait ? { owner_wait: turn.owner_wait } : {}),
-            ...(turn.required_question_unavailable ? { required_question_unavailable: true } : {}),
-            ...(turn.project_admission_hold ? { project_admission_hold: turn.project_admission_hold } : {}),
             clientMessageId: turn.client_message_id || nextMap.get(aid)?.clientMessageId || '',
         });
     }
@@ -1540,7 +1539,7 @@ export function costMetaKeys(src) {
 const CARD_META_KEYS = [
     ...COST_META_KEYS, 'executor_route', 'execution_evidence', 'actual_substrate',
     'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'cancel_origin',
-    'delegated_activity', 'outcome_axes', 'task_completion',
+    'delegated_activity', 'outcome_axes', 'task_completion', 'effort_level', 'effort_requested', 'effort_source',
 ];
 export function cardMetaKeys(src) {
     return Object.fromEntries(CARD_META_KEYS.map((key) => [key, src?.[key]]));
@@ -1556,6 +1555,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     // because only the flex gap separated them.
     const html = joinMetaParts([
         executorIdentityMarkup(record.executorChip, { agentModel: compactModel(agentModel) }),
+        effortChipMarkup(record.effort),
         ...[
             record.initiator === 'consciousness' ? 'Consciousness' : '',
             record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),

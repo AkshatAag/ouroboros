@@ -365,6 +365,13 @@ CURRENT_PRODUCER_CONTRACTS = {
     # Owner Batch4: a call the owner's Pause fenced before its launch handoff never
     # ran; it is the substrate's answer, homed with the other runtime refusals.
     "OWNER_PAUSE_NOT_STARTED": (True, "blocked"),
+    # git_managed_postcommit: a managed merge whose post-commit gates Pause refused, and a
+    # retained commit whose binding changed before Resume. Both publish typed results; the
+    # bare texts carry no marker the adapter types, as for CANDIDATE_ALREADY_BOUND above.
+    "OWNER_PAUSE": (False, "ok"),
+    "native:LEGACY_BLOCKED:OWNER_PAUSE": (True, "blocked"),
+    "MANAGED_UPDATE_POSTCOMMIT_CHANGED": (False, "ok"),
+    "native:LEGACY_TOOL_ERROR:MANAGED_UPDATE_POSTCOMMIT_CHANGED": (True, "error"),
     "OWNER_LAUNCH_AUTHORITY_UNAVAILABLE": (True, "unavailable"),
     "STOP_ACTION_CONFLICT": (True, "blocked"),
     "SAFETY_ADVICE": (False, "ok"),
@@ -386,6 +393,9 @@ CURRENT_PRODUCER_CONTRACTS = {
     # applied or rejected alone; nothing changes. Its peers' answer, asserted live.
     "INTEGRATE_DELEGATED_CONTINUATION_PENDING": (True, "integration_blocked"),
     "INTEGRATE_DELEGATED_SUPERSEDED": (True, "integration_blocked"),
+    # An evidence-only investigation's capture is never integrated (#1609): its
+    # refusal changes nothing and is its peers' answer, asserted live.
+    "INTEGRATE_DELEGATED_INVESTIGATION_EVIDENCE": (True, "integration_blocked"),
     # A reject request cannot undo direct effects already in the folder.
     # The refusal belongs to this disposition, not to the earlier write.
     "INTEGRATE_DIRECTORY_ALREADY_APPLIED": (True, "integration_blocked"),
@@ -438,6 +448,16 @@ CURRENT_PRODUCER_CONTRACTS = {
     # voice (delegated, Presence, agent-to-agent) through native ACCESS_BLOCKED.
     "MAIN_NOTICE_BLOCKED": (True, "blocked"),
     "native:ACCESS_BLOCKED:MAIN_NOTICE_BLOCKED": (True, "blocked"),
+    # #1074: an admitted, absent path is a discovery miss — a successful call with
+    # a warning, the list_files/read_file parity. search_code's miss is a new
+    # identifier; the image loader now publishes the already-recorded
+    # FILE_NOT_FOUND text natively as LEGACY_WARNING (the plain answer is unchanged).
+    "SEARCH_NOT_FOUND": (False, "ok"),
+    "FILE_NOT_FOUND": (False, "ok"),
+    "native:LEGACY_WARNING:FILE_NOT_FOUND": (False, "ok"),
+    # Owner decision (PR #1636): an exact edit that leaves .py/.json unparsable is
+    # applied and reported, never refused; the warning is a successful call.
+    "SYNTAX_WARNING": (False, "ok"),
 }
 
 
@@ -471,6 +491,14 @@ def test_output_capture_warning_preserves_the_successful_write(tool):
     case = Case("current:capture-suffix:" + tool, "OUTPUT_CAPTURE_FAILED", tool, text)
     assert _live_answer(case) == (False, "ok")
     assert _live_answer(case._replace(text=warning)) == CURRENT_PRODUCER_CONTRACTS["OUTPUT_CAPTURE_FAILED"]
+
+
+@pytest.mark.parametrize("tool", ["edit_text", "apply_patch", "edit_batch"])
+def test_syntax_warning_suffix_keeps_the_applied_edit_successful(tool):
+    """edit_ops.edit_syntax_note trails an edit that already landed."""
+    text = (f"✅ {tool} applied 1 edit(s) across 1 file(s):\n"
+            "⚠️ SYNTAX_WARNING: content is not valid JSON in a.json; the edit WAS applied.")
+    assert _live_answer(Case("current:syntax-suffix:" + tool, "SYNTAX_WARNING", tool, text)) == (False, "ok")
 
 
 def test_single_classifier_matches_the_retired_pair_except_approved_deltas() -> None:
@@ -727,14 +755,13 @@ _RESIDUAL_TEXT_INSPECTIONS: Mapping[str, tuple[int, str]] = MappingProxyType({
     # The row is gone rather than zeroed: a module absent from this inventory may
     # hold none at all, which is exactly the claim now.
     "ouroboros/memory.py": (1, "tools.jsonl rows appended by consciousness carry neither status nor code"),
-    "ouroboros/skill_review_prompt.py": (2, "skill review verdict text, not a tool result"),
     "ouroboros/tools/github.py": (12, "private helper-failure checks between two functions of one tool"),
     # Upstream re-homed the skill-publish helper checks into their own module
-    # (skill_publish_github.py) and split the advisory run into
-    # preflight_review_run.py on this tree — redistribution, not growth.
+    # (skill_publish_github.py) — redistribution, not growth. The advisory
+    # pipeline's seven (claude_advisory_review.py, preflight_review_run.py) and
+    # the skill advisory critic's two (skill_review_prompt.py) left with that
+    # pipeline; their rows are gone rather than zeroed.
     "ouroboros/skill_publish_github.py": (7, "private helper-failure checks between two functions of one tool"),
-    "ouroboros/tools/claude_advisory_review.py": (4, "private helper-failure checks between two functions of one tool"),
-    "ouroboros/tools/preflight_review_run.py": (3, "private helper-failure checks between two functions of one tool"),
     # Post-cutoff upstream module: the request-wire custom-tool receipts compose
     # their own ⚠️ argument-error texts; predates the organ, upstream truth.
     "ouroboros/openai_chat_dispatch.py": (2, "private helper-failure checks between two functions of one tool"),

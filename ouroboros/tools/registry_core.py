@@ -44,7 +44,6 @@ from ouroboros.tool_capabilities import (
 )
 from ouroboros.tool_access import (
     active_tool_profile,
-    canonical_repo_relative_path,
     decide_tool_access,
     light_cognitive_or_root_redirect,
     shell_cwd_block_message,
@@ -310,9 +309,10 @@ class ToolRegistry:
         self._handler_overrides: Dict[str, Callable] = {}
 
     _FROZEN_TOOL_MODULES = [
-        "browser", "claude_advisory_review", "compact_context", "control",
+        "browser", "compact_context", "control",
         "core", "delegate", "edit_ops", "evolution_stats", "followup", "git", "git_pr", "git_rollback", "github",
-        "health", "join_ledger", "knowledge", "media", "memory_tools", "plan_review", "project_journal", "presence",
+        "health", "join_ledger", "knowledge", "media", "memory_tools", "plan_review", "preflight_review",
+        "project_journal", "presence",
         "recent_tasks",
         "query_code", "review", "review_change", "search", "services", "shell", "skill_exec", "skill_publish",
         "skill_preflight", "subagent_integration", "task_tree", "tool_discovery", "verify", "vision",
@@ -1188,6 +1188,8 @@ class ToolRegistry:
             _route_note = path_normalization.text
             if path_normalization.required_root == "active_workspace":
                 return ToolResult(status="blocked", code="ROOT_REQUIRED_ACTIVE_WORKSPACE", text=_route_note, meta={"required_root": "active_workspace"})
+            if path_normalization.required_root == "mixed":
+                return ToolResult(status="error", code="TOOL_ARG_ERROR", text=_route_note)
             from ouroboros import body_candidate
 
             if (candidate_refusal := body_candidate.authoring_seam(self._ctx, name, args)) is not None:
@@ -1316,22 +1318,10 @@ class ToolRegistry:
                     "Switch to advanced/pro only for reviewed Ouroboros self-modification."
                 ),
             )
-        protected_write_paths = []
         if name in tool_resolution._ROOT_ARG_REPO_WRITE_TOOLS:
-            root_name = str(args.get("root", "") or "active_workspace")
-            protected_write_paths = [
-                canonical_repo_relative_path(self._ctx, root_name, p)
-                for p in tool_resolution._payload_write_paths(name, args)
-            ]
-            if resolved_binding is not None:
-                protected_target = targets_system_repo
-            else:
-                protected_target = (not workspace_mode or acting_system_worktree) and (
-                    root_name in {"active_workspace", "system_repo"}
-                )
-            protected_matches = (
-                protected_paths_in(protected_write_paths) if protected_target else []
-            )
+            protected_matches = protected_paths_in(tool_resolution.protected_repo_write_paths(
+                self._ctx, name, args, resolved_binding,
+                workspace_mode=workspace_mode, acting_system_worktree=acting_system_worktree))
             allow_protected = registry_guards._authorized_managed_update_resolver(self._ctx) or (
                 mode_allows_protected_write(_runtime_mode)
                 and (acting_protected_grant or not acting_subagent

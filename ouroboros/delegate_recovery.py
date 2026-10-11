@@ -8,6 +8,7 @@ import logging
 import os
 import pathlib
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict
 from typing import Any, Mapping, Optional
 
@@ -103,7 +104,7 @@ def _active_restart_transaction_path(drive_root: Any) -> pathlib.Path:
 
 
 def arm_active_planned_restart_transaction(drive_root: Any) -> str:
-    """Pass a prepared restart transaction to a direct re-exec successor.
+    """Pass a prepared restart transaction to a direct exec/spawn successor.
 
     Launcher-managed exits acknowledge the same durable transaction by waiting
     for exit code 42.  A direct server re-exec has no launcher, so it carries
@@ -179,27 +180,65 @@ def acknowledge_observed_restart_exit(
     return True
 
 
+@contextmanager
+def direct_restart_transaction(drive_root: Any, transaction_id: str):
+    """Serialize spawn publication with the child's first read of this exact handoff."""
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    if not transaction_id:
+        yield {}
+        return
+    path = _restart_transaction_path(drive_root, transaction_id).with_suffix(".lock")
+    fd = acquire_exclusive_file_lock(path, timeout_sec=5.0, owner_aware_stale=True)
+    try:
+        active = _read_restart_transaction(drive_root, "active")
+        row = _read_restart_transaction(drive_root, transaction_id)
+        valid = (fd is not None and row.get("status") == "prepared" and not row.get("returns_restored_at")
+                 and row.get("expected_exit_code") == 42
+                 and all(active.get(key) == row.get(key) for key in
+                         ("transaction_id", "supervisor_pid", "prepared_at"))
+                 and row.get("transaction_id") == transaction_id)
+        yield row if valid else {}
+    finally:
+        release_exclusive_file_lock(path, fd)
+
+
+def direct_spawn_successor_matches(row: Mapping[str, Any]) -> bool:
+    """Only the measured child of this successful supervised spawn may acknowledge it."""
+    from ouroboros.process_custody import _fingerprint_matches
+
+    entry = row.get("direct_spawn_successor")
+    return bool(isinstance(entry, dict) and entry.get("pid") == os.getpid()
+                and entry.get("purpose") == "server_restart_fallback" and entry.get("scope") == "daemon"
+                and _fingerprint_matches(entry, require_measured=True))
+
+
 def _ack_direct_exec_successor(drive_root: Any) -> None:
-    """A same-PID successor carrying the one-shot token proves exec succeeded."""
+    """A one-shot token plus same-PID exec or the exact custodied spawn proves transfer."""
 
     transaction_id = str(os.environ.pop(PLANNED_RESTART_TRANSACTION_ENV, "") or "")
     if not transaction_id:
         return
-    row = _read_restart_transaction(drive_root, transaction_id)
-    if (
-        row.get("status") != "prepared"
-        or int(row.get("supervisor_pid") or 0) != os.getpid()
-    ):
-        return
-    row.update({
-        "status": "normal_exit_acknowledged", "exit_code": 42,
-        "exit_acknowledged_at": utc_now_iso(), "ack_source": "direct_exec_successor",
-    })
-    _write_restart_transaction(drive_root, row)
+    with direct_restart_transaction(drive_root, transaction_id) as row:
+        if not row:
+            return
+        if "direct_spawn_successor" in row:
+            if not direct_spawn_successor_matches(row):
+                return
+            ack_source = "direct_spawn_successor"
+        elif int(row.get("supervisor_pid") or 0) == os.getpid():
+            ack_source = "direct_exec_successor"
+        else:
+            return
+        row.update({
+            "status": "normal_exit_acknowledged", "exit_code": 42,
+            "exit_acknowledged_at": utc_now_iso(), "ack_source": ack_source,
+        })
+        _write_restart_transaction(drive_root, row)
     custody.emit(drive_root, "delegate_restart_transaction_acknowledged", {
         "restart_transaction_id": transaction_id,
-        "supervisor_pid": os.getpid(), "exit_code": 42,
-        "task_ids": list(row.get("task_ids") or []), "ack_source": "direct_exec_successor",
+        "supervisor_pid": row["supervisor_pid"], "exit_code": 42,
+        "task_ids": list(row.get("task_ids") or []), "ack_source": ack_source,
     })
 
 
@@ -216,8 +255,9 @@ def unsettled_start_ids(
 
     A review run is the review substrate's obligation, not the actor's
     delegation slot, so it never blocks the actor's own start; nor does the
-    undisposed patch of the run a start is ``continuing``. A readonly continuation
-    leaves that patch waiting for its own disposition; it is not a fresh replacement.
+    undisposed candidate patch of the run a start is ``continuing``. Evidence-only
+    captures owe no apply debt. A readonly continuation leaves a candidate patch
+    waiting for its own disposition; it is not a fresh replacement.
     """
 
     mine = str(task_id or "")
@@ -237,6 +277,7 @@ def unsettled_start_ids(
         "undisposed_patch_run_ids": [
             row.run_id for row in runs.values()
             if row.task_id == mine and row.snapshot_id and row.settled
+            and custody.candidate_apply_possible(row)
             and not row.patch_disposed and not row.review_owned and row.run_id != continuing
         ],
     }

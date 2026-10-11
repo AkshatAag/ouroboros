@@ -69,7 +69,7 @@ def test_final_answer_marker_uses_ordinary_message_presentation():
 
     assert "renderAssistantWithAnswerChip" not in source
     assert "final-answer-chip" not in css
-    assert ": renderChatMarkdown(text);" in source
+    assert ": renderChatMarkdown(painted);" in source
     # Both live and history assistant/system paths feed the same addMessage renderer;
     # reconnect notices do too, so marker-shaped text never gets a separate capsule.
     assert "addMessage(msg.content, msg.role" in source
@@ -449,7 +449,7 @@ def test_owner_restart_cleanup_disables_second_custody_reconcile(monkeypatch):
             restart.set() if restarting else restart.clear()
             calls.clear()
             server._emergency_process_cleanup(port_sweep=False)
-            expected = {"force": True, "archive_service_logs": False}
+            expected = {"force": True, "archive_service_logs": False, "retain_saved_work": True}  # #1563
             if owner_requested:
                 expected["reconcile_delegate_custody"] = False
             if restarting:

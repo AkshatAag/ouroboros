@@ -1,4 +1,15 @@
-"""Dispatch worker EVENT_Q messages to supervisor handlers."""
+"""Dispatch worker EVENT_Q messages to supervisor handlers.
+
+Dispatch is by ``EVENT_HANDLERS``. An event type with no registered handler is
+not an error: the row is truncated and logged as ``unknown_worker_event``, so a
+new worker event needs its handler registered here first;
+``tests/test_worker_event_registry.py`` pins the registry by an AST scan of the
+emitter call sites.
+
+``_compose_subagent_text`` (re-exported from ``events_subagent_admission``)
+writes the subagent task text frozen into the queued task at schedule time; its
+``[WRITE SURFACE]`` block states where changes land, not how they are executed.
+"""
 
 from __future__ import annotations
 
@@ -109,7 +120,7 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
     round_id = str(evt.get("round_id") or "")
     if (
         not task_id
-        or phase not in {"started", "finished", "failed"}
+        or phase not in {"started", "observed", "finished", "failed"}
         or not llm_call_id
         or not execution_id
         or not round_id
@@ -124,12 +135,20 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
         return
     running = getattr(ctx, "RUNNING", None)
     meta = running.get(task_id) if isinstance(running, dict) else None
+    direct = None
     if not isinstance(meta, dict):
-        return
-    expected_attempt = meta.get("attempt")
-    if expected_attempt is None:
+        from supervisor.active_activity import get_direct_activity_registry
+
+        direct = get_direct_activity_registry().get(task_id)
+        context = getattr(getattr(getattr(direct, "actor", None), "tools", None), "_ctx", None)
+        owner = getattr(context, "model_wait_context", None)
+        if owner is None or owner.closed or owner.task_id != task_id:
+            return
+        expected_attempt, active = owner.attempt, direct.active_llm_call
+    else:
         task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
-        expected_attempt = task.get("_attempt")
+        expected_attempt = meta.get("attempt") if meta.get("attempt") is not None else task.get("_attempt")
+        active = meta.get("active_llm_call")
     try:
         if int(expected_attempt) != task_attempt:
             return
@@ -143,12 +162,23 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
         "call_attempt": call_attempt,
     }
     if phase == "started":
-        meta["active_llm_call"] = {**identity, "started_at": time.time()}
+        updated = {**identity, "started_at": time.time()}
+    elif not isinstance(active, dict) or any(active.get(key) != value for key, value in identity.items()):
         return
-    active = meta.get("active_llm_call")
-    if not isinstance(active, dict) or any(active.get(key) != value for key, value in identity.items()):
-        return
-    meta.pop("active_llm_call", None)
+    elif phase == "observed":
+        activity = evt.get("model_activity")
+        if not isinstance(activity, dict):
+            return
+        updated = {**active, "model_activity": {**activity, **identity}}
+    else:
+        updated = None
+    if direct is not None:
+        direct.active_llm_call = updated
+        direct.phase = "working"  # starting a call proves no provider reasoning
+    elif updated is not None:
+        meta["active_llm_call"] = updated
+    else:
+        meta.pop("active_llm_call", None)
 
 
 # v7next F1 (D08): moved spans live in their owner leaves; re-exported here

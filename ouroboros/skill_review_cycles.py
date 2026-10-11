@@ -113,13 +113,16 @@ def skill_review_contract_fingerprint(
     # API/global-effort panel. Structured identity and explicit session routes
     # use the canonical per-row contract, sorted by stable owner slot id so a
     # reorder alone does not lapse replay.
-    from ouroboros.config import resolve_effort
+    from ouroboros.config import REVIEW_POOL_DEFAULT_EFFORT
 
     identity: Dict[str, Any]
     if not delivery or delivery.get("legacy_skill_fingerprint"):
+        # The lane-era panel ran every slot at the (retired) global review effort;
+        # its only remaining value is the pool default, so unchanged legacy bytes
+        # keep their fingerprint.
         identity = {
             "models": [str(model) for model in (models or [])],
-            "effort": str(resolve_effort("review") or ""),
+            "effort": REVIEW_POOL_DEFAULT_EFFORT,
         }
     else:
         rows = [
@@ -137,16 +140,22 @@ def skill_review_contract_fingerprint(
                 delivery.get("session_profiles") or [], delivery.get("slot_ids") or [],
             )
         ]
-        # Actor binding is delivery identity (native retrieval vs packet);
-        # added only when present so unchanged rosters keep their exact bytes.
+        # The catalog binding is row identity/provenance; added only when
+        # present so unchanged rosters keep their exact bytes.
         actor_ids = [str(a or "") for a in (delivery.get("subagent_ids") or [])]
         if any(actor_ids):
             for row, actor in zip(rows, actor_ids):
                 row["subagent_id"] = actor
-        # A direct api row saved as native delivery (#1334): same identity rule.
+        # Delivery identity is the aligned ``retrieves`` vector ALONE (F8): an
+        # api row that reads natively is a different contract from the packet
+        # row of the same model, whatever id it carries.
         for row, flag in zip(rows, delivery.get("retrieves") or []):
-            if flag and row["route"] == "api_chat" and not row.get("subagent_id"):
+            if flag and row["route"] == "api_chat":
                 row["delivery"] = "native"
+        # A session seat's writable technical access (#1609) changes what it can check.
+        for row, access in zip(rows, delivery.get("session_accesses") or []):
+            if str(access or "readonly") != "readonly":
+                row["access"] = str(access)
         identity = {"reviewer_rows": sorted(rows, key=lambda row: row["slot_id"])}
         if any(row["route"] == "agent_session" for row in rows):
             from ouroboros.skill_review_passes import skill_review_session_contract_hash
@@ -596,7 +605,11 @@ def install_skill_dispatch_stamp(
 
     def _write() -> None:
         if resume:
-            raise RuntimeError("Late Skill Review reconciliation cannot dispatch another panel")
+            # A reconcile-only collection reaches a physical boundary only to replay
+            # one exact pending invocation under its own key; that send was paid for
+            # and marked by the wave it resumes, so no second marker is written. A
+            # raise here would settle an unknown invocation as a finished error.
+            return
         write_dispatch_marker(
             drive_root,
             skill_name,
@@ -610,9 +623,20 @@ def install_skill_dispatch_stamp(
 
     stamp = ReviewPaidStamp(_write, fail_closed=bool(resume))
     stamp.wave_id = wave_id
+    # The resumed wave's stamp still fires at that replay's boundary; ``resumed``
+    # keeps its outcome from carrying a second paid fact for the same wave.
+    stamp.resumed = bool(resume)
     previous = getattr(ctx, "_review_paid_stamp", None)
     ctx._review_paid_stamp = stamp
     return stamp, previous
+
+
+def skill_wave_purchased(stamp: Any) -> bool:
+    """This wave bought its own dispatch. A resumed collection's exact pending
+    replay also fires its stamp, but the wave it resumes already paid and
+    counted that send (one wave = ONE cycle)."""
+    return bool(stamp is not None and getattr(stamp, "fired", False)
+                and not getattr(stamp, "resumed", False))
 
 
 def skill_review_wave_binding(ctx, skill, drive_root, content_hash, contract_fp, rebuttal_sha, file_packs):
@@ -641,7 +665,7 @@ def select_skill_review_resume(ctx, skill, drive_root, binding):
     ctx._skill_review_resume = None
     ctx._skill_review_wave_binding = binding
     job_id = str(getattr(ctx, "_skill_review_lifecycle_job_id", "") or "")
-    if not job_id or not binding["review_contract_fingerprint"]:
+    if not job_id:
         return False
     from ouroboros.skill_review_runner import review_job_state_path
     from ouroboros.utils import update_json_locked
@@ -651,9 +675,16 @@ def select_skill_review_resume(ctx, skill, drive_root, binding):
         return False
     previous = rows[-1]
     wave = previous.get("review_wave")
+    recorded = wave.get("binding") if isinstance(wave, dict) else None
+    # Today's roster and prompt contract govern a new panel. Collection owns
+    # the recorded contract instead; every other material/lifecycle axis must
+    # still match, and each physical request is verified before it is read.
+    same_material = isinstance(recorded, dict) and bool(recorded.get("review_contract_fingerprint")) and (
+        {k: v for k, v in recorded.items() if k != "review_contract_fingerprint"}
+        == {k: v for k, v in binding.items() if k != "review_contract_fingerprint"})
     if (previous.get("job_status") == "cancelled"
             or previous.get("status") not in {"pending", "timeout", "failed", "interrupted"}
-            or not isinstance(wave, dict) or wave.get("binding") != binding
+            or not same_material
             or not wave.get("wave_id") or not wave.get("chunks")
             or not (previous.get("paid") or previous.get("review_resume_of") == wave["wave_id"])):
         return False
@@ -667,6 +698,7 @@ def select_skill_review_resume(ctx, skill, drive_root, binding):
                                  strict_existing_dict=True)
     if current.get("job_id") == job_id and current.get("review_resume_of") == wave["wave_id"]:
         ctx._skill_review_resume = wave
+        ctx._skill_review_wave_binding = recorded
         return True
     return False
 

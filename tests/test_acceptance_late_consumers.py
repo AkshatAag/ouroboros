@@ -10,7 +10,7 @@ import pytest
 from ouroboros.agent_task_pipeline import _store_task_result
 from ouroboros.headless import copy_child_task_result
 from ouroboros.task_results import load_task_result, write_task_result
-from ouroboros.reviewer_slot_config import REVIEWER_SLOTS_ENV
+from tests.review_pool_rosters import pool_roster, pool_seat
 from supervisor import events_chat_delivery as chat
 from supervisor.terminal_delivery import delivery_id_for, register_pending_delivery
 from tests.test_acceptance_history import _fixture, _caller, _source, _request
@@ -20,10 +20,11 @@ from tests._usage_store_testing import ledger_rows
 
 
 @pytest.fixture
-def late(tmp_path, monkeypatch, fresh_sends):
-    # The model transport is synthetic; its budget quote must be offline too.
-    # Cold live catalogue I/O otherwise races the panel's 10s test wait. This
-    # synthetic tariff preserves real budget admission, reservation and settlement.
+def late(tmp_path, monkeypatch, fresh_sends, provider_catalog_offline):
+    # The model transport is synthetic; its budget quote and the reviewer
+    # window's catalogue metadata must be offline too. Cold live catalogue I/O
+    # otherwise races the panel's 10s test wait. This synthetic tariff preserves
+    # real budget admission, reservation and settlement.
     from ouroboros import pricing
     for name in ("_cached_pricing", "_pricing_fetched_at", "_pricing_retry_after"):
         monkeypatch.setattr(pricing, name, {})
@@ -32,9 +33,8 @@ def late(tmp_path, monkeypatch, fresh_sends):
                         {"openai/gpt-4.1-nano": (1.0, 1.0, 1.0, 1.0)}
                         if provider == "openrouter" and not model else {})
     monkeypatch.setenv('OUROBOROS_TASK_REVIEW_MODE', 'auto')
-    monkeypatch.setenv(REVIEWER_SLOTS_ENV, json.dumps({'triad': [
-        {'slot_id': str(i), 'route': {'kind': 'api_chat', 'target_id': 'openai/gpt-4.1-nano'}} for i in range(3)],
-        'scope': [{'slot_id': 'unused-scope', 'route': {'kind': 'api_chat', 'target_id': 'openai/gpt-4.1-nano'}}]}))
+    # The acceptance pool: three packet seats '0', '1', '2' on the synthetic tariff's model.
+    monkeypatch.setenv('OUROBOROS_SUBAGENTS', pool_roster(*(pool_seat(str(i), 'openai/gpt-4.1-nano') for i in range(3))))
     calls, gates = [], []
     config = SimpleNamespace(fail=False, verdict='PASS', slot_gates={}, slot_verdicts={})
 
@@ -139,6 +139,45 @@ def test_explicit_owner_runs_full_panel_on_delivered_root_and_retry(late, tmp_pa
     assert len(notices) == 1 and notices[0]['chat_id'] == 7
     again = _request(f, ctx, _source(ctx, text='Review this delivered historical answer.'))
     assert again['reason'] == 'existing_paid_operation' and len(late.calls) == 3
+
+
+def test_a_cold_reviewer_catalog_never_leaves_the_late_fixture(late, tmp_path, monkeypatch):
+    """The real explicit panel reaches the reviewer-window catalogue seam with a
+    cold catalogue and no cached response limit, yet sends no catalogue request."""
+    import requests
+    from ouroboros import capability_evidence
+    from ouroboros.llm import LLMClient
+
+    for name, cold in (("_SUPPORTED_PARAMS_CACHE", {}), ("_SUPPORTED_PARAMS_FETCHED", False),
+                       ("_CONTEXT_LENGTH_CACHE", {}), ("_CAPABILITIES_FETCH_OK", False)):
+        monkeypatch.setattr(LLMClient, name, cold)
+    # The window and response-limit evidence store is worker-wide (an earlier test
+    # may have filled it); this test reads and writes its own empty one.
+    monkeypatch.setattr(capability_evidence, "_store_path",
+                        lambda _root: tmp_path / "cold-evidence" / "capability_evidence.json")
+    seam, egress = [], []
+    installed = LLMClient._fetch_openrouter_capabilities  # whatever answers the seam now: the fixture's
+
+    def counted(cls):
+        seam.append(cls)
+        return installed()
+
+    def tripwire(url, *_args, **_kwargs):
+        egress.append(str(url))
+        raise requests.ConnectionError("this test is offline")
+
+    monkeypatch.setattr(LLMClient, "_fetch_openrouter_capabilities", classmethod(counted))
+    monkeypatch.setattr(requests, "get", tripwire)
+    f = delivered(tmp_path, monkeypatch)
+    ctx = _caller(f)
+    ctx.event_queue = queue.Queue()
+    result = _request(f, ctx, _source(ctx, text='Review this delivered historical answer.'))
+    assert result['status'] in {'pending', 'announced', 'published', 'settled'}, result
+    until(lambda: next((p for p in (load_task_result(f.root, f.tid).get('review_projection') or {}).get('panels', [])
+                        if p.get('late_settlement')), None))
+    assert len(late.calls) == 3
+    assert seam, "the real panel must reach the catalogue seam for this regression to mean anything"
+    assert not [url for url in egress if "/api/v1/models" in url], egress
 
 
 @pytest.mark.parametrize('first_callback', ['quorum', 'complete'])
@@ -497,6 +536,8 @@ def test_immediate_complete_and_failed_publication_retry_keep_one_supplement(lat
     f = delivered(tmp_path, monkeypatch, retry=True)
     ctx = _caller(f)
     ctx.event_queue = queue.Queue()
+    # Cold recovery has no caller context; use the same local event transport.
+    monkeypatch.setattr("supervisor.workers.get_event_q", lambda: ctx.event_queue)
     original_run = review_substrate.run_review_request
     def synchronous(request, **kwargs):
         request.drain_deadline = time.monotonic() + 5

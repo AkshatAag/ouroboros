@@ -65,16 +65,58 @@ def retained_task_roots(canonical: pathlib.Path, task_id: str) -> list[pathlib.P
 
 
 def read_retained_task_source(root, task_id, ref):
-    """Resolve the task's retained bytes through the same identity verifier."""
+    """Resolve retained execution or retry-predecessor bytes with the same verifier."""
     from ouroboros.artifacts import read_actor_source_bytes
-    from ouroboros.task_results import validate_task_id
+    from ouroboros.artifacts import task_artifact_dir_path
 
-    for child in retained_task_roots(pathlib.Path(root), validate_task_id(task_id)):
-        try:
-            return read_actor_source_bytes(child, task_id, ref)
-        except FileNotFoundError:
-            continue
+    for source_root, owner in _source_locations(root, task_id):
+        path = task_artifact_dir_path(source_root, owner, create=False) / ref["path"]
+        if path.exists() or path.is_symlink():
+            return read_actor_source_bytes(source_root, owner, ref)
     raise FileNotFoundError(f"actor source unavailable: {ref['path']}")
+
+
+def _source_locations(root, task_id):
+    """Own sources first, then the reaper's exact, reciprocal retry links; no scan/copy."""
+    from ouroboros.task_results import load_task_result, validate_task_id
+
+    root, owner, seen = pathlib.Path(root), validate_task_id(task_id), set()
+    start = load_task_result(root, owner, strict=True) or {}
+    canonical = pathlib.Path(start.get("budget_drive_root") or root)
+    while owner not in seen:
+        seen.add(owner)
+        if root != canonical:
+            yield root, owner
+        yield canonical, owner
+        yield from ((child, owner) for child in retained_task_roots(canonical, owner))
+        row = load_task_result(canonical, owner, strict=True) or {}
+        predecessor = row.get("timeout_retry_from")
+        if not predecessor or row.get("original_task_id") != predecessor:
+            return
+        predecessor = validate_task_id(predecessor)
+        previous = load_task_result(canonical, predecessor, strict=True) or {}
+        if previous.get("retry_task_id") != owner:
+            return
+        owner = predecessor
+
+
+def retained_actor_source_read_target(root, task_id, relative):
+    """Placement alias for an advertised immutable source read, not write authority."""
+    import re
+    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+
+    rel = pathlib.PurePosixPath(relative)
+    match = re.fullmatch(r".+-([0-9a-f]{64})\.[A-Za-z0-9]+", rel.name)
+    if len(rel.parts) != 3 or rel.parts[0] != "source_handles" or not match:
+        return None
+    for source_root, owner in _source_locations(root, task_id):
+        path = task_artifact_dir_path(source_root, owner, create=False) / relative
+        if path.exists() or path.is_symlink():
+            ref = {"kind": "task_source", "root": "artifact_store", "path": relative,
+                   "size": path.stat().st_size, "sha256": match[1]}
+            read_actor_source_bytes(source_root, owner, ref)
+            return path.resolve(strict=True)
+    return None
 
 
 def manifest_version_ref(root: pathlib.Path, digest: str) -> dict:
@@ -276,8 +318,12 @@ class RetentionWalk:
             self.queue.append(node)
         if self.current_node is not None:
             self.current_node["dependencies"].add(node["key"])
-        if self.discovering:
-            return dict(ref)  # Captured JSON is NEVER a placement projection.
+        if self.discovering or kind == "source":
+            # Captured JSON is NEVER a placement projection, and a task_source carrier
+            # keeps its own reference: one node per file reads, verifies and copies the
+            # bytes, a failure stays a promotion fact, and no carrier receives another
+            # carrier's shape or a placeholder.
+            return dict(ref)
         return dict(node.get("result", ref))
 
     def _read_source(self, node):
@@ -290,8 +336,8 @@ class RetentionWalk:
         for root in dict.fromkeys((self.parent, self.child)):
             try:
                 if kind == "source":
-                    if not obs._task_source_contract_valid(ref):
-                        raise ValueError("invalid actor source read contract")
+                    # The byte reader owns identity (kind, root, placement, size, sha256);
+                    # a carrier's ``read`` is presentation for the model, never checked here.
                     return artifacts.read_actor_source_bytes(root, task, ref), root
                 if kind == "manifest":
                     manifest = obs.read_call_manifest_ref(root, ref, task_id=task)

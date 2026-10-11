@@ -8,7 +8,9 @@ happens next: the per-slot progress line and the ONE system frame the last
 settlement writes into the task's mailbox (the mind wakes exactly as it does
 for a child result — ``wait_task``/``wait_tasks`` return on
 ``owner_mailbox_pending``), and the $0 collection that closes or advances the
-recorded wave through the existing ``review_disposition`` mode. Closing and
+recorded wave through the existing ``review_disposition`` mode. A collection uses drain window 0 (settled slots
+are reconciled, nothing is re-sent or awaited), and a new envelope collects
+every other custody-pending wave before it supersedes anything. Closing and
 aggregating a wave stays with the collecting call (the sole wave writer);
 Historical settlement attaches exact source references through the same wave
 owner; it never reaggregates or changes the current plan.
@@ -47,16 +49,21 @@ def announce_released_settlement(
             log.warning("plan review historical settlement could not be attached", exc_info=True)
     if not settled_wave or usage_ctx is None or not getattr(usage_ctx, "drive_root", None):
         return
+    from ouroboros.review_custody import RELEASED_UNRESOLVED
     ok = sum(1 for status in settled_wave.values() if status in {"ok", "empty"})
+    unresolved = sum(1 for status in settled_wave.values() if status == RELEASED_UNRESOLVED)
+    settled = len(settled_wave) - unresolved
     from ouroboros.owner_mailbox import write_task_message
 
     try:
         write_task_message(
             pathlib.Path(str(usage_ctx.drive_root)),
-            f"Plan review wave {fingerprint[:8] or '?'}: {len(settled_wave)} of "
+            f"Plan review wave {fingerprint[:8] or '?'}: {settled} of "
             f"{max(int(roster_size or 0), len(settled_wave))} reviewer slot(s) settled "
-            f"({ok} ok, {len(settled_wave) - ok} failed); not yet collected "
-            f"(review_fingerprint {fingerprint}).",
+            f"({ok} ok, {settled - ok} failed)"
+            + (f"; {unresolved} unresolved — the reviewer's outcome is not known yet, which is "
+               "neither a failure nor a verdict" if unresolved else "")
+            + f"; not yet collected (review_fingerprint {fingerprint}).",
             task_id, source_task_id=task_id, provenance="system",
         )
     except Exception:

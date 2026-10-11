@@ -65,7 +65,9 @@ def test_keyed_terminal_api_error_is_replayed_while_sibling_is_late(tmp_path):
     assert late_started.wait(1.0)
     assert getattr(ctx, "_review_settled_attempts", {})
     second = run_custodied_review_slots(**args)
-    assert calls == ["fast", "late"]
+    # Both slots run on independent workers; custody guarantees one call each,
+    # not which worker the scheduler enters first.
+    assert sorted(calls) == ["fast", "late"]
     assert {actor.slot_id: actor.operation_state for actor in second} == {
         "fast": "settled", "late": "in_flight",
     }
@@ -528,7 +530,7 @@ def test_pre_dispatch_capture_state_remains_retryable_for_same_cycle(
     assert not getattr(ctx, "_review_settled_attempts", {})
 
 
-def test_late_pre_dispatch_capture_state_remains_retryable_for_same_cycle(tmp_path):
+def test_late_pre_dispatch_capture_state_remains_retryable_for_same_cycle(tmp_path, monkeypatch):
     """A late worker release must not become a sticky replay row either."""
     import threading
     import time
@@ -549,6 +551,15 @@ def test_late_pre_dispatch_capture_state_remains_retryable_for_same_cycle(tmp_pa
     release_late = threading.Event()
     late_finished = threading.Event()
     ctx = SimpleNamespace()
+    clock_start = time.monotonic()
+
+    def logical_now(_slot):
+        # Expire the first attempt only once its worker is blocked. Keep the
+        # retry inside its own unchanged 10ms logical window: wall-clock worker
+        # startup/publication latency is not the retryability contract here.
+        return clock_start + (1.0 if late_started.is_set() else 0.0)
+
+    monkeypatch.setattr("ouroboros.review_custody.monotonic_now", logical_now)
     request = ReviewRequest(
         surface="plan_review", goal="review", task_id="late-retryable-release",
         retry_key="plan_review:late-retryable-release:1",

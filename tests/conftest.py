@@ -5,6 +5,7 @@
 # runtime cleanup) live in ``tests/_shared.py`` instead.
 import asyncio
 import functools
+import json
 import os
 import pathlib
 import shutil
@@ -79,6 +80,58 @@ if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
 import pytest
 pytest.register_assert_rewrite("tests.ui_media_delivery_smoke")
 pytest_plugins = ["tests.browser_lane", "tests.ci_evidence"]
+
+
+# Provider-catalog class state and its snapshot/restore live in tests/_shared.py,
+# so a spawned child reuses them without importing this module's isolation boundary.
+from tests._shared import (  # noqa: E402
+    _PROVIDER_CATALOG_PRISTINE, _provider_catalog_snapshot, _restore_provider_catalog, offline_provider_catalog,
+)
+
+
+def _provider_catalog_class():
+    """The real ``LLMClient``, found from the capability mixin that owns the catalog state.
+
+    Not ``ouroboros.llm.LLMClient`` read blindly: a test may monkeypatch that name with a
+    stand-in (a function, a fake class), and its patch can still be in force when the
+    autouse teardown below runs.
+    """
+    module = sys.modules.get("ouroboros.llm_capability_policy")
+    mixin = getattr(module, "_CapabilityPolicyMixin", None)
+    if mixin is None:
+        return None
+    current = getattr(sys.modules.get("ouroboros.llm"), "LLMClient", None)
+    if isinstance(current, type) and current.__module__ == "ouroboros.llm" and issubclass(current, mixin):
+        return current
+    real = [cls for cls in mixin.__subclasses__()
+            if cls.__name__ == "LLMClient" and cls.__module__ == "ouroboros.llm"]
+    return real[-1] if real else None
+
+
+@pytest.fixture(autouse=True)
+def _provider_catalog_state_returns():
+    """Hand `LLMClient`'s provider-catalog class state back as the test found it.
+
+    A class not yet imported when the test started is found pristine; a test
+    that imports it and fetches gives the empty caches back.
+    """
+    cls = _provider_catalog_class()
+    saved = _provider_catalog_snapshot(cls) if cls is not None else None
+    yield
+    cls = _provider_catalog_class()
+    if cls is not None:
+        _restore_provider_catalog(cls, saved if saved is not None else _PROVIDER_CATALOG_PRISTINE)
+
+
+@pytest.fixture
+def provider_catalog_offline(monkeypatch):
+    """Keep the window probe local: no live catalog fetch for this test.
+
+    Yields the state as found, keyed by `LLMClient` attribute name, so a test can
+    pin that a preparation leaves exactly these caches untouched.
+    """
+    with offline_provider_catalog(monkeypatch) as saved:
+        yield saved
 
 
 @pytest.fixture
@@ -694,6 +747,45 @@ def _restore_gateway_settings_bindings_between_tests():
             if value is None:
                 continue
             setattr(_gateway_settings, name, value)
+
+
+def shared_settings_document_left_behind(root: pathlib.Path | None) -> list[str] | None:
+    """The keys of a ``settings.json`` a test left at the worker-shared pytest data root,
+    or ``None`` when nothing was left (or there is no bound root). The file is REMOVED so the
+    victims stay green; the caller names the leaker. Plain function so the contract is
+    testable without pytest plumbing."""
+    if root is None:
+        return None
+    path = root / "settings.json"
+    if not path.exists():
+        return None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        keys = sorted(document) if isinstance(document, dict) else ["<not a JSON object>"]
+    except (OSError, ValueError):
+        keys = ["<unreadable>"]
+    path.unlink()
+    return keys
+
+
+@pytest.fixture(autouse=True)
+def _no_settings_document_left_at_the_shared_root():
+    """``config.SETTINGS_PATH`` is bound ONCE per xdist worker (``_bind_pytest_runtime_roots``)
+    and nothing resets the file between tests, so a test that persists a document there hands
+    its settings to every later test of that worker — a document without a subagent catalog
+    reads, since the read seam mints the factory reviewer rows for it, as a disk catalog that
+    shadowed the victims' ``OUROBOROS_SUBAGENTS`` (five ``delegate_start`` refusals in
+    tests/test_delegated_skill_payload.py after ``test_extensions_api.py``'s settings POST,
+    whose ``server.save_settings`` patch never covered the gateway's owner writer). Name the
+    leaker, not the victim: the test that left the file fails, and the file is removed."""
+    yield
+    keys = shared_settings_document_left_behind(_PYTEST_DATA_DIR)
+    if keys is not None:
+        pytest.fail(
+            "this test left a settings document at the worker-shared pytest data root "
+            f"({_PYTEST_DATA_DIR / 'settings.json'}; keys: {', '.join(keys)}); point "
+            "ouroboros.config.SETTINGS_PATH at the test's own tree (monkeypatch) or patch the writer it reaches"
+        )
 
 
 @pytest.fixture(autouse=True)

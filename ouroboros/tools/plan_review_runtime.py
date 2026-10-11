@@ -41,16 +41,17 @@ from ouroboros.tools.plan_review_artifacts import (  # noqa: E402, F401 - compat
     read_wave as read_plan_review_wave_artifact,
 )
 # The one caller-facing strength axis of a review panel: the envelope's order for THIS
-# plan outranks each row's pinned effort (a compound Cursor/Agy route slug keeps its
-# encoded effort: the route's identity); the owner's setting is the default, Ouroboros
-# may order stronger or weaker, and every wave records the effective per-seat effort.
+# plan decides every Auto reviewer row, clamped into the owner's effort range; a pinned row
+# keeps its pin outside Cyber Pro and a level in a model name always stays; every wave
+# records the effective per-seat effort (``reviewer_slot_config.row_effort``).
 REVIEWER_EFFORT_SCHEMA = {
     "type": "string", "enum": list(EFFORT_SCALE),
     "description": (
-        "Optional reviewer-panel strength for THIS plan: it outranks each reviewer row's own "
-        "effort setting (a Cursor/Agy compound route slug keeps its encoded effort); omitted = "
-        "the owner's settings. The verdict names a panel ordered weaker than the owner's "
-        "setting. On an OPEN review a different strength re-dispatches a paid panel within "
+        "Optional reviewer-panel strength for THIS plan, applied to Auto reviewer rows and "
+        "clamped into my human's effort range (a pinned row keeps its pin outside Cyber Pro; a "
+        "level in a model name always stays); omitted = the owner's settings (Auto rows review at "
+        "the range's top). The verdict names a panel ordered weaker than the owner's setting. "
+        "On an OPEN review a different strength re-dispatches a paid panel within "
         "OUROBOROS_REVIEW_MAX_CYCLES; the same strength replays free; a CLOSED review stands "
         "for its envelope."
     ),
@@ -110,8 +111,9 @@ def _architecture_navigation(system_root: pathlib.Path, architecture_text: str) 
 
 def _session_task_text(system_prompt: str, user_content: str, session_root: str) -> str:
     return (
-        "RETRIEVING REVIEWER (agent session): you run read-only inside "
-        f"{session_root or 'the active workspace'}. The evidence below is the host's REDACTED "
+        "RETRIEVING REVIEWER (agent session): you review "
+        f"{session_root or 'the active workspace'} (read-only, or in a private checking copy of it "
+        "when your seat holds write access). The evidence below is the host's REDACTED "
         "snapshot — the same bytes every reviewer sees — so do NOT re-read the raw evidence "
         "locators (a session reading originals would leak what the api route redacts, 4e133c8a); "
         "the ONE exception is the governance pack — BIBLE.md and docs/ARCHITECTURE.md are public "
@@ -127,7 +129,7 @@ def _session_task_text(system_prompt: str, user_content: str, session_root: str)
 def build_plan_review_packet(
     ctx: ToolContext, *, spec: dict, request: Any, manifest: dict, constitutional: bool,
     system_root: pathlib.Path, active_root: pathlib.Path, cycle_index: int,
-    enforcement: str, previous: Optional[dict],
+    enforcement: str, previous: Optional[dict], state: Optional[dict] = None,
 ) -> tuple[str, str, str]:
     """Build the api packet and route-owned retrieving-session task."""
     from ouroboros.context_layout import generate_doc_nav_map
@@ -136,6 +138,7 @@ def build_plan_review_packet(
         build_plan_review_system_prompt, build_plan_review_user_content,
     )
     from ouroboros.tools.review_helpers import load_checklist_section
+    from ouroboros.tools.plan_review_artifacts import plan_review_dispute_history
 
     try:
         checklist = load_checklist_section("Plan Review Checklist")
@@ -170,8 +173,15 @@ def build_plan_review_packet(
         )
 
     system_prompt = system(False)
-    prior = ([{"cycle_index": previous.get("cycle_index"), "aggregate": previous.get("aggregate"),
-               "findings": list(previous.get("findings") or [])}] if previous else [])
+    history = plan_review_dispute_history(
+        getattr(ctx, "budget_drive_root", None) or ctx.drive_root, str(ctx.task_id),
+        state if state is not None else {"waves": [previous] if previous else []},
+    )
+    from ouroboros.review_history_view import selected_review_history
+
+    history = selected_review_history(history,
+        drive_root=getattr(ctx, "budget_drive_root", None) or ctx.drive_root, task_id=str(ctx.task_id),
+        operative_subject={"spec": spec, "plan_prose": request.plan})["history"]
     delta = (
         {"unavailable": "previous frozen spec body truncated to fit the durable state; hashes name the original"}
         if previous and previous.get("spec_body_truncated")
@@ -179,10 +189,10 @@ def build_plan_review_packet(
     )
     user_content = build_plan_review_user_content(
         manifest=manifest, objective=_task_objective(ctx), goal=spec["goal"],
-        plan_prose=request.plan, spec=spec, prior_cycles=prior,
+        plan_prose=request.plan, spec=spec, prior_cycles=history["rounds"],
         dispositions=list((previous or {}).get("dispositions") or []), spec_delta=delta,
         root_exploration_log=root_exploration_log(ctx),
-        **_packet_kwargs(build_plan_review_user_content, cycle_index=cycle_index),
+        **_packet_kwargs(build_plan_review_user_content, cycle_index=cycle_index, dispute_history=history),
     )
     return system_prompt, user_content, _session_task_text(system(True), user_content, str(active_root))
 
@@ -201,6 +211,9 @@ def publish_plan_review_projection(
         raise ValueError("plan review closed state must be boolean")
     if (aggregate == "GREEN" and not closed) or (aggregate in {"REVISE_PLAN", "DEGRADED"} and closed):
         raise ValueError(f"invalid plan review control state: outcome={aggregate}, closed={closed}")
+    from ouroboros.review_history_view import queue_review_history_context
+
+    queue_review_history_context(ctx, family="plan")
     return _publish_tool_result(
         ctx,
         ToolResult(
@@ -340,17 +353,17 @@ def record_raw_plan_request_attempt(
 
 
 def plan_review_slots(default_effort: str = "") -> list:
-    """The configured commit-triad rows as plan-review ``ReviewSlot`` objects:
-    the shared ``triad_delivery_slots`` builder (one reader of the triad rows
-    for plan, skill and acceptance review) with plan review's own slot
-    properties — timeout, output budget, temperature — and the envelope's
-    ``reviewer_effort`` as the ORDER for this plan: it outranks each row's own
-    pinned effort, a compound route slug keeps its encoded effort, and ``''``
-    leaves every row at its own effort or the owner's review-effort setting,
-    exactly like the commit triad. The order is an ARGUMENT of this builder
-    only, never a contextvar: the commit gate, scope, acceptance and skill
-    review keep reading the untouched rows. Both delivery kinds ride; slot ids
-    are the rows' own.
+    """The review pool's rows as plan-review ``ReviewSlot`` objects: the shared
+    ``triad_delivery_slots`` builder (one reader of the pool for plan, skill
+    and acceptance review) with plan review's own slot properties — timeout,
+    output budget, temperature — and the envelope's ``reviewer_effort`` as the
+    ORDER for this plan under ``row_effort``'s rule: it decides every Auto row,
+    clamped into the owner's effort range, a pinned row keeps its pin outside
+    Cyber Pro, a level in a model name always stays, and ``''`` leaves every row
+    at its own level, else the range's top, exactly like the commit gate. The
+    order is an ARGUMENT of this builder only, never a contextvar: the commit
+    gate, scope, acceptance and skill review keep reading the untouched rows.
+    Both delivery kinds ride; slot ids are the rows' own.
     """
     from ouroboros.reviewer_slot_config import triad_delivery_slots
 
@@ -638,7 +651,7 @@ def synthesize_plan_review_wave(
         sid = str(row.get("slot_id") or "")
         slot = slots_by_id.get(sid)
         if reviewer_effort and slot is not None and not str(getattr(slot, "declared_effort", "") or ""):
-            disclosures.append("reviewer_effort_not_applied")  # a compound route slug kept its encoded effort
+            disclosures.append("reviewer_effort_not_applied")  # a model-named level or an owner pin kept its level
         if ok:
             parsed, parse_error = plan_spec.parse_findings(str(row.get("text") or ""))
             if parse_error:
@@ -1097,7 +1110,6 @@ def plan_panel_health_snapshot(slots: list) -> Optional[Dict[str, Dict[str, str]
 
     if not owned_daemon_provisioned():
         return None
-    shape = delegated_run_shape(False)  # a reviewer reads and answers
     evidence: Dict[str, Dict[str, str]] = {}
     by_route: Dict[tuple, tuple[str, str]] = {}
     gateway = None
@@ -1115,7 +1127,10 @@ def plan_panel_health_snapshot(slots: list) -> Optional[Dict[str, Dict[str, str]
             # share one verdict (a spent pin would otherwise be vouched for by a
             # sibling's health, or vice versa).
             pin = str(getattr(route, "profile_id", "") or "")
-            key = (route.route_id, route.model, pin)
+            # Rights are part of the subject too: a route may serve read-only seats
+            # and refuse a writable one (its access profile or the delegated marker).
+            shape = delegated_run_shape(False, str(getattr(slot, "session_access", "") or "readonly"))
+            key = (route.route_id, route.model, pin, shape.access)
             if key not in by_route:
                 by_route[key] = route_health(gateway, route.route_id, shape,
                                              route_model=route.model,
@@ -1201,7 +1216,9 @@ def plan_reviewer_config_fingerprint(slots: list) -> str:
          str(getattr(getattr(s, "route", None), "value", "") or ""),
          str(getattr(s, "session_target", "") or ""),
          str(getattr(s, "session_profile", "") or ""),
-         str(getattr(s, "effort", "") or "")]
+         str(getattr(s, "effort", "") or ""),
+         # Rights are identity; a read-only (or legacy) seat keeps its exact bytes.
+         *([str(s.session_access)] if str(getattr(s, "session_access", "") or "readonly") != "readonly" else [])]
         for s in slots or []
     ]
     # Actor binding is delivery identity; column added only when some row
@@ -1297,13 +1314,13 @@ def plan_wave_slot_census(wave: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     wave's own records). The ONE reader every plan renderer asks before it words a slot:
     an answer that has not arrived is a gap, never a failure and never a verdict.
 
-    ``awaiting`` = a pending row released at the barrier (``review_slot_awaiting``), a
-    planned wait; ``unresolved`` = every other pending row (window expired, custody
-    lost) — exceptional, never worded as waiting; ``uncollected`` = reads pending but a
-    settled supplement of this cycle holds its terminal state; ``skipped`` = a typed $0
-    ``not_dispatched`` refusal; ``answered`` = ok; ``failed`` = every other row.
-    Pending custody outranks ``ok`` so an inconsistent row stays fail-closed. A roster
-    that is not a list classifies nothing: the custody ingress owns that anomaly."""
+    ``awaiting`` = ``operation_state=pending_dispatch`` (``review_slot_awaiting``);
+    ``unresolved`` = other pending rows (``in_flight``/``custody_lost``;
+    ``late_result_pending`` is true for both, only ``operation_state`` splits them);
+    ``uncollected`` = pending but a settled supplement holds its state; ``skipped`` = a typed
+    $0 ``not_dispatched`` refusal; ``answered`` = ok; ``failed`` = the rest. Pending custody
+    outranks ``ok`` so an inconsistent row stays fail-closed. A roster that is not a list
+    classifies nothing: the custody ingress owns that anomaly."""
     from ouroboros.review_records import review_slot_awaiting
 
     census: Dict[str, Any] = {name: [] for name in (
@@ -1468,7 +1485,9 @@ def plan_slot_fit(slots: list, *, prompt_chars: int, quorum: int, slot_prompt_ch
             "slots (" + ", ".join(f"{slot.slot_id}:{slot.model}<={int(limits[slot.slot_id]):,}" for slot in api_slots)
             + "), so fewer than the review quorum remain callable and NO reviewer was called. "
             "A constitutional plan carries BIBLE.md and ARCHITECTURE.md in full (W3): configure "
-            "reviewer slots with a larger context window, or shrink the declared evidence."
+            "reviewer slots with a larger context window, or shrink the declared evidence. "
+            "If earlier review history is the excess, compact_context can retain your own source-bound working_note "
+            "before you submit this plan again; the current spec and decision index remain full."
         )
     return callable_slots, oversize, error
 

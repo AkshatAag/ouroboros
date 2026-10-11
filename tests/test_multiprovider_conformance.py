@@ -353,7 +353,8 @@ def test_model_operation_host_control_cancels_without_fabricating_result_or_rele
     assert "returned" not in observed
     assert observed["raised"]["code"] == "model_operation_interrupted"
     assert observed["raised"]["control_reason"] == "cancelled"
-    assert (observed["physical_attempts"][0]["state"], observed["physical_attempts"][0]["transitions"]) == ("unresolved", 3)
+    # Failure evidence adds one row revision, not another physical dispatch.
+    assert (observed["physical_attempts"][0]["state"], observed["physical_attempts"][0]["transitions"]) == ("unresolved", 4)
     assert len(observed["sends"]) == 1
     assert observed["model_control"]["create_posts"] == observed["model_control"]["operations"] == 1
     assert observed["model_control"]["cancels"] == [["op-0", "host_cancelled"]]
@@ -517,7 +518,9 @@ def test_harness_point_refusal_without_a_route_is_typed(tmp_path, monkeypatch):
 
 
 def test_harness_point_launch_produces_a_run_identity_and_route_facts(tmp_path, monkeypatch):
-    request, payload = _started_request(tmp_path, acting=False, monkeypatch=monkeypatch)
+    # The harness point launch of a read-only child (#1609: technical access alone
+    # decides the run shape, so the read-only row is selected explicitly).
+    request, payload = _started_request(tmp_path, acting=False, monkeypatch=monkeypatch, access="readonly")
     assert payload["status"] == "started" and payload.get("run_id")
     assert request is not None
     wire = json.dumps(request)
