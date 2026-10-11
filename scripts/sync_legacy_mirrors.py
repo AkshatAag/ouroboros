@@ -174,8 +174,8 @@ class GitHub:
                 limited = exc.code == 429 or (exc.code == 403 and "rate limit" in message.lower())
                 if not (exc.code >= 500 or limited) or attempt == attempts:
                     return exc.code, {"message": message}
-                if limited:  # secondary limits name their own wait
-                    time.sleep(min(60, int(exc.headers.get("Retry-After") or 30)))
+                if limited:  # wait as long as GitHub asks, a minute when it does not say
+                    time.sleep(min(300, int(exc.headers.get("Retry-After") or 60)))
                     continue
             except (urllib.error.URLError, http.client.HTTPException, OSError):
                 if attempt == attempts:
@@ -190,13 +190,13 @@ class GitHub:
         return data
 
     def releases(self, repo: str) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
+        out: dict[int, dict[str, Any]] = {}  # pages can repeat an item; one entry per release
         for page in range(1, 100):
             batch = self.must("GET", f"/repos/{repo}/releases?per_page=30&page={page}")
             if not batch:
-                return out
-            out.extend(batch)
-        return out
+                break
+            out.update((release["id"], release) for release in batch)
+        return list(out.values())
 
 
 def git(*args: str, env: dict[str, str] | None = None, stdin: str | None = None) -> str:
@@ -305,8 +305,10 @@ def published_stable_problem(gh: GitHub, source: str, version: str) -> str:
     if tagged != source:
         return f"{tag} is {tagged[:10]}"
     status, release = gh.call("GET", f"/repos/razzant/ouroboros/releases/tags/{tag}")
-    if status != 200:
-        return f"no GitHub release {tag} (HTTP {status})"
+    if status == 404:
+        return f"no GitHub release {tag}"
+    if status != 200:  # a failed check is an error, never a quiet "nothing to refresh"
+        raise RuntimeError(f"release {tag} lookup -> HTTP {status}: {release.get('message', '')}")
     if release.get("draft") or release.get("prerelease"):
         return f"release {tag} is a draft or a prerelease"
     return ""
@@ -342,7 +344,11 @@ def main(argv: list[str] | None = None) -> int:
         return archive_all(gh, [m for m in MIRRORS if not args.only or m.repo in args.only])
     source = git("rev-parse", f"{args.source_ref}^{{commit}}")
     version = git("show", f"{source}:VERSION").strip()
-    reason = published_stable_problem(gh, source, version)
+    try:
+        reason = published_stable_problem(gh, source, version)
+    except RuntimeError as exc:
+        print(f"cannot confirm that {source[:10]} is a published stable release: {exc}", file=sys.stderr)
+        return 1
     if reason:
         print(f"{source[:10]} is not a published stable release ({reason}); nothing to refresh")
         return 0

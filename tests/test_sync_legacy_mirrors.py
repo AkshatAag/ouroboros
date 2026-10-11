@@ -86,7 +86,7 @@ def test_main_commit_keeps_both_histories_and_is_idempotent(tmp_path, monkeypatc
     assert "notebooks/quickstart.ipynb" not in _git(repo, "ls-tree", "-r", "--name-only", desktop)
 
 
-def _fake_github(monkeypatch, release):
+def _fake_github(monkeypatch, release, *, lookup_status=None):
     calls = []
 
     def call(self, method, path, body=None):
@@ -94,6 +94,8 @@ def _fake_github(monkeypatch, release):
         if path == "/user":
             return 200, {"login": "ouroboros-agent"}
         if path.startswith("/repos/razzant/ouroboros/releases/tags/"):
+            if lookup_status:
+                return lookup_status, {"message": "Service Unavailable"}
             return (200, release) if release is not None else (404, {"message": "Not Found"})
         if method == "GET":
             return 200, {"archived": False}
@@ -130,6 +132,13 @@ def test_a_prerelease_changes_nothing(tmp_path, monkeypatch):
     head = _tagged_repo(tmp_path, monkeypatch, tag="v7.7.0")
     calls = _fake_github(monkeypatch, release={"draft": False, "prerelease": True})
     assert mirrors.main(["--source-ref", head]) == 0
+    assert _mutations(calls) == []
+
+
+def test_a_failed_release_check_is_an_error_not_a_quiet_skip(tmp_path, monkeypatch):
+    head = _tagged_repo(tmp_path, monkeypatch, tag="v7.7.0")
+    calls = _fake_github(monkeypatch, release=None, lookup_status=503)
+    assert mirrors.main(["--source-ref", head]) == 1
     assert _mutations(calls) == []
 
 

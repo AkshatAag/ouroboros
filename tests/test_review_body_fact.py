@@ -132,6 +132,17 @@ def test_a_former_official_home_in_the_manifest_resolves_like_the_updater(system
     assert _fact(mirror, system, manifest={"managed_remote_url": legacy}).body == "false"
 
 
+@pytest.mark.parametrize("legacy", ["https://github.com/joi-lab/ouroboros.git",
+                                    "https://github.com/joi-lab/ouroboros-desktop"])
+def test_an_install_cloned_from_a_former_home_still_recognizes_its_own_origin(tmp_path, legacy):
+    """The former-home mapping applies to the managed source only: a source
+    install whose origin is the old joi-lab address keeps its clones as the body."""
+    system = _repo(tmp_path / "legacy-system", remote=legacy)
+    clone = _repo(tmp_path / "legacy-clone", remote=legacy)
+    fact = _fact(clone, system, manifest={})
+    assert (fact.body, fact.how) == ("true", "install_fork")
+
+
 def test_a_remote_at_the_installs_own_origin_is_the_body_as_install_fork(system, tmp_path):
     root = _repo(tmp_path / "fork-clone", remote="https://github.com/someone/ouroboros-fork")
 

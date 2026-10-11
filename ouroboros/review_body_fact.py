@@ -216,8 +216,10 @@ def _git_fact(root: Path, body: _BodyIdentity, depth: int, seen: set) -> BodyFac
             (foreign if sub.body == BODY_FALSE else undecided).append(
                 f"remote {name} → {target}: {sub.body} ({sub.detail})")
             continue
-        normalized = normalize_remote_url(follow_former_official_home(url))
-        if normalized and normalized == body.managed_url:
+        normalized = normalize_remote_url(url)
+        # Only the managed source follows a former official home; the install's origin keeps its own URL.
+        mapped = normalize_remote_url(follow_former_official_home(url))
+        if mapped and mapped == body.managed_url:
             return BodyFact(BODY_TRUE, "managed_remote",
                             f"remote {name} {url} is the install's configured managed_remote_url")
         if normalized and normalized == body.origin_url:
