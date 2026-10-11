@@ -1090,9 +1090,15 @@ def _run_startup_task_recovery(
     if skip_live_data:
         return report
     from ouroboros.platform_layer import pid_is_alive
-    from ouroboros.store_boot import wait_ready
+    from ouroboros.store import StoreMigrating
+    from ouroboros.store_boot import require_published
 
-    wait_ready(drive_root)  # the store is published before any recovery write (P1)
+    try:
+        require_published(drive_root)  # the store is published before any recovery write (P1)
+    except StoreMigrating as exc:
+        report["errors"].append("store_not_published")
+        log.warning("Startup task recovery deferred: %s", exc)
+        return report
     if prior_worker_pids is None or any(pid_is_alive(pid) for pid in prior_worker_pids):
         report["errors"].append("prior_worker_ownership_unconfirmed")
         log.warning("Startup file/task recovery deferred: prior worker ownership is unconfirmed")

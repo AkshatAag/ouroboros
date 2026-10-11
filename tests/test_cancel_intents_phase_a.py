@@ -342,7 +342,7 @@ def test_boot_migrates_the_latch_before_any_quarantining_read():
     lifespan = inspect.getsource(server.lifespan)
     assert lifespan.index("store_boot.start") < lifespan.index("_run_startup_task_recovery")
     assert lifespan.index("store_boot.start") < lifespan.index("_start_supervisor_if_needed")
-    assert recovery.index("wait_ready(drive_root)") < recovery.index("_startup_live_task_ids")
+    assert recovery.index("require_published(drive_root)") < recovery.index("_startup_live_task_ids")
     assert "startup:current_store" in inspect.getsource(server._run_supervisor)
     assert "migrate_legacy_cancel_latches" not in inspect.getsource(server_maintenance._startup_custody_sweep)
 

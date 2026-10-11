@@ -274,18 +274,27 @@ _FIRST_TOUCH = threading.local()  # roots THIS thread is importing on first touc
 _SERVICE = threading.local()  # the import owner's thread: its own post-publication writes pass the window
 
 
+def begin_import(root: Any) -> None:
+    """Open the lifespan's import window for ROOT: every public write of that root answers
+    ``StoreMigrating`` and ``migrating`` is true until ``end_import`` (the boot door closes it
+    only after a successful publication; a failed import leaves it open for the process's life)."""
+    with _IMPORTING_GUARD:
+        _IMPORTING.add(str(pathlib.Path(root)))
+
+
+def end_import(root: Any) -> None:
+    with _IMPORTING_GUARD:
+        _IMPORTING.discard(str(pathlib.Path(root)))
+
+
 @contextlib.contextmanager
 def importing(root: Any) -> Iterator[None]:
-    """The lifespan's import window for ROOT: every other reader or writer of that root
-    answers ``StoreMigrating`` instead of importing on first touch."""
-    key = str(pathlib.Path(root))
-    with _IMPORTING_GUARD:
-        _IMPORTING.add(key)
+    """The import window for the extent of a block (tests and the first-touch import)."""
+    begin_import(root)
     try:
         yield
     finally:
-        with _IMPORTING_GUARD:
-            _IMPORTING.discard(key)
+        end_import(root)
 
 
 @contextlib.contextmanager
@@ -341,7 +350,9 @@ def migrating(root: Any) -> bool:
 
 def holds_facts(root: pathlib.Path) -> bool:
     """Whether ROOT holds facts the importer would read: result files or obligation set files."""
-    for directory in (root / "task_results", root / "state" / "obligations"):
+    from ouroboros.store_import import set_file_path, task_results_dir
+
+    for directory in (task_results_dir(root, create=False), set_file_path(root, "nonterminal").parent):
         try:
             with os.scandir(directory) as entries:
                 if any(entry.name.endswith(".json") for entry in entries):

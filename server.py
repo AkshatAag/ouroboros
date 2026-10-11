@@ -642,7 +642,7 @@ def _run_supervisor(settings: dict) -> None:
         _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "startup", new_tick=True), time.monotonic()
         _start_supervisor_liveness_watchdog(_loop_liveness, _watchdog_stop)
         run_startup_phase(_loop_liveness, "startup:usage_store", lambda: usage_store.migrate_from_journal(pathlib.Path(DATA_DIR)))
-        run_startup_phase(_loop_liveness, "startup:current_store", lambda: store_boot.wait_ready(DATA_DIR))  # published before any worker or recovery write
+        run_startup_phase(_loop_liveness, "startup:current_store", lambda: store_boot.require_published(DATA_DIR))  # published before any worker or recovery write
         from supervisor.state import control_is, load_state, save_state, update_state
         from supervisor.state import append_jsonl, update_budget_from_usage, rotate_chat_log_if_needed, rotate_jsonl_log_if_needed
         _initialize_runtime_state(settings, stop_requested=lambda stop=_watchdog_stop: any(e.is_set() for e in (stop, _supervisor_stop, _restart_requested, _exit_signalled)))

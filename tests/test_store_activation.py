@@ -19,6 +19,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros import store, store_boot, store_switch
+from ouroboros.store import StoreMigrating
 from ouroboros.store_import import ensure_current_store
 from ouroboros.task_results import write_task_result
 from tests.test_store_import import fixture_root
@@ -217,6 +218,7 @@ def test_boot_imports_off_the_ready_path_and_runs_the_waiting_steps_after_public
     restarts, steps = [], []
     outcome = store_boot.start(root, repo_dir=REPO, request_restart=lambda: restarts.append(1))
     assert outcome == {"status": "importing"}
+    assert store.migrating(root) is True  # the window opened before the thread: no idle gap for a door
     assert entered.wait(10)
     assert store.migrating(root) is True  # every write door answers typed while the owner runs
     store_boot.when_ready(root, lambda: steps.append("recovery"), lambda: steps.append("ready"))
@@ -229,8 +231,46 @@ def test_boot_imports_off_the_ready_path_and_runs_the_waiting_steps_after_public
         time.sleep(0.01)
     assert steps == ["recovery", "ready"]  # in order, on the import thread, after publication
     assert store.migrating(root) is False and store.store_ready(root) is True and restarts == []
+    assert store_boot.require_published(root)["status"] == "published"
     store_boot.when_ready(root, lambda: steps.append("late"))
     assert steps[-1] == "late"  # after publication a step runs at once
+
+
+def test_a_failed_boot_import_leaves_the_root_not_ready_and_no_request_re_imports(tmp_path, monkeypatch):
+    """Done is not published: a failed import keeps the window open for the life of the process —
+    the doors answer migrating, the reads 503, the waiting steps never run, the supervisor's
+    startup phase raises, and no later GET or write imports the facts the root holds."""
+    import ouroboros.startup_migrations as startup_migrations
+    from ouroboros.store_import import ensure_current_store
+
+    root = fixture_root(tmp_path)
+    monkeypatch.setattr(startup_migrations, "prepare_startup_state",
+                        lambda *a, **kw: (_ for _ in ()).throw(OSError(24, "EMFILE while folding")))
+    restarts, steps = [], []
+    assert store_boot.start(root, repo_dir=REPO, request_restart=lambda: restarts.append(1)) == {"status": "importing"}
+    store_boot.when_ready(root, lambda: steps.append("recovery"), lambda: steps.append("ready"))
+    outcome = store_boot.wait_ready(root, timeout=30)
+    assert outcome["status"] == "failed" and "EMFILE" in outcome["error"] and restarts == []
+    assert store.migrating(root) is True and store.store_ready(root) is False and store.probe(root)[0] == "absent"
+    with pytest.raises(StoreMigrating):
+        store_boot.require_published(root)
+    store_boot.when_ready(root, lambda: steps.append("late"))
+    assert steps == []  # dropped before and after done: readiness follows publication only
+    from ouroboros.gateway import tasks
+
+    app = Starlette(routes=[Route("/api/tasks", tasks.api_tasks_list, methods=["GET"]),
+                            Route("/api/tasks/{task_id}", tasks.api_task_get, methods=["GET"])])
+    app.state.drive_root, app.state.repo_dir = root, REPO
+    with TestClient(app) as client:
+        _migrating_body(client.get("/api/tasks"))
+        _migrating_body(client.get("/api/tasks/t1"))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(drive_root=root, repo_dir=REPO)))
+    _migrating_body(tasks._create_task_from_body(request, {"description": "hello"}))
+    with pytest.raises(StoreMigrating):
+        write_task_result(root, "t2", "running")
+    assert store.probe(root)[0] == "absent"  # nothing re-imported: the next boot retries
+    store.end_import(root)  # the next boot (here: the window released) imports what the root holds
+    assert ensure_current_store(root)["status"] == "completed" and store.store_ready(root) is True
 
 
 def test_boot_wait_ready_without_a_boot_answers_at_once(tmp_path):
@@ -249,21 +289,32 @@ def test_startup_recovery_waits_for_the_publication_before_its_first_write(tmp_p
     assert report["errors"] == ["startup_ownership_unconfirmed: RuntimeError"]
     assert server_maintenance._run_startup_task_recovery(tmp_path, REPO, skip_live_data=True)["errors"] == []
     assert order == [("wait", tmp_path), ("read", tmp_path)]  # the skipped live-data path waits on nothing
+    monkeypatch.setattr(store_boot, "wait_ready", lambda root, timeout=None: {"status": "failed", "error": "x"})
+    report = server_maintenance._run_startup_task_recovery(tmp_path, REPO, skip_live_data=False, prior_worker_pids=set())
+    assert report["errors"] == ["store_not_published"] and order[-1] == ("read", tmp_path)  # deferred: no read, no write
 
 
-def test_boot_with_a_pending_intent_switches_and_requests_the_restart_without_importing(tmp_path, monkeypatch, target_repo):
+def test_boot_with_a_pending_intent_switches_on_the_import_thread_and_keeps_the_window(tmp_path, monkeypatch, target_repo):
+    """The resume runs off the HTTP start path, under the switching gate: ``start`` returns at
+    once, the switch requests the restart, nothing is imported into the retired store and the
+    window stays open (the doors answer migrating until the switched tree's own boot)."""
     repo, old, new = target_repo
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
     root = fixture_root(tmp_path)
     ensure_current_store(root)
     store_switch.record_switch_intent(root, target_sha=old, target_ref="v-old", reason="test", door="ui_rollback")
-    owner, restarts = Owner(repo), []
-    outcome = store_boot.start(root, repo_dir=repo, request_restart=lambda: restarts.append(1), owner=owner)
-    assert outcome["status"] == "switched" and restarts == [1] and len(owner.calls) == 1
+    owner, restarts, steps = Owner(repo), [], []
+    assert store_boot.start(root, repo_dir=repo, request_restart=lambda: restarts.append(1), owner=owner) == {"status": "importing"}
+    store_boot.when_ready(root, lambda: steps.append("ready"))
+    outcome = store_boot.wait_ready(root, timeout=60)
+    assert outcome["status"] == "switched" and restarts == [1] and len(owner.calls) == 1 and steps == []
     assert git(repo, "rev-parse", "HEAD") == old
-    assert store_boot.wait_ready(root, timeout=0.01) == {"status": "not_started"}  # nothing imported into a retired store
     assert store_switch.read_switch_intent(root) is None
     assert store.probe(root)[0] == "absent"  # retired aside; the old body reads the exported files
+    assert store.migrating(root) is True  # the window is kept: no door writes into the retired store's root
+    with pytest.raises(StoreMigrating):
+        store_boot.require_published(root)
+    store.end_import(root)
 
 
 # ---- the seam at the restart exit -------------------------------------------------------------
@@ -352,8 +403,12 @@ def test_switch_doors_pass_restore_callback_and_restore_before_switch(tmp_path, 
 
     monkeypatch.setattr(store_switch, name, seam)
     monkeypatch.setattr(store_switch, "switching_owner", lambda *_: owner)
-    outcome = (store_boot.start(root, repo_dir=root, request_restart=lambda: None, owner=owner) if door == "boot"
-               else store_boot.switch_at_restart(root, root, _census()))
+    if door == "boot":
+        assert store_boot.start(root, repo_dir=root, request_restart=lambda: None, owner=owner) == {"status": "importing"}
+        outcome = store_boot.wait_ready(root, timeout=60)
+        store.end_import(root)
+    else:
+        outcome = store_boot.switch_at_restart(root, root, _census())
     assert outcome["status"] == "switched" and len(calls) == 1
 
 

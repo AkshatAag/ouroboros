@@ -41,7 +41,7 @@ def test_unreadable_import_leaves_boot_available_and_explicit_repair_fails(tmp_p
     monkeypatch.setattr(store_import, "_read_results", unreadable)
     assert migrations.prepare_startup_state(tmp_path, strict=False)["status"] == "unavailable"
     assert "strict=False" in inspect.getsource(store_boot._run)  # the boot door's import owner
-    with pytest.raises(o.ObligationsUnavailable):
+    with store.importing(tmp_path), pytest.raises(o.ObligationsUnavailable):  # the boot door keeps its window open
         o.members(tmp_path, "nonterminal")
     assert not store.generation_stamped(tmp_path) and not store.store_path(tmp_path).exists()
     rows = [json.loads(line) for line in (tmp_path / "logs/supervisor.jsonl").read_text(encoding="utf-8").splitlines()]
