@@ -1049,9 +1049,9 @@ def _make_outbound(api):
             if _child_row_held_for_root(api, event):
                 return
 
-            # Generic (non-subagent) progress telemetry → dropped by default; the
+            # Progress telemetry and a card's placed host rows → dropped by default; the
             # typing indicator already signals "working". Opt in via the toggle.
-            if event.get("is_progress") and not _mirror_progress_enabled(local_settings):
+            if (event.get("is_progress") or event.get("card_row")) and not _mirror_progress_enabled(local_settings):
                 return
 
             # Routing receipts are typed annotations (suppress_bubble, no text). A landed act stays silent except for a

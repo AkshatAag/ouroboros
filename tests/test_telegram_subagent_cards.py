@@ -68,6 +68,20 @@ def test_mirror_progress_off_gates_firehose(tmp_path, monkeypatch):
     assert not _Rec.sent and not _Rec.edited         # explicit opt-out drops it
 
 
+@pytest.mark.parametrize("mirror", ["off", "on"])
+def test_a_cards_placed_row_is_a_progress_note_here(tmp_path, monkeypatch, mirror):
+    """The web shows a card's host rows inside the task card; this transport has none, so a
+    root's own placed row (a late review settlement, a custody note) follows the owner's
+    progress toggle. A child's row still waits for its root, toggle or not."""
+    plugin, api = _setup(tmp_path, monkeypatch, TELEGRAM_MIRROR_PROGRESS=mirror)
+    handle = plugin._make_outbound(api)
+    row = {"text": "Reviewers rejected the answer after it was delivered.", "role": "system",
+           "system_type": "acceptance_late_settlement", "card_row": "reviews", "task_id": "root-1"}
+    asyncio.run(handle(row))
+    asyncio.run(handle({**row, "delegation_role": "subagent", "root_task_id": "root-live"}))
+    assert [sent[1] for sent in _Rec.sent] == ([row["text"]] if mirror == "on" else [])
+
+
 def test_real_reply_is_sent(tmp_path, monkeypatch):
     plugin, api = _setup(tmp_path, monkeypatch)
     handle = plugin._make_outbound(api)
