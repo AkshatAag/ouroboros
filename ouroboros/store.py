@@ -350,16 +350,9 @@ def migrating(root: Any) -> bool:
 
 def holds_facts(root: pathlib.Path) -> bool:
     """Whether ROOT holds facts the importer would read: result files or obligation set files."""
-    from ouroboros.store_import import set_file_path, task_results_dir
+    from ouroboros.store_import import holds_facts as _holds
 
-    for directory in (task_results_dir(root, create=False), set_file_path(root, "nonterminal").parent):
-        try:
-            with os.scandir(directory) as entries:
-                if any(entry.name.endswith(".json") for entry in entries):
-                    return True
-        except OSError:
-            continue
-    return False
+    return _holds(root)
 
 
 def _absent(root: pathlib.Path, *, write: bool, service: bool) -> bool:

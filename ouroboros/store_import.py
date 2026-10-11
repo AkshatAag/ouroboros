@@ -166,7 +166,8 @@ def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tup
                   "custody_runs": len(folded.get("runs", {}))}
     tmp = path.with_name(f"{path.name}.import-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     try:
-        _build(tmp, tier, root, records, sets, baseline, provenance, folded)
+        _build(tmp, tier, root, records, sets, baseline, provenance, folded,
+               sets_baseline=_sets_baseline(_read_sets(root)), chain_offset=folded.get("chain_offset", 0))
         os.replace(tmp, path)
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -207,10 +208,10 @@ def _custody_rows(root: pathlib.Path, records: List[Record]) -> Tuple[Dict[str, 
     try:
         if c.custody_chain_unreadable(root):
             raise OSError(errno.EIO, "custody chain exists but cannot be opened")
-        rows = tuple(c._iter_rows(chain, strict=True))
+        rows, offset = c.rows_after(chain, 0)
     except OSError as exc:
         raise _unreadable(exc, chain, "custody chain") from exc
-    folded = fold(rows)
+    folded = {**fold(rows), "chain_offset": offset}  # the boundary: what an old body appends later is P6' input
     owed = {task_id for task_id, document in records if document.get("delegated_runs_unreconciled")}
     receipts: Dict[str, Dict[str, Any]] = {}
     for rid, (facts, _hold) in folded["runs"].items():
@@ -346,8 +347,30 @@ def _pending_drive(root: pathlib.Path, task_id: str, document: Dict[str, Any]) -
     return False
 
 
+def holds_facts(root: pathlib.Path) -> bool:
+    """Whether ROOT holds facts the importer would read: result files or obligation set files."""
+    for directory in (task_results_dir(root, create=False), set_file_path(root, "nonterminal").parent):
+        try:
+            with os.scandir(directory) as entries:
+                if any(entry.name.endswith(".json") for entry in entries):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _sets_baseline(files: Dict[str, Dict[str, Dict[str, Any]]]) -> Dict[str, Dict[str, str]]:
+    """The owner-held rows of every set file as last seen, by content digest: what P6' compares a
+    re-read file against so that only the rows the old body added, changed or retired move."""
+    return {name: {identity: sha256_hex(machine_json(facts).encode("utf-8")) for identity, facts in held.items()}
+            for name, rows in files.items() for held in [o.owner_held_rows(name, rows)]}
+
+
 def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Record], sets: Dict[str, Any],
-           baseline: Dict[str, Any], provenance: Dict[str, Any], folded: Optional[Dict[str, Any]] = None) -> None:
+           baseline: Dict[str, Any], provenance: Dict[str, Any], folded: Optional[Dict[str, Any]] = None, *,
+           sets_baseline: Optional[Dict[str, Any]] = None, chain_offset: int = 0) -> None:
+    from ouroboros.delegate_custody_current import CHAIN_BOUNDARY
+
     conn = store.connect(tmp, tier, create=True)
     try:
         conn.execute("PRAGMA synchronous = FULL")
@@ -367,7 +390,7 @@ def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Recor
                     txn.put_row(f"custody_{name}", identity, facts)
         for key, value in (("schema_version", store.SCHEMA_VERSION), ("lock_tier", tier), ("generation", GENERATION),
                            ("phase", PUBLISHED), ("import", provenance), ("freeze_utc", utc_now_iso()),
-                           ("baseline", baseline)):
+                           ("baseline", baseline), ("sets_baseline", sets_baseline or {}), (CHAIN_BOUNDARY, chain_offset)):
             txn.set_meta(key, value)
         store.commit(conn)
     finally:
@@ -447,15 +470,58 @@ def _reconcile(root: pathlib.Path, txn: Txn) -> Tuple[Dict[str, Any], list]:
             quarantined.append({"task_id": task_id, "reason": "deleted_by_old_body"})
         txn.delete_task(task_id)
         baseline.pop(task_id, None)
-    sets = _read_sets(root)  # the old body maintained the set files too
-    for name in sorted(set(txn.set_names()) | set(sets)):
-        txn.replace_set(name, o.owner_held_rows(name, sets.get(name, {})))
+    moved = _reconcile_sets(txn, _read_sets(root))  # the old body maintained the set files too
+    legacy = _apply_legacy_custody(root, txn)
     for key, value in (("baseline", baseline), ("freeze_utc", now), ("conflicts", conflicts),
-                       ("reconciled", {"at": now, **counts, "quarantined": len(quarantined),
-                                       "refused": refused, "conflicts": len(conflicts)})):
+                       ("reconciled", {"at": now, **counts, "quarantined": len(quarantined), "refused": refused,
+                                       "conflicts": len(conflicts), "set_rows": moved, "legacy_custody": legacy})):
         txn.set_meta(key, value)
     return {"status": "reconciled", **counts, "quarantined": len(quarantined), "refused": len(refused),
-            "conflicts": len(conflicts), "latched": latched}, quarantined
+            "conflicts": len(conflicts), "latched": latched, "set_rows": moved, "legacy_custody": legacy}, quarantined
+
+
+def _reconcile_sets(txn: Txn, files: Dict[str, Dict[str, Dict[str, Any]]]) -> int:
+    """Owner-held rows against their own baseline (B4): a row the old body added or changed in a
+    set file is put, one it retired is deleted, and every row the file left as it was keeps the
+    store's version — the facts this store published since (its rows, its retirements) survive
+    a P6' instead of being replaced by a stale file. Returns the rows moved."""
+    baseline: Dict[str, Dict[str, str]] = txn.meta("sets_baseline") or {}
+    current = _sets_baseline(files)
+    moved = 0
+    for name in sorted(set(current) | set(baseline)):
+        held, before, after = o.owner_held_rows(name, files.get(name, {})), baseline.get(name, {}), current.get(name, {})
+        for identity in sorted(set(before) | set(after)):
+            if before.get(identity) == after.get(identity):
+                continue  # untouched by the old body: the store's own answer stands
+            if identity in after:
+                txn.put_row(name, identity, held[identity])
+            else:
+                txn.delete_row(name, identity)
+            moved += 1
+    txn.set_meta("sets_baseline", current)
+    return moved
+
+
+def _apply_legacy_custody(root: pathlib.Path, txn: Txn) -> int:
+    """The custody events an old body appended to the chain after this store's boundary (its
+    import, its own last row) are reduced onto the rows — the reducer's event-id dedup and
+    idempotent replays included — and the boundary moves to the chain's end (B4)."""
+    from ouroboros import delegate_custody as c
+    from ouroboros.delegate_custody_current import CHAIN_BOUNDARY, _loaded, _reduce
+
+    chain = c.event_log_path(root)
+    try:
+        if c.custody_chain_unreadable(root):
+            raise OSError(errno.EIO, "custody chain exists but cannot be opened")
+        rows, offset = c.rows_after(chain, int(txn.meta(CHAIN_BOUNDARY) or 0))
+    except OSError as exc:
+        raise _unreadable(exc, chain, "custody chain") from exc
+    applied = 0
+    for row in c._unique_rows(rows):
+        _reduce(txn, row, _loaded(txn, row), {})
+        applied += 1
+    txn.set_meta(CHAIN_BOUNDARY, offset)
+    return applied
 
 
 def _set_rows_in_full(txn: Txn, name: str) -> Dict[str, Any]:
@@ -517,6 +583,7 @@ def export_facts(root: Any) -> Dict[str, Any]:
     with store.open_store(root, write=True, service=True) as txn:  # T2: the baseline follows what was written
         refused = {task_id: entry for task_id, entry in (txn.meta("baseline") or {}).items() if entry.get("refused")}
         txn.set_meta("baseline", {**refused, **entries})
+        txn.set_meta("sets_baseline", _sets_baseline(_read_sets(root)))
         txn.set_meta("export_manifest", {**manifest, "status": "completed", "completed_at": utc_now_iso()})
     return {"results": len(task_ids), "written": written, "removed": len(stale), "bytes": total, "sets": len(names)}
 
@@ -543,5 +610,11 @@ def absorb_own_export(root: Any, txn: Txn) -> Dict[str, Any]:
         if _read_result(task_result_path(root, task_id)) is None:
             baseline.pop(task_id, None)
     txn.set_meta("baseline", baseline)
+    files = _read_sets(root)
+    sets_baseline = dict(txn.meta("sets_baseline") or {})
+    for name, identity in manifest.get("sets", {}).items():  # a set file this export wrote is its own, not an old body's
+        if name in files and _identity(machine_json(files[name])) == identity:
+            sets_baseline[name] = _sets_baseline({name: files[name]})[name]
+    txn.set_meta("sets_baseline", sets_baseline)
     txn.set_meta("export_manifest", {**manifest, "status": "abandoned", "adopted": adopted, "at": utc_now_iso()})
     return {"adopted": adopted, "planned": len(manifest.get("results", {}))}

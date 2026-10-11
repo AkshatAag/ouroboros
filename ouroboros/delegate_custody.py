@@ -374,10 +374,30 @@ def actor_decision_lock(drive_root: Any, task_id: str) -> Iterator[None]:
     finally:
         release_exclusive_file_lock(lock_path, fd)
 
-def _iter_rows(path: pathlib.Path, *, strict: bool = False) -> Iterator[Dict[str, Any]]:
+def chain_length(path: pathlib.Path) -> int:
+    """The chain's byte length across its segments (strict): the boundary a store records."""
+    from ouroboros.utils import jsonl_chain_handles
+
+    snapshot: Dict[str, Any] = {}
+    with jsonl_chain_handles(path, strict=True, snapshot=snapshot):
+        return int(snapshot.get("total") or 0)
+
+
+def rows_after(path: pathlib.Path, offset: int) -> Tuple[List[Dict[str, Any]], int]:
+    """The custody rows the chain holds after byte OFFSET (strict) and its length before the
+    read: what P6' applies on top of a store whose boundary is OFFSET. A chain shorter than
+    OFFSET (segments pruned since) is read whole; the fold's dedup and the reducer's idempotent
+    replays make that safe."""
+    total = chain_length(path)
+    rows = list(_iter_rows(path, strict=True, start_offset=offset if offset <= total else 0))
+    return rows, total
+
+
+def _iter_rows(path: pathlib.Path, *, strict: bool = False, start_offset: Optional[int] = None) -> Iterator[Dict[str, Any]]:
     """Custody rows across the ROTATED CHAIN (archive segments + live file): the
     importer's one fold (``strict``: an unreadable segment or a read error raises
-    its ``OSError`` instead of amputating the chain) and the explicit forensic replays.
+    its ``OSError`` instead of amputating the chain; ``start_offset``: from that
+    byte of the chain) and the explicit forensic replays.
 
     The event log rotates like chat/progress (CPL4-C1), so a full replay must
     read ``archive/events_*.jsonl`` before the live file or a rotation would
@@ -386,7 +406,7 @@ def _iter_rows(path: pathlib.Path, *, strict: bool = False) -> Iterator[Dict[str
     """
     from ouroboros.utils import jsonl_chain_handles
 
-    with jsonl_chain_handles(path, strict=strict) as handles:
+    with jsonl_chain_handles(path, strict=strict, start_offset=start_offset) as handles:
         for _, handle in handles:
             try:
                 for raw in handle:

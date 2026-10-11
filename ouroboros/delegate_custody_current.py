@@ -220,7 +220,8 @@ def _reduce(txn, event: Dict[str, Any], state: Dict[str, Any], marks_by_task: Di
     tid = str(event.get("task_id") or "")
     if kind == c.START_REQUESTED and iid:
         key = f"invocation:{iid}"
-        if txn.get_row("custody_open", key) is None:
+        if (txn.get_row("custody_open", key) is None and txn.get_row("custody_refused", iid) is None
+                and not txn.custody_rows("invocation_id=?", (iid,))):  # a replayed request of an answered invocation re-opens nothing
             txn.put_row("custody_open", key, {"request": event})
     before = {run_id: deepcopy(vars(entry)) for run_id, entry in state.items()}
     _ensure_known_run(state, event)
@@ -327,10 +328,13 @@ def publish(root, event: Dict[str, Any]) -> bool:
     return True
 
 
+CHAIN_BOUNDARY = "custody_chain_offset"  # meta: the chain's length after this store's last own row
+
+
 def flush_outbox(root) -> int:
     """Append every parked event to the chain, oldest first; delete each row once its append
     confirmed. Idempotent: a replayed append carries the same ``event_id`` the fold dedups."""
-    from ouroboros.delegate_custody import event_log_path
+    from ouroboros.delegate_custody import chain_length, event_log_path
 
     try:
         with store.open_store(root, write=False) as txn:
@@ -342,8 +346,10 @@ def flush_outbox(root) -> int:
         try:
             if not _append_durable(event_log_path(root), event):
                 break
+            boundary = chain_length(event_log_path(root))  # this store's own rows end here: P6' applies only what follows
             with store.open_store(root, write=True) as txn:
                 txn.outbox_delete(str(event.get("event_id") or ""))
+                txn.set_meta(CHAIN_BOUNDARY, max(int(txn.meta(CHAIN_BOUNDARY) or 0), boundary))
         except (store.StoreError, OSError):
             log.warning("custody outbox flush interrupted under %s", root, exc_info=True)
             break

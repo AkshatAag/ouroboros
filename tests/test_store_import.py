@@ -17,7 +17,7 @@ from ouroboros import store, store_import
 from ouroboros.store import GENERATION, GENERATION_KEY, StoreLost
 from ouroboros.store_import import ensure_current_store, export_facts, set_file_path
 from ouroboros.task_results import task_result_path
-from ouroboros.utils import atomic_write_json
+from ouroboros.utils import append_jsonl, atomic_write_json
 
 
 def result(task_id: str, status: str = "completed", **fields) -> dict:
@@ -288,6 +288,62 @@ def test_derived_set_file_rows_are_never_imported_as_owner_held(tmp_path):
     write_result(root, result("fresh2"))  # P6': the old body ran, the set files are re-read
     assert ensure_current_store(root, with_children=False)["status"] == "reconciled"
     assert held("nonterminal") == held("synthesis") == {} and set(o.members(root, "nonterminal")) == {"root1"}
+
+
+def test_p6_keeps_the_store_only_set_rows_and_moves_only_what_the_old_body_changed(tmp_path):
+    """B4: the owner-held sets reconcile row by row against their own baseline — a row the store
+    published since the import survives, a retirement the store made is not undone by a stale
+    file, and only the rows the old body added or retired move."""
+    root = fixture_root(tmp_path)  # custody_open file: run:r1, invocation:i1
+    add_set_member(root, "unknowns", "task:x", {"reason": "cancel_latch_migration_failed"})
+    ensure_current_store(root, with_children=False)
+    o.add(root, "custody_open", "invocation:new", {"task_id": "root1", "request": {"n": 1}})  # store-only fact
+    o.remove(root, "custody_open", "invocation:i1")  # a retirement this store published
+    add_set_member(root, "custody_open", "invocation:old", {"task_id": "root1", "request": {"o": 1}})  # the old body's
+    atomic_write_json(set_file_path(root, "unknowns"), {})  # the old body retired task:x
+    write_result(root, result("fresh2"))
+    report = ensure_current_store(root, with_children=False)
+    assert report["status"] == "reconciled" and report["set_rows"] == 2, report
+    with store.open_store(root, write=False) as txn:
+        assert set(txn.set_rows("custody_open")) == {"run:r1", "invocation:new", "invocation:old"}
+        assert txn.set_rows("unknowns") == {}
+    write_result(root, result("fresh3"))  # the files unchanged since: nothing moves, the store's rows stand
+    assert ensure_current_store(root, with_children=False)["set_rows"] == 0
+    with store.open_store(root, write=False) as txn:
+        assert set(txn.set_rows("custody_open")) == {"run:r1", "invocation:new", "invocation:old"}
+
+
+def test_p6_applies_the_custody_events_an_old_body_appended_after_the_boundary_once(tmp_path):
+    """B4: the import records the chain boundary and every own append moves it; a P6' reduces
+    the legacy events after it (event-id dedup, a replayed request re-opens nothing) and moves
+    the boundary again, so neither this store's rows nor an applied legacy row replays."""
+    from ouroboros import delegate_custody as c
+    from ouroboros.delegate_custody_current import CHAIN_BOUNDARY
+
+    root = fixture_root(tmp_path)
+    path = c.event_log_path(root)
+    append_jsonl(path, {"ts": "2026-01-01T00:00:00+00:00", "type": c.STARTED, "run_id": "run-a", "task_id": "root1"})
+    ensure_current_store(root, with_children=False)
+    assert c.emit(root, c.STARTED, {"run_id": "run-b", "task_id": "root1"})  # this store's own row
+    with store.open_store(root, write=False) as txn:
+        assert txn.meta(CHAIN_BOUNDARY) == path.stat().st_size
+    legacy = {"ts": "2026-01-02T00:00:00+00:00", "type": c.SETTLED, "event_id": "L" * 32, "run_id": "run-a",
+              "task_id": "root1", "state": "succeeded", "cost_usd": 0.25, "spend_disclosed": True}
+    append_jsonl(path, legacy)
+    append_jsonl(path, legacy)  # the old body's own replay
+    append_jsonl(path, {"ts": "2026-01-02T00:00:01+00:00", "type": c.START_REQUESTED, "invocation_id": "inv-z",
+                        "task_id": "root1", "request": {"p": 1}})
+    write_result(root, result("fresh2"))
+    report = ensure_current_store(root, with_children=False)
+    assert report["status"] == "reconciled" and report["legacy_custody"] == 2, report
+    runs = c.replay(root)
+    assert runs["run-a"].settled and runs["run-a"].cost_usd == 0.25 and not runs["run-b"].settled
+    assert [row["invocation_id"] for row in c.pending_invocations(root)] == ["inv-z"]
+    assert sorted(run.run_id for run in c.open_runs(root)) == ["run-b"]
+    write_result(root, result("fresh3"))
+    assert ensure_current_store(root, with_children=False)["legacy_custody"] == 0  # the boundary moved past them
+    with store.open_store(root, write=False) as txn:
+        assert txn.meta(CHAIN_BOUNDARY) == path.stat().st_size
 
 
 def test_the_export_writes_derived_sets_in_full_from_the_columns(tmp_path):
