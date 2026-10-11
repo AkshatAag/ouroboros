@@ -83,13 +83,12 @@ def isolate():
     return root
 
 
-def owner_result(drive, task_id, **fields):
-    """A synthetic owner's durable result, read by the real retirement sweep."""
-    from ouroboros.utils import write_text_atomic
+def owner_result(drive, task_id, status, **fields):
+    """A synthetic owner's durable result, written through the production writer the real
+    retirement sweep reads (the current store; its first write publishes this fresh root)."""
+    from ouroboros.task_results import write_task_result
 
-    path = drive / 'task_results' / f'{task_id}.json'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(path, json.dumps({'_schema_version': 1, 'task_id': task_id, **fields}))
+    write_task_result(drive, task_id, status, **fields)
 
 
 def owner_context(drive, task_id):
