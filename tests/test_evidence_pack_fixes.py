@@ -370,8 +370,7 @@ def test_unlink_rereads_facts_and_references_after_compression(root, monkeypatch
         if change == "resume":
             _result(root, "packing", "running")
         else:
-            path = root / "observability/calls/other/new.json"
-            path.write_text(json.dumps(refs[0]), encoding="utf-8")
+            obs.write_call_manifest(root, task_id="other", call_id="new", manifest={"ref": refs[0]})
         return result
 
     with monkeypatch.context() as patch:

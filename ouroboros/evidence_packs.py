@@ -21,6 +21,7 @@ PACKS_REL = pathlib.Path("observability/packs")
 INDEX_NAME = "index.sqlite"
 INDEX_LOCK_NAME = "packs_index.lock"  # the name lock under state/ around every index access
 PUBLICATION_LOCK_NAME = "packs_publication.lock"  # manifest publication vs reference census + unlink
+PUBLICATIONS_NAME = ".publications"  # pass-local refs appended before manifest publication, under the same lock
 INDEX_WAIT_SEC = 5.0
 FORMAT_VERSION = 1
 INDEX_SCHEMA_VERSION = 2
@@ -609,7 +610,7 @@ def settlement_obligations(root: Any, *, txn: Optional[store.Txn] = None, cache:
 
 
 def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None,
-                          txn: Optional[store.Txn] = None) -> Dict[str, Any]:
+                          external: Optional[dict] = None, txn: Optional[store.Txn] = None) -> Dict[str, Any]:
     """The facts the settle predicate reads, through the current store: terminal status,
     every obligation flag, open review operations / undischarged acceptance debt, and unresolved
     money attempts (``None`` = unknown, which never settles). No timer anywhere."""
@@ -617,7 +618,6 @@ def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[
     from ouroboros.review_projection import _actor_pending
     from ouroboros.task_store import read_document
     from ouroboros.task_status import SETTLED_STATUSES
-    from supervisor.terminal_delivery import pending_deliveries, terminal_answer_receipts
 
     root = pathlib.Path(root)
     row, owed = {}, set()
@@ -643,9 +643,11 @@ def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[
         panel = next((p for p in panels if p.get("panel_id") == receipt.get("panel_id")), {})
         late_open |= (receipt.get("custody") != "terminal_outbox"
                       or receipt.get("settled_at") != (panel.get("late_settlement") or {}).get("settled_at"))
-    if terminal_answer_receipts(root, task_id).get("registry") == "unreadable":
+    external = settlement_external(root) if external is None else external
+    if external["delivery"] is None:
         owed.add("unknowns")
-    late_open |= any(str(event.get("task_id") or "") == str(task_id) for event in pending_deliveries(root))
+    else:
+        late_open |= str(task_id) in external["delivery"]
     return {
         "status": str(row.get("status") or ""),
         "terminal": bool(row) and str(row.get("status") or "") in SETTLED_STATUSES,
@@ -653,23 +655,31 @@ def task_settlement_facts(root: Any, task_id: str, *, obligation_rows: Optional[
         "open_operations": any(isinstance(e, dict) and e.get("state") in _OPEN_STATES for e in operations.values()),
         "open_acceptance": open_debt,
         "open_late_receipts": late_open,
-        "money_open": _money_open(root, str(task_id)),
+        "money_open": None if external["money"] is None else str(task_id) in external["money"],
     }
 
 
-def _money_open(root: pathlib.Path, task_id: str) -> Optional[bool]:
+def settlement_external(root: Any) -> dict:
+    """One money query and one outbox read for every task in a pass; None stays unknown."""
     from ouroboros import usage_store
     from ouroboros.usage_ledger import LEDGER_REL
+    from supervisor.terminal_delivery import pending_deliveries
 
-    if not (root / usage_store.STORE_REL).exists() and not (root / LEDGER_REL).exists():
-        return False  # no money record of any kind on this root
+    root = pathlib.Path(root)
+    money = set()
+    if (root / usage_store.STORE_REL).exists() or (root / LEDGER_REL).exists():
+        try:
+            with usage_store.hold(root, write=False, migrate=False) as txn:
+                money = {row[0] for row in txn.conn.execute(
+                    "SELECT DISTINCT task_id FROM attempts WHERE kind='attempt' "
+                    "AND state IN ('reserved','dispatched','unresolved')")}
+        except Exception:
+            money = None
     try:
-        with usage_store.hold(root, write=False, migrate=False) as txn:
-            return txn.conn.execute(
-                "SELECT 1 FROM attempts WHERE task_id=? AND kind='attempt' "
-                "AND state IN ('reserved','dispatched','unresolved') LIMIT 1", (task_id,)).fetchone() is not None
+        delivery = {str(event.get("task_id") or "") for event in pending_deliveries(root, strict=True)}
     except Exception:
-        return None
+        delivery = None
+    return {"money": money, "delivery": delivery}
 
 
 def facts_settled(facts: Dict[str, Any]) -> bool:
@@ -678,8 +688,8 @@ def facts_settled(facts: Dict[str, Any]) -> bool:
 
 
 def task_settled(root: Any, task_id: str, *, obligation_rows: Optional[dict] = None,
-                 txn: Optional[store.Txn] = None) -> bool:
-    return facts_settled(task_settlement_facts(root, task_id, obligation_rows=obligation_rows, txn=txn))
+                 external: Optional[dict] = None, txn: Optional[store.Txn] = None) -> bool:
+    return facts_settled(task_settlement_facts(root, task_id, obligation_rows=obligation_rows, external=external, txn=txn))
 
 
 
@@ -697,6 +707,19 @@ def _walk_blob_refs(value: Any, out: List[Tuple[str, str, int]], seen: set) -> N
     elif isinstance(value, list):
         for item in value:
             _walk_blob_refs(item, out, seen)
+
+
+def note_manifest_publication(root: Any, manifest: dict) -> None:
+    """Called under the publication lock BEFORE the manifest write. Track new refs only
+    while a sweep owns the scratch file; a stale file is reset at the next sweep."""
+    try:
+        fd = os.open(packs_dir(root) / PUBLICATIONS_NAME, os.O_WRONLY | os.O_APPEND)
+    except FileNotFoundError:
+        return
+    with os.fdopen(fd, "ab") as journal:
+        refs: list = []
+        _walk_blob_refs(manifest, refs, set())
+        journal.write("".join(sha + "\n" for _, sha, _ in refs).encode("ascii"))
 
 
 def manifest_blob_refs(root: Any, task_id: str) -> List[Tuple[str, str, int]]:
@@ -835,10 +858,10 @@ def _unlink_phase(root: Any) -> Iterator[tuple]:
 
 
 def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, keep_shas: set, revision: str,
-                 obligation_cache: Optional[dict] = None) -> Dict[str, int]:
+                 sweep, members: list) -> Dict[str, int]:
     """Remove loose files whose bytes a VERIFIED pack holds; a blob some non-settled task's
     manifests still reference (``keep_shas``) stays loose. A busy file is retried next pass."""
-    from ouroboros.evidence_packer import live_manifest_shas, task_stamps
+    from ouroboros.evidence_packer import task_stamps
     from ouroboros.task_custody import task_custody_lock
 
     root = pathlib.Path(root)
@@ -846,19 +869,20 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
     report = {"unlinked": 0, "kept": 0, "busy": 0, "deferred": 1}
 
     def remove(txn):
-        duties = settlement_obligations(root, txn=txn, cache=obligation_cache)
-        if (task_stamps(root, task_id, obligation_rows=duties, txn=txn) != revision
-                or not task_settled(root, task_id, obligation_rows=duties, txn=txn)):
+        if not sweep.current(txn):
             return
-        keep = keep_shas | live_manifest_shas(root, obligation_rows=duties, txn=txn)
-        members = loose_members(root, task_id)
-        if task_stamps(root, task_id, obligation_rows=duties, txn=txn) != revision:
+        duties, external = sweep.duties, sweep.external
+        if (task_stamps(root, task_id, obligation_rows=duties, external=external, txn=txn) != revision
+                or not task_settled(root, task_id, obligation_rows=duties, external=external, txn=txn)):
+            return
+        keep = sweep.refresh_keep()
+        if not sweep.current(txn):
             return
         report["deferred"] = 0
         for member in members:
             if _member_key(member) not in packed or not member["source"].is_file():
                 continue
-            if member["kind"] != CHECKPOINT and member["sha256"] in keep:
+            if member["kind"] != CHECKPOINT and (member["sha256"] in keep or member["sha256"] in keep_shas):
                 report["kept"] += 1
                 continue
             try:
@@ -880,17 +904,25 @@ def unlink_loose(root: Any, task_id: str, sidecars: List[Dict[str, Any]], *, kee
 
 
 def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list] = None, revision: Optional[str] = None,
-              obligation_cache: Optional[dict] = None) -> Dict[str, Any]:
+              sweep=None) -> Dict[str, Any]:
     """The per-task steps, each idempotent: new loose members -> next generation (write, publish,
     re-read + verify every member, index), then unlink loose files held by verified packs."""
     root = pathlib.Path(root)
-    from ouroboros.evidence_packer import task_stamps
+    from ouroboros.evidence_packer import pack_sweep, task_stamps
 
-    revision = task_stamps(root, task_id) if revision is None else revision
+    if sweep is None:
+        with pack_sweep(root) as sweep:
+            sweep.collect_keep({})
+            return pack_task(root, task_id, keep_shas=keep_shas, listing=listing, revision=revision, sweep=sweep)
+    if revision is None:
+        revision = task_stamps(root, task_id, obligation_rows=sweep.duties, external=sweep.external)
     generations = published_generations(root, task_id, listing)
     already = {_member_key(m) for s in generations for m in s["members"]}
-    fresh = [m for m in loose_members(root, task_id) if _member_key(m) not in already]
+    members = loose_members(root, task_id)
+    fresh = [m for m in members if _member_key(m) not in already]
     report: Dict[str, Any] = {"task_id": str(task_id), "generation": None, "members": 0, "raw": 0, "packed": 0}
+    if not fresh and not any(m["source"].is_file() for m in members):
+        return report  # nothing can be unlinked: do not decompress historical generations
     if fresh:
         generation = 1 + max((int(s["generation"]) for s in generations), default=0)
         while any((packs_dir(root) / name).exists() for name in
@@ -907,7 +939,7 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
         index_upsert(root, pack_path, {**sidecar, "verified_at": utc_now_iso()})
     write_unpacker(root)
     report.update(unlink_loose(root, task_id, generations, keep_shas=keep_shas, revision=revision,
-                               obligation_cache=obligation_cache))
+                               sweep=sweep, members=members))
     record_storage_pack(root, phase="packed", **report)
     return report
 

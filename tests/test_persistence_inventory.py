@@ -752,7 +752,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (tools/subagent_integration_delegated.py). The two section-4 checking rows and
 # section-7 delegated evidence row in PERSISTENCE.md cover the measured additions.
 # merge of the storage PR (353 -> 359, above) and Sprint 4 (353 -> 364): 353 + 6 + 11.
-EXPECTED_SCAN_PATHS = 370
+# 370 -> 371 (FIXB): observability/packs/.publications, the disposable per-pass
+# reference journal documented in the existing evidence-pack row.
+EXPECTED_SCAN_PATHS = 371
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
