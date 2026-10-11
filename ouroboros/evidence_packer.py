@@ -135,7 +135,9 @@ class PackSweep:
     def __init__(self, root: pathlib.Path) -> None:
         self.root = root
         self.obligation_cache: dict = {}
-        self.duties = packs.settlement_obligations(root, cache=self.obligation_cache)
+        with store.open_store(root, write=False) as txn:  # one baseline, older than every fact this pass reads
+            self.duties = packs.settlement_obligations(root, txn=txn, cache=self.obligation_cache)
+            self.seqs = txn.write_seqs()
         self.external_revision = _external_revision(root)
         self.external = packs.settlement_external(root)
         self.keep: set = set()
@@ -150,14 +152,12 @@ class PackSweep:
                 and self.external_revision == _external_revision(self.root))
 
     def collect_keep(self, facts: dict) -> None:
-        with store.open_store(self.root, write=False) as txn:
-            seqs = txn.write_seqs()
         for task in _loose_task_ids(self.root):
             fact = facts.get(task)
             if fact is None:
                 fact = packs.task_settlement_facts(self.root, task, obligation_rows=self.duties, external=self.external)
             if packs.facts_settled(fact):
-                self.settled[task] = seqs.get(task)
+                self.settled[task] = self.seqs.get(task)
             else:
                 self.keep.update(sha for _, sha, _ in packs.manifest_blob_refs(self.root, task))
 

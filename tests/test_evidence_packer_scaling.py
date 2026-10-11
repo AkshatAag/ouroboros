@@ -292,6 +292,30 @@ def test_unrelated_activity_during_a_pass_does_not_stop_the_backfill(root, monke
     assert len(evaluated) <= 3 * 6  # census, keep-set and each candidate's own check: still linear
 
 
+def test_body_change_while_candidates_are_chosen_keeps_the_shared_blob(root, monkeypatch):
+    # The census baseline is older than every fact the pass reads: a body-only change made after a
+    # candidate's facts were read (an open review-operation pointer on a completed task) is re-read.
+    from pathlib import Path
+
+    from ouroboros import task_store
+
+    raw = b'{"shared": "window"}'
+    refs, _ = _task(root, "packing", blobs=1, payloads=[raw])
+    _task(root, "sharer", blobs=1, payloads=[raw], handle=b"small")
+    original = packer.ordered_candidates
+
+    def ordered(root, settled):
+        task_store.patch_document(root, "sharer", lambda d: {**d, "review_operations": {
+            "ctrl": {"surface": "task_acceptance", "state": "preparing"}}})
+        return original(root, settled)
+
+    with monkeypatch.context() as edits:
+        edits.setattr(packer, "ordered_candidates", ordered)
+        report = packer.run_pass(root)
+    assert report["faults"] == 0 and report["kept"] == 1
+    assert Path(refs[0]["path"]).exists()
+
+
 def test_task_resumed_after_census_keeps_its_existing_shared_reference(root, monkeypatch):
     from pathlib import Path
 
