@@ -214,6 +214,16 @@ def _preflight(root: pathlib.Path, needs: Dict[str, bool], receipt: Dict[str, An
     result file (one atomic temp file at a time). A real ENOSPC still arrives as ``OSError``."""
     required = {"handles": _handle_restore_bytes(root) if needs["handles"] else 0,
                 "largest_result": _largest_result_bytes(roots) if needs["facts"] else 0, "money": 0}
+    if needs["facts"]:
+        # The custody chain the old body will read must hold every event the store reduced: the
+        # outbox is appended and verified empty before any store is set aside.
+        from ouroboros.delegate_custody_current import flush_outbox, outbox_depth
+
+        for drive in roots:
+            flush_outbox(drive)
+            depth = outbox_depth(drive)
+            if depth:
+                return f"custody outbox under {drive} still holds {depth} unappended event(s)"
     if needs["money"]:
         refusal = _money_refusal(root, receipt)
         if refusal:

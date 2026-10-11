@@ -245,7 +245,8 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # on tip bytes). The custody reconcile set dropped the reference names the
     # tip drift stopped reading (STARTED, START_REQUESTED, _CUSTODY, _iter_rows,
     # event_log_path) and gained retire_settled_registrations (the upstream
-    # retirement-decoupling train); control_scheduling declares only
+    # retirement-decoupling train) and dropped replay once the reconcile read the
+    # store's held rows (storage on SQLite, S3); control_scheduling declares only
     # load_settings — tests rebind it on the control facade; the projection-only
     # control_subagent_spec/control_task_results leaves carry no handle reads
     # and stay off this table (D08 control-leaf precedent).
@@ -254,7 +255,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "cancel_and_verify", "close_absent_run", "daemon_says_absent", "emit",
         "is_terminal", "open_runs", "output_disposition", "pending_invocations",
         "record_containment_fault", "record_settled_unread", "record_started",
-        "replay", "retire_settled_registrations", "review_owned_source",
+        "retire_settled_registrations", "review_owned_source",
         "settle_run", "summary_of",
     })),
     "ouroboros/tools/delegate_payload_patch.py": ("ouroboros/tools/delegate_integration.py", "_di", frozenset({

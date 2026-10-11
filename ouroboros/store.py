@@ -27,7 +27,7 @@ import sqlite3
 import threading
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from ouroboros.utils import machine_json  # one compact JSON text: key order kept, facts round-trip
+from ouroboros.utils import machine_json, utc_now_iso  # one compact JSON text: key order kept, facts round-trip
 
 STORE_REL = pathlib.Path("state/current.sqlite")
 LOCK_NAME = "current.lock"  # the name-tier lock around every access
@@ -66,8 +66,11 @@ CREATE TABLE task_bodies (task_id TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE obligations (set_name TEXT NOT NULL, id TEXT NOT NULL, facts TEXT NOT NULL, PRIMARY KEY (set_name, id));
 CREATE TABLE task_handoffs (task_id TEXT NOT NULL, op_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT,
   claimed_at TEXT, returned_at TEXT, owner TEXT, facts TEXT NOT NULL, PRIMARY KEY (task_id, op_id));
-CREATE TABLE custody_runs (run_id TEXT PRIMARY KEY, task_id TEXT, state TEXT, facts TEXT NOT NULL, updated_at TEXT);
+CREATE TABLE custody_runs (run_id TEXT PRIMARY KEY, task_id TEXT, project_id TEXT, invocation_id TEXT, state TEXT,
+  facts TEXT NOT NULL, updated_at TEXT);
 CREATE INDEX custody_task ON custody_runs(task_id); CREATE INDEX custody_state ON custody_runs(state);
+CREATE INDEX custody_project ON custody_runs(project_id) WHERE project_id<>'';
+CREATE INDEX custody_invocation ON custody_runs(invocation_id) WHERE invocation_id<>'';
 CREATE TABLE custody_outbox (event_id TEXT PRIMARY KEY, run_id TEXT, task_id TEXT, event TEXT NOT NULL, created_at TEXT);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """ + "".join(f"CREATE INDEX tasks_{column} ON tasks({column}) WHERE {column}=1;\n"
@@ -489,6 +492,44 @@ class Txn:
         column = FLAG_COLUMNS[set_name]
         return [record["task_id"] for record in
                 self.conn.execute(f"SELECT task_id FROM tasks WHERE {column}=1 ORDER BY task_id")]
+
+    # -- custody rows: one row per delegated run, the reducer's output, indexed by task / project /
+    #    invocation; ``state`` is the custody hold (``held`` while the run owes work, ``closed`` after).
+    def custody_rows(self, where: str = "", params: Tuple[Any, ...] = ()) -> Dict[str, Dict[str, Any]]:
+        clause = f" WHERE {where}" if where else ""
+        return {record["run_id"]: json.loads(record["facts"]) for record in
+                self.conn.execute(f"SELECT run_id, facts FROM custody_runs{clause} ORDER BY run_id", params)}
+
+    def custody_row(self, run_id: str) -> Optional[Dict[str, Any]]:
+        record = self.conn.execute("SELECT facts FROM custody_runs WHERE run_id=?", (run_id,)).fetchone()
+        return None if record is None else json.loads(record["facts"])
+
+    def put_custody(self, run_id: str, facts: Dict[str, Any], *, state: str) -> None:
+        self.conn.execute(
+            "INSERT INTO custody_runs (run_id, task_id, project_id, invocation_id, state, facts, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id) DO UPDATE SET task_id=excluded.task_id, "
+            "project_id=excluded.project_id, invocation_id=excluded.invocation_id, state=excluded.state, "
+            "facts=excluded.facts, updated_at=excluded.updated_at",
+            (run_id, str(facts.get("task_id") or ""), str(facts.get("project_id") or ""),
+             str(facts.get("invocation_id") or ""), state, machine_json(facts), utc_now_iso()))
+
+    def custody_task_ids(self) -> List[str]:
+        return [record["task_id"] for record in
+                self.conn.execute("SELECT DISTINCT task_id FROM custody_runs WHERE task_id<>'' ORDER BY task_id")]
+
+    # -- the custody outbox: an emitted event waits here between its COMMIT and its chain append.
+    def outbox_put(self, event: Dict[str, Any]) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO custody_outbox (event_id, run_id, task_id, event, created_at) VALUES (?, ?, ?, ?, ?)",
+            (str(event.get("event_id") or ""), str(event.get("run_id") or ""), str(event.get("task_id") or ""),
+             machine_json(event), utc_now_iso()))
+
+    def outbox_rows(self) -> List[Dict[str, Any]]:
+        return [json.loads(record["event"]) for record in
+                self.conn.execute("SELECT event FROM custody_outbox ORDER BY created_at, event_id")]
+
+    def outbox_delete(self, event_id: str) -> None:
+        self.conn.execute("DELETE FROM custody_outbox WHERE event_id=?", (event_id,))
 
 
 def update_task(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]], *,

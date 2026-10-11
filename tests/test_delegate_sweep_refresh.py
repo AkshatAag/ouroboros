@@ -9,6 +9,8 @@ from __future__ import annotations
 import pathlib
 import types
 
+import pytest
+
 from ouroboros import delegate_custody as custody
 from ouroboros import delegate_terminal
 from ouroboros.task_results import (
@@ -293,8 +295,10 @@ def test_lock_timeout_refresh_is_false_and_emits_no_evidence(tmp_path, monkeypat
 
 
 def test_boot_backfill_shares_one_custody_replay_snapshot(tmp_path, monkeypatch):
-    """Auditing N stored rows must not rescan the unbounded event log 4·N
-    times: the whole backfill pays exactly one ``replay()`` pass."""
+    """Auditing N stored rows must not re-read the custody rows 4·N times: the whole
+    backfill pays exactly one ``custody_audit_snapshot`` read, and never a chain fold."""
+    from ouroboros import delegate_custody_current as current
+
     for index in range(3):
         run_id, task_id = f"run-{index}", f"t-batch-{index}"
         _emit_started(tmp_path, run_id, task_id)
@@ -302,15 +306,16 @@ def test_boot_backfill_shares_one_custody_replay_snapshot(tmp_path, monkeypatch)
         _stale_terminal_result(tmp_path, task_id,
                                delegated_runs_unreconciled=[run_id])
 
-    replays: list = []
-    real_replay = custody.replay
+    snapshots: list = []
+    real_snapshot = current.snapshot
     monkeypatch.setattr(
-        custody, "replay",
-        lambda *args, **kwargs: replays.append(1) or real_replay(*args, **kwargs),
+        current, "snapshot",
+        lambda *args, **kwargs: snapshots.append(1) or real_snapshot(*args, **kwargs),
     )
+    monkeypatch.setattr(custody, "_iter_rows", lambda *a, **kw: pytest.fail("chain fold on the backfill"))
     refreshed = delegate_terminal.backfill_terminal_reconciliations(tmp_path)
     assert sorted(refreshed) == ["t-batch-0", "t-batch-1", "t-batch-2"]
-    assert len(replays) == 1
+    assert len(snapshots) == 1
 
 
 def test_backfill_lock_timeout_is_fail_soft_and_heals_on_the_next_boot(tmp_path, monkeypatch):
@@ -629,13 +634,16 @@ def test_cursor_pass_heals_tasks_the_outcome_sweep_never_names(tmp_path):
     assert delegate_terminal.refresh_recently_settled_terminals(tmp_path) == 0
 
 
-def test_cursor_defers_running_task_without_starving_later_settlements(tmp_path):
-    """The grok finding: a SETTLED row for a still-RUNNING parent must not pin
-    the byte offset — later settlements past the per-tick window would starve.
-    The offset always advances; the deferred task rides a durable map and is
-    healed on the tick after its result turns terminal."""
-    import json
+def _receipts(root):
+    from ouroboros import obligations as o
 
+    return sorted(tid for tid, facts in o.members(root, "delegated_runs").items() if facts.get("closed_runs"))
+
+
+def test_cursor_defers_running_task_without_starving_later_settlements(tmp_path):
+    """The grok finding, store era: a SETTLED receipt for a still-RUNNING parent waits in
+    its own ``delegated_runs`` row — later settlements of other tasks heal at once, and
+    the deferred task heals on the tick after its result turns terminal."""
     _emit_started(tmp_path, "run-a", "t-longlived")
     write_task_result(
         tmp_path, "t-longlived", STATUS_RUNNING,
@@ -646,11 +654,7 @@ def test_cursor_defers_running_task_without_starving_later_settlements(tmp_path)
     )
     _emit_settled(tmp_path, "run-a", "t-longlived")
     assert delegate_terminal.refresh_recently_settled_terminals(tmp_path) == 0
-    cursor = json.loads(
-        (tmp_path / "state/delegate_terminal_refresh_cursor.json").read_text()
-    )
-    assert cursor["offset"] > 0  # never pinned on the deferred row
-    assert list(cursor["deferred"]) == ["t-longlived"]
+    assert _receipts(tmp_path) == ["t-longlived"]  # the receipt waits for its terminal result
 
     # A LATER terminal-boundary settlement heals immediately — not starved
     # behind the still-running parent.
@@ -677,20 +681,16 @@ def test_cursor_defers_running_task_without_starving_later_settlements(tmp_path)
     )
     assert delegate_terminal.refresh_recently_settled_terminals(tmp_path) == 1
     assert load_task_result(tmp_path, "t-longlived")["actual_substrate"] == "harness_used"
-    cursor = json.loads(
-        (tmp_path / "state/delegate_terminal_refresh_cursor.json").read_text()
-    )
-    assert cursor["deferred"] == {}
+    assert _receipts(tmp_path) == []
+    assert not (tmp_path / "state/delegate_terminal_refresh_cursor.json").exists()
 
 
 def test_cursor_refresh_defers_a_task_whose_owner_is_still_live(tmp_path):
     """The cursor pass reads the SAME live-owner source as the two custody sweeps
     (INV-B): a task whose result is terminal while its worker still bills — the
     post-task synthesis window — is deferred, not rewritten under the live owner.
-    Candidates first, liveness second: the batch comes from the log, the live set
-    is read afterwards. Both directions, one file."""
-    import json
-
+    Candidates first, liveness second: the batch comes from the receipts, the live
+    set is read afterwards. Both directions."""
     _emit_started(tmp_path, "run-live", "t-still-billing")
     write_task_result(
         tmp_path, "t-still-billing", STATUS_FAILED,
@@ -704,12 +704,9 @@ def test_cursor_refresh_defers_a_task_whose_owner_is_still_live(tmp_path):
     assert delegate_terminal.refresh_recently_settled_terminals(
         tmp_path, live_task_ids=lambda: {"t-still-billing"}) == 0
     assert load_task_result(tmp_path, "t-still-billing")["actual_substrate"] == "harness_attempted"
-    cursor = json.loads(
-        (tmp_path / "state/delegate_terminal_refresh_cursor.json").read_text(encoding="utf-8")
-    )
-    assert list(cursor["deferred"]) == ["t-still-billing"]
+    assert _receipts(tmp_path) == ["t-still-billing"]
 
-    # Quiet direction: once the owner is gone the deferred task heals from the map.
+    # Quiet direction: once the owner is gone the deferred task heals from its receipt.
     assert delegate_terminal.refresh_recently_settled_terminals(
         tmp_path, live_task_ids=lambda: set()) == 1
     assert load_task_result(tmp_path, "t-still-billing")["actual_substrate"] == "harness_used"

@@ -69,32 +69,35 @@ def test_custody_append_can_write_results_and_rows(tmp_path, monkeypatch, kind):
     """The chain append of a custody event holds no store transaction: a result write and an
     owner-held row published from inside it land, and the event's own rows follow."""
     from ouroboros import delegate_custody as custody
-    from ouroboros.delegate_custody_current import current_reads
+    from ouroboros import delegate_custody_current as current
     migrations.prepare_startup_state(tmp_path)
     assert custody.emit(tmp_path, custody.STARTED, {"run_id": "run", "task_id": "task"})
     def append(_path, _row):
-        assert "run:run" in o.members(tmp_path, "custody_open")
+        assert "run" in current.held_runs(tmp_path) or kind == custody.SETTLED
         results.write_task_result(tmp_path, "other", "running")
         o.add(tmp_path, "custody_open", "invocation:other", {"request": {"invocation_id": "other"}})
         return True
-    monkeypatch.setattr(custody, "append_jsonl", append)
+    monkeypatch.setattr(current, "append_jsonl", append)
     assert custody.emit(tmp_path, kind, {"run_id": "run", "task_id": "task", "state": "succeeded"})
     assert "other" in o.members(tmp_path, "nonterminal")
     assert "invocation:other" in o.members(tmp_path, "custody_open")
-    with current_reads(tmp_path):
-        assert bool(custody.open_runs(tmp_path)) == (kind == custody.STARTED)
+    assert bool(custody.open_runs(tmp_path)) == (kind == custody.STARTED)
     if kind == custody.SETTLED:
         assert "run" in o.members(tmp_path, "delegated_runs")["task"]["closed_runs"]
 
 
 def test_explicit_rebuild_replaces_custody_rows_from_the_chain(tmp_path):
-    """The explicit repair refolds ``custody_open`` from the retained event chain: a row no
-    event supports is replaced, a derived set is untouched."""
+    """The explicit repair refolds the custody rows from the retained event chain: a run row
+    and a pending invocation no event supports are replaced, a derived set is untouched."""
+    from ouroboros import delegate_custody as custody, store
     migrations.prepare_startup_state(tmp_path)
     results.write_task_result(tmp_path, "task", "running")
-    o.add(tmp_path, "custody_open", "run:ghost", {"run_id": "ghost"})
+    o.add(tmp_path, "custody_open", "invocation:ghost", {"request": {"invocation_id": "ghost"}})
+    with store.open_store(tmp_path, write=True) as txn:
+        txn.put_custody("ghost", {"run_id": "ghost", "task_id": "task"}, state="held")
     migrations.prepare_startup_state(tmp_path, rebuild=True)
     assert o.members(tmp_path, "custody_open") == {}
+    assert custody.replay(tmp_path) == {}
     assert set(o.members(tmp_path, "nonterminal")) == {"task"}
 
 

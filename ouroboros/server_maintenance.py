@@ -287,9 +287,7 @@ def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> No
             step = "reconcile_delegated_runs"
             if _stop_requested(stop_event):
                 return
-            from ouroboros.delegate_custody_current import current_reads
-            with current_reads(DATA_DIR):
-                _reconcile_delegated_runs(_live_task_ids, stop_event=stop_event)
+            _reconcile_delegated_runs(_live_task_ids, stop_event=stop_event)
             step = "cursor_refresh_settled_terminals"
             if _stop_requested(stop_event):
                 return
@@ -700,9 +698,7 @@ def _run_deferred_startup_prunes():
         return
     _STARTUP_PRUNES_OWED[0] = False
     _startup_worktree_prune()
-    from ouroboros.delegate_custody_current import current_reads
-    with current_reads(DATA_DIR):
-        _prune_delegated_snapshots()
+    _prune_delegated_snapshots()
     from ouroboros.delegate_state_sweep import sweep_settled_delegate_state
     _prune_event("delegate_state_sweep", ("removed", "errors", "skipped"),
                  report=sweep_settled_delegate_state(DATA_DIR))
@@ -780,9 +776,7 @@ def _startup_custody_sweep() -> None:
             log.info("Process custody reaper killed %d orphaned process(es): %s", len(reaped), reaped)
     except Exception:
         log.debug("Process custody startup reap failed", exc_info=True)
-    from ouroboros.delegate_custody_current import current_reads
-    with current_reads(DATA_DIR):
-        _reconcile_delegated_runs(_live_task_ids)
+    _reconcile_delegated_runs(_live_task_ids)
     try:
         # D1a boot backfill, ONCE per generation and AFTER the orphan reconcile
         # (so this generation's settlements are already visible to the audit):
@@ -792,8 +786,7 @@ def _startup_custody_sweep() -> None:
         # results instead and heals every generation-crossing stale row.
         from ouroboros.delegate_terminal import backfill_terminal_reconciliations
 
-        with current_reads(DATA_DIR):
-            refreshed = backfill_terminal_reconciliations(DATA_DIR)
+        refreshed = backfill_terminal_reconciliations(DATA_DIR)
         if refreshed:
             log.info("Boot custody backfill refreshed %d stored disclosure(s): %s",
                      len(refreshed), refreshed)

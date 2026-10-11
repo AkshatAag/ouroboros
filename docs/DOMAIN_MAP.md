@@ -471,7 +471,6 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/delegate_continuation.py`
 - `ouroboros/delegate_custody.py`
 - `ouroboros/delegate_custody_current.py`
-- `ouroboros/delegate_custody_memo.py`
 - `ouroboros/delegate_custody_reconcile.py`
 - `ouroboros/delegate_custody_usage.py`
 - `ouroboros/delegate_directory.py`

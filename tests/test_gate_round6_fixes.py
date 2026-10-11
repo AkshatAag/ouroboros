@@ -525,11 +525,14 @@ def test_gr6_4_unreadable_custody_log_is_typed_unknown_not_clean(qenv, monkeypat
     assert dc.custody_log_unreadable(qenv.drive) is False
     assert qenv.tl._reconcile_delegated_runs_on_kill(qenv.q, "au6") == []
 
-    # EXISTING but unreadable: event_log_path resolves to a directory, whose
-    # open(rb) raises OSError on every platform (the injected unreadability).
-    unreadable = qenv.drive / "unreadable-log"
-    unreadable.mkdir()
-    monkeypatch.setattr(dc, "event_log_path", lambda root: unreadable)
+    # EXISTING but unreadable: a directory where the custody store should be makes
+    # the store raise its typed unreadable on every platform (the injected unreadability).
+    from ouroboros.store import STORE_REL
+
+    unreadable = qenv.drive / STORE_REL
+    if unreadable.exists():
+        unreadable.unlink()
+    unreadable.mkdir(parents=True)
     assert dc.custody_log_unreadable(qenv.drive) is True
 
     still = qenv.tl._reconcile_delegated_runs_on_kill(qenv.q, "au6")

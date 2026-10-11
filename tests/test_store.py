@@ -246,10 +246,9 @@ def test_a_straggler_after_the_retirement_is_told_retired_not_migrating(tmp_path
 def test_a_first_touch_import_answers_a_nested_open_typed_instead_of_re_entering_itself(tmp_path, monkeypatch):
     """The import holds the import lock; a store open of the same root from inside it (a reader
     the importer's helpers reach) is told ``StoreMigrating`` rather than waiting on that lock.
-    The custody probe under current reads is such a path: it imports on first touch and answers."""
+    The custody probe is such a path: it imports on first touch and answers."""
     from ouroboros import store_import
     from ouroboros.delegate_custody import custody_log_unreadable
-    from ouroboros.delegate_custody_current import current_reads
 
     nested = []
     real = store_import._custody_rows
@@ -267,8 +266,7 @@ def test_a_first_touch_import_answers_a_nested_open_typed_instead_of_re_entering
     assert nested == [str(tmp_path)]
     other = tmp_path / "other"
     other.mkdir()
-    with current_reads(other):
-        assert custody_log_unreadable(other) is False
+    assert custody_log_unreadable(other) is False
     assert store.probe(other)[0] == "present"
     monkeypatch.setattr(store_import, "_read_results", lambda root: (_ for _ in ()).throw(PermissionError("dir")))
     with pytest.raises(StoreMigrating):  # the import failing to read its inputs is typed too

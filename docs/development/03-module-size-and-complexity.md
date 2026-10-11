@@ -89,10 +89,9 @@ Apply ARCHITECTURE §10 invariant 10 to current-state readers; review and growth
   import; display reads leave pending imports to startup and report unavailable data.
   Enforced by `tests/test_usage_store.py`; the read path never starts a history import.
 - **House precedents, reuse these shapes:** archive-aware chat log rotation
-  (`supervisor/state.py::rotate_chat_log_if_needed`); a compact projection beside an
-  unbounded event log with a warm-read memo (`ouroboros/delegate_custody.py`,
-  `ouroboros/delegate_custody_memo.py`); the bounded filtered tail
-  (`ouroboros/jsonl_tail.py`); per-archive room summaries
+  (`supervisor/state.py::rotate_chat_log_if_needed`); current rows reduced by the writing
+  transaction beside an unbounded event log (`ouroboros/delegate_custody_current.py`); the
+  bounded filtered tail (`ouroboros/jsonl_tail.py`); per-archive room summaries
   (`ouroboros/gateway/history_segments.py`); summary rows kept by the writing
   transaction (`ouroboros/usage_store.py`, `store.py`); indexed selects
   (`task_store.py`); the task-event SSE v2 cursor (ARCHITECTURE §3 "Chat and

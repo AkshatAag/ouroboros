@@ -169,13 +169,9 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None,
             from ouroboros.tool_custody import retained_tool_custody
             blockers.extend(retained_tool_custody(custody_root, task_id, row))
         # A member whose result has been collected can still own a remote start.
-        from ouroboros.delegate_custody_memo import custody_rows_with_integrity
-        rows, malformed = custody_rows_with_integrity(custody_root, predecessor)
-        if malformed is None or malformed:
-            raise OSError("tree_custody_unreadable")
-        for row in rows:
-            if str(row.get("root_task_id") or row.get("task_id") or "") == predecessor:
-                members.add(str(row.get("task_id") or predecessor))
+        from ouroboros.delegate_custody_current import tree_task_ids
+
+        members.update(tree_task_ids(custody_root, predecessor))  # the store answers or raises
     except Exception as exc:
         blockers.append({"kind": "tree_census_unreadable", "detail": str(exc)[:200]})
     for member in sorted(members):

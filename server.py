@@ -821,8 +821,7 @@ def _run_supervisor(settings: dict) -> None:
             rotate_jsonl_log_if_needed(DATA_DIR, "progress.jsonl", "progress")
             # CPL4-C1..C4 rotation train: the remaining unbounded hot logs rotate
             # on the same tick with the same rotator. events.jsonl went LAST
-            # behind chain-aware custody readers (delegate_custody replay + fault
-            # scan, complete_custody_rows, the settled-terminal chain cursor,
+            # behind chain-aware custody readers (the store import's custody fold,
             # legacy usage import, swarm rollup, worker boot verify) — rows keep
             # replaying from archive/events_*.jsonl; tools/supervisor/
             # task_reflections readers are tail-bounded and archive-backfilled

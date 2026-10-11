@@ -156,15 +156,16 @@ def _build_and_publish(root: pathlib.Path, path: pathlib.Path, tier: str) -> Tup
     sets = _read_sets(root)
     for name, rows in boot_admissions(root).items():  # under the set files: an interrupted publication stays a candidate
         sets[name] = {**rows, **sets.get(name, {})}
-    custody = _custody_rows(root, records)
+    folded, custody = _custody_rows(root, records)
     for name, rows in custody.items():
         sets[name] = {**sets.get(name, {}), **rows} if name == "custody_open" else _merge_receipts(sets.get(name, {}), rows)
     provenance = {"status": "completed", "imported_at": utc_now_iso(), "lock_tier": tier,
                   "results": len(records), "quarantined": len(quarantined), "refused": refused,
-                  "sets": {name: len(rows) for name, rows in sets.items()}}
+                  "sets": {name: len(rows) for name, rows in sets.items()},
+                  "custody_runs": len(folded.get("runs", {}))}
     tmp = path.with_name(f"{path.name}.import-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     try:
-        _build(tmp, tier, root, records, sets, baseline, provenance)
+        _build(tmp, tier, root, records, sets, baseline, provenance, folded)
         os.replace(tmp, path)
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -191,30 +192,29 @@ def _latches_into_intents(root: pathlib.Path, latched: List[str]) -> None:
     migrate_legacy_cancel_latches(root, records=[record for record in records if record[1]])
 
 
-def _custody_rows(root: pathlib.Path, records: List[Record]) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """The custody half of the owner-held sets, folded ONCE from the retained event chain: the
-    open runs and pending invocations (``custody_open``) and the closing receipts still owed to a
-    result's terminal refresh (``delegated_runs``). An unreadable chain imports no custody row:
-    the sweep's own readers answer UNKNOWN for it."""
+def _custody_rows(root: pathlib.Path, records: List[Record]) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Dict[str, Any]]]]:
+    """The custody half of the import, folded ONCE from the retained event chain: every run's
+    row (``custody_runs``), the pending invocations (``custody_open``), the definite refusals
+    and the task marks, plus the closing receipts still owed to a result's terminal refresh
+    (``delegated_runs``). An unreadable chain imports no custody row: the sweep's own readers
+    answer UNKNOWN for it."""
     from ouroboros import delegate_custody as c
-    from ouroboros.delegate_custody_current import _held
+    from ouroboros.delegate_custody_current import fold
 
     try:
         if c.custody_chain_unreadable(root):
-            return {}
+            return {}, {}
         rows = tuple(c._iter_rows(c.event_log_path(root)))
     except Exception:
-        return {}
-    runs = c._fold_rows(rows)
-    open_rows = {f"run:{rid}": {"custody": vars(entry)} for rid, entry in runs.items() if _held(entry)}
-    for entry in c.pending_invocations(root, rows=rows):
-        open_rows[f"invocation:{entry['invocation_id']}"] = {"request": {"type": c.START_REQUESTED, **entry}}
+        return {}, {}
+    folded = fold(rows)
     owed = {task_id for task_id, document in records if document.get("delegated_runs_unreconciled")}
     receipts: Dict[str, Dict[str, Any]] = {}
-    for rid, entry in runs.items():
-        if entry.settled and entry.task_id and entry.task_id in owed:
-            receipts.setdefault(entry.task_id, {"task_id": entry.task_id, "closed_runs": {}})["closed_runs"][rid] = vars(entry)
-    return {"custody_open": open_rows, "delegated_runs": receipts}
+    for rid, (facts, _hold) in folded["runs"].items():
+        task_id = str(facts.get("task_id") or "")
+        if facts.get("settled") and task_id in owed:
+            receipts.setdefault(task_id, {"task_id": task_id, "closed_runs": {}})["closed_runs"][rid] = facts
+    return folded, {"custody_open": folded["open"], "delegated_runs": receipts}
 
 
 def _merge_receipts(held: Dict[str, Dict[str, Any]], folded: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -344,7 +344,7 @@ def _pending_drive(root: pathlib.Path, task_id: str, document: Dict[str, Any]) -
 
 
 def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Record], sets: Dict[str, Any],
-           baseline: Dict[str, Any], provenance: Dict[str, Any]) -> None:
+           baseline: Dict[str, Any], provenance: Dict[str, Any], folded: Optional[Dict[str, Any]] = None) -> None:
     conn = store.connect(tmp, tier, create=True)
     try:
         conn.execute("PRAGMA synchronous = FULL")
@@ -356,6 +356,12 @@ def _build(tmp: pathlib.Path, tier: str, root: pathlib.Path, records: List[Recor
             txn.store_task(document, pending_drive=_pending_drive(root, task_id, document))
         for name, rows in sets.items():
             txn.replace_set(name, rows)
+        if folded:
+            for rid, (facts, hold) in folded["runs"].items():
+                txn.put_custody(rid, facts, state=hold)
+            for name in ("refused", "marks"):
+                for identity, facts in folded[name].items():
+                    txn.put_row(f"custody_{name}", identity, facts)
         for key, value in (("schema_version", store.SCHEMA_VERSION), ("lock_tier", tier), ("generation", GENERATION),
                            ("phase", PUBLISHED), ("import", provenance), ("freeze_utc", utc_now_iso()),
                            ("baseline", baseline)):

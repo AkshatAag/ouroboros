@@ -673,18 +673,15 @@ def _rebind_runtime_roots_between_tests():
 
 @pytest.fixture(autouse=True)
 def _reset_custody_memo_between_tests():
-    """Isolate both custody caches: the row memo is keyed by events-log path,
-    while active custody is keyed only by run ID. Tests reuse both identities (and so the
-    delegated-activity memo): no consumed prefix, first-wins binding or shown cursor may leak."""
+    """Isolate the process-local custody caches: active custody is keyed only by run ID and
+    the delegated-activity memo by path. Tests reuse both identities: no first-wins binding
+    or shown cursor may leak."""
     from ouroboros import delegate_activity, delegate_custody
-    from ouroboros.delegate_custody_memo import reset_custody_memo
 
     delegate_custody._CUSTODY.clear()
-    reset_custody_memo()
     delegate_activity.reset_process_memo()
     yield
     delegate_custody._CUSTODY.clear()
-    reset_custody_memo()
     delegate_activity.reset_process_memo()
 
 

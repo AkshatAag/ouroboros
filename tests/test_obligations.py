@@ -98,57 +98,81 @@ def test_a_torn_watermark_file_is_rewritten_and_the_import_runs(tmp_path):
     assert set(o.members(tmp_path, "nonterminal")) == {"t1"}
 
 
-def test_custody_open_before_append_closed_after(tmp_path, monkeypatch):
+def test_custody_row_commits_before_the_chain_append_and_the_outbox_empties_after(tmp_path, monkeypatch):
+    """The reducing transaction (run row + outbox row) commits FIRST; the chain append sees the
+    committed row; the outbox row is deleted only once the append confirmed."""
     from ouroboros import delegate_custody as c
-    from ouroboros.delegate_custody_current import current_reads
+    from ouroboros import delegate_custody_current as current
 
-    def append(_path, row):
-        current = o.members(tmp_path, "custody_open")
-        assert "run:run" in current
-        assert not current["run:run"]["custody"]["settled"]
-        return True
+    seen = []
 
-    monkeypatch.setattr(c, "append_jsonl", append)
+    def append(path, row):
+        held = current.held_runs(tmp_path)
+        seen.append((row["type"], "run" in held, held["run"].settled if "run" in held else None,
+                     current.outbox_depth(tmp_path)))
+        return current_append(path, row)
+
+    current_append = current.append_jsonl
+    monkeypatch.setattr(current, "append_jsonl", append)
     assert c.emit(tmp_path, c.STARTED, {"run_id": "run", "task_id": "task"})
-    with current_reads(tmp_path):
-        assert len(c.open_runs(tmp_path)) == 1
-        assert c.emit(tmp_path, c.SETTLED, {"run_id": "run", "task_id": "task", "state": "succeeded"})
-        assert c.open_runs(tmp_path) == []
-    assert o.members(tmp_path, "custody_open") == {}
+    assert len(c.open_runs(tmp_path)) == 1
+    assert c.emit(tmp_path, c.SETTLED, {"run_id": "run", "task_id": "task", "state": "succeeded"})
+    assert c.open_runs(tmp_path) == []
+    assert seen == [(c.STARTED, True, False, 1), (c.SETTLED, False, None, 1)]
+    assert current.outbox_depth(tmp_path) == 0
+    assert c.replay(tmp_path)["run"].settled
     assert "run" in o.members(tmp_path, "delegated_runs")["task"]["closed_runs"]
+    rows = [json.loads(line) for line in c.event_log_path(tmp_path).read_text(encoding="utf-8").splitlines()]
+    assert [row["type"] for row in rows] == [c.STARTED, c.SETTLED] and all(row["event_id"] for row in rows)
 
 
-def test_failed_close_keeps_open_member(tmp_path, monkeypatch):
+def test_a_failed_chain_append_parks_the_event_in_the_outbox_until_the_flush(tmp_path, monkeypatch):
+    """The store is the authority: a refused append leaves the reduced row in place and the
+    event in the outbox; the next publication appends it (once, by ``event_id``)."""
     from ouroboros import delegate_custody as c
+    from ouroboros import delegate_custody_current as current
+
     assert c.emit(tmp_path, c.STARTED, {"run_id": "run", "task_id": "task"})
-    monkeypatch.setattr(c, "append_jsonl", lambda *a, **kw: False)
-    assert not c.emit(tmp_path, c.SETTLED, {"run_id": "run", "task_id": "task"})
-    assert not o.members(tmp_path, "custody_open")["run:run"]["custody"]["settled"]
+    with monkeypatch.context() as patched:
+        patched.setattr(current, "append_jsonl", lambda *a, **kw: False)
+        assert c.emit(tmp_path, c.SETTLED, {"run_id": "run", "task_id": "task", "state": "succeeded"})
+    assert c.replay(tmp_path)["run"].settled, "the row is the authority and it landed"
+    assert current.outbox_depth(tmp_path) == 1
+    assert [json.loads(line)["type"] for line in c.event_log_path(tmp_path).read_text(encoding="utf-8").splitlines()] == [c.STARTED]
+    assert c.emit(tmp_path, c.PATCH_CAPTURED, {"run_id": "run", "task_id": "task"})
+    assert current.outbox_depth(tmp_path) == 0
+    rows = [json.loads(line) for line in c.event_log_path(tmp_path).read_text(encoding="utf-8").splitlines()]
+    assert [row["type"] for row in rows] == [c.STARTED, c.SETTLED, c.PATCH_CAPTURED]
+    assert len({row["event_id"] for row in rows}) == 3
+    assert vars(c.replay(tmp_path)["run"]) == vars(c.replay(tmp_path, rows=rows)["run"]), "the chain folds to the rows"
 
 
-def test_a_custody_row_lands_when_the_store_is_busy_and_the_repair_merges_the_chain(tmp_path, monkeypatch):
-    """The event row lands and ``emit`` reports its own fate when the store cannot take the
-    publication; the explicit repair folds the retained chain into what the rows lack."""
+def test_a_busy_store_refuses_the_custody_event_and_the_repair_folds_a_legacy_chain(tmp_path, monkeypatch):
+    """``emit`` reports its own fate: a store that cannot take the reducing transaction lands
+    nothing (no row, no chain append — the chain never runs ahead of the authority). The
+    explicit repair folds a retained chain an old body wrote into the rows."""
     from contextlib import contextmanager
 
     from ouroboros import delegate_custody as c
     from ouroboros import delegate_custody_current as current
     from ouroboros.startup_migrations import prepare_startup_state
+    from ouroboros.utils import append_jsonl
 
     @contextmanager
     def busy(root, *, write, **kwargs):
         raise store.StoreBusy("current store busy")
         yield
 
-    prepare_startup_state(tmp_path)  # published and empty; a later first touch would fold the chain itself
+    prepare_startup_state(tmp_path)
     with monkeypatch.context() as patched:
         patched.setattr(current.store, "open_store", busy)
-        assert c.emit(tmp_path, c.STARTED, {"run_id": "run", "task_id": "task"})
-    rows = c.event_log_path(tmp_path).read_text(encoding="utf-8").splitlines()
-    assert json.loads(rows[-1])["type"] == c.STARTED
-    assert "run:run" not in o.members(tmp_path, "custody_open")
+        assert not c.emit(tmp_path, c.STARTED, {"run_id": "run", "task_id": "task"})
+    assert not c.event_log_path(tmp_path).exists()
+    assert "run" not in c.replay(tmp_path)
+    append_jsonl(c.event_log_path(tmp_path), {"ts": "2026-01-01T00:00:00+00:00", "type": c.STARTED,
+                                              "run_id": "legacy", "task_id": "task"})
     assert current.rebuild(tmp_path) == 1
-    assert not o.members(tmp_path, "custody_open")["run:run"]["custody"]["settled"]
+    assert not c.replay(tmp_path)["legacy"].settled and c.open_runs(tmp_path)[0].run_id == "legacy"
 
 
 def test_first_import_classifies_once_and_stamps(tmp_path, monkeypatch):
@@ -252,15 +276,13 @@ def test_boot_custody_never_folds_chain(tmp_path, monkeypatch):
 
 def test_addressed_custody_backfill_keeps_terminal_receipt_without_history(tmp_path, monkeypatch):
     from ouroboros import startup_migrations as m, delegate_custody as c, delegate_terminal as terminal
-    from ouroboros.delegate_custody_current import current_reads
     m.prepare_startup_state(tmp_path)
     c.emit(tmp_path, c.STARTED, {"run_id": "run", "task_id": "task"})
     results.write_task_result(tmp_path, "task", "completed", delegated_runs_unreconciled=["run"])
     c.emit(tmp_path, c.SETTLED, {"run_id": "run", "task_id": "task", "state": "succeeded"})
     monkeypatch.setattr(c, "custody_rows", lambda *a, **kw: pytest.fail("history fold"))
-    monkeypatch.setattr(c, "task_execution_evidence", lambda *a, **kw: pytest.fail("historical evidence fold"))
-    with current_reads(tmp_path):
-        assert terminal.backfill_terminal_reconciliations(tmp_path) == ["task"]
+    monkeypatch.setattr(c, "_iter_rows", lambda *a, **kw: pytest.fail("history fold"))
+    assert terminal.backfill_terminal_reconciliations(tmp_path) == ["task"]
     row = results.load_task_result(tmp_path, "task")
     assert row["delegated_runs_unreconciled"] == []
     assert row["delegate_terminal_reconciliation"]["terminal_runs"][0]["state"] == "succeeded"

@@ -733,7 +733,11 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # mark ``state/obligations/rebuild.owed`` are gone (flag columns of ``state/current.sqlite``); the
 # result bodies ``task_results/*.json`` are the importer's and exporter's alone, so the scan now names
 # the launch lock and the quarantine files specifically (same rows).
-EXPECTED_SCAN_PATHS = 358
+# 358 -> 356 (storage on SQLite, S3 custody rows): the settled-terminal refresh cursor
+# ``state/delegate_terminal_refresh_cursor.json`` (the closing receipts in ``delegated_runs`` rows
+# replace the chain offset) and the ``logs/containment_faults.jsonl`` projection (the fault lives on
+# the run's ``custody_runs`` row) are gone.
+EXPECTED_SCAN_PATHS = 356
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -756,7 +760,6 @@ SENTINELS = frozenset({
     "uploads",
     # stage-2: names that live in constants, helper returns or f-strings
     "state/claudexor_rotation_provisioning.json",
-    "state/delegate_terminal_refresh_cursor.json",
     "state/extension_generation.json",
     "state/post_task_evolution_counter.json",
     "state/post_task_evolution_request.json",
@@ -1019,7 +1022,6 @@ def test_constant_named_durable_files_are_visible_to_the_scan():
     paths = scan_data_paths()
     hidden = sorted(p for p in (
         "state/claudexor_rotation_provisioning.json",
-        "state/delegate_terminal_refresh_cursor.json",
         "state/extension_generation.json",
         "state/post_task_evolution_counter.json",
         "state/post_task_evolution_request.json",
