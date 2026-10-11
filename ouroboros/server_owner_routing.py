@@ -502,28 +502,18 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         else:
             event["origin_suppressed"] = True
         try:
-            outcome = _handle_promote_chat_to_task(event, ctx)
+            _handle_promote_chat_to_task(event, ctx)
         except Exception:
             log.warning("Direct skill-repair promotion failed", exc_info=True)
-            outcome = {
+            # Minted OUTSIDE the handler, so its publication boundary never saw it.
+            _notify_host_initiated_refusal(ctx, event, {
                 "status": "needs_manual_target",
                 "reason": "repair_promotion_failed",
                 "task_id": task_id,
-            }
-            # Minted OUTSIDE the handler, so its publication boundary never saw it.
-            _notify_host_initiated_refusal(ctx, event, outcome)
-        outcome = outcome if isinstance(outcome, dict) else {"status": "scheduled", "task_id": task_id}
-        outcome_status = str(outcome.get("status") or "needs_manual_target")
-        if outcome_status == "scheduled":
-            try:
-                ctx.send_with_budget(
-                    chat_id,
-                    f"✅ Repair task {task_id} was accepted and durably scheduled.",
-                    role="system", system_type="task_admission_notice")
-            except Exception:
-                log.debug("Repair promotion success notification failed", exc_info=True)
-        # A refusal is already told by the promote handler's typed System row
-        # (host_initiated) plus the receipt under the owner's message.
+            })
+        # A landed repair publishes no row: the receipt under the owner's message and
+        # the task's own card carry it. A refusal is told by the promote handler's
+        # typed System row (host_initiated) plus that receipt.
         return
     try:
         reserved_project = _reserved_project_for_chat(ctx, chat_id)

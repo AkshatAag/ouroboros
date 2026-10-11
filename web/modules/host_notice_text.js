@@ -30,7 +30,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
         '⚙️ Review settings could not be migrated automatically: '],
     optional_bounds_notice: ['⚙️ Task limits on this install: '],
     legacy_memory_notice: ['🧠 Memory: '],
-    task_admission_notice: ['✅ Repair task ', '⚠️ Cost accounting is unavailable. ', '🚫 Budget exhausted. '],
+    task_admission_notice: ['⚠️ Cost accounting is unavailable. ', '🚫 Budget exhausted. '],
     budget_notice: ['🚫 Model budget reached. '],
     deep_self_review_queued: ['🔎 Deep self-review queued: '],
     runtime_liveness_notice: ['⚠️ A chat turn looks wedged '],
@@ -42,7 +42,6 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     worker_readiness_notice: ['⚠️ Worker checkout sampled after initialization ', '⚠️ Worker slot '],
     // Progress rows: a task card's timeline line (`log_events.summarizeChatLiveEvent`).
     task_scheduled: ['🗓️ Scheduled subagent ', '🗓️ Scheduled task '],
-    task_started: ['🧬 Evolution task ', '🔎 Review task '],
     task_error: ['⚠️ Error: '],
     cancellation_notice: ['❌ cancel '],
     finalization_notice: ['⏳ Task ', '▶️ Task '],

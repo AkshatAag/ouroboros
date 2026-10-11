@@ -56,12 +56,7 @@ test('every table entry names a mark and words a backend producer actually write
             const cut = prefix.indexOf(' ') + 1;
             assert.ok(cut > 1, prefix);
             assert.ok(backend.includes(prefix.slice(0, cut)), `mark of ${JSON.stringify(prefix)}`);
-            if (type === 'task_started') {
-                const producer = readFileSync(new URL('supervisor/worker_assignment.py', root), 'utf8');
-                assert.ok(producer.includes("emoji = '🧬' if task_type == 'evolution' else '🔎'"));
-                assert.ok(producer.includes('f"{emoji} {task_type.capitalize()} task'));
-                assert.ok(['🧬 Evolution task ', '🔎 Review task '].includes(prefix));
-            } else assert.ok(backend.includes(prefix.slice(cut).trimEnd()), `words of ${JSON.stringify(prefix)}`);
+            assert.ok(backend.includes(prefix.slice(cut).trimEnd()), `words of ${JSON.stringify(prefix)}`);
         }
     }
 });
