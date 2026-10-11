@@ -376,7 +376,6 @@ def second_park_with_late_child(host):
     initial = response.json()
     assert initial["status"] == "continuing" and initial["work_ref"] == ""
     ref = initial["continuation_ref"]
-    record_path = host.root / "data" / "task_results" / f"{ref}.json"
 
     def parked():
         record = read_result(host.root / "data", ref)
@@ -403,7 +402,7 @@ def second_park_with_late_child(host):
     assert after["presence_continuation"]["author_controller"] == first_continuation["author_controller"]
     assert host.client.get("/fixture/live").json() == [ref]
     assert host.turn().json() == initial and len(host.inputs()) == 4
-    return initial, after, record_path
+    return initial, after
 
 
 @pytest.mark.parametrize("mode", ["blocking", "advisory"])
@@ -411,7 +410,7 @@ def second_park_with_late_child(host):
 def test_second_park_exposes_late_child_without_changing_initial_replay(tmp_path, mode, ending):
     host = Host(tmp_path, 1, mode, "late_child")
     try:
-        initial, record, record_path = second_park_with_late_child(host)
+        initial, record = second_park_with_late_child(host)
         ref = initial["continuation_ref"]
         pending = host.work(ref)
         assert pending.status_code == 202, pending.text
@@ -433,7 +432,7 @@ def test_second_park_exposes_late_child_without_changing_initial_replay(tmp_path
         # its model receiver. Require actual closure too; terminal is not its ACK.
         eventually(lambda: host.client.get("/fixture/live").json() == [])
         assert host.turn().json() == initial
-        assert json.loads(record_path.read_text())["presence_continuation"]["initial"] == record["presence_continuation"]["initial"]
+        assert read_result(host.root / "data", ref)["presence_continuation"]["initial"] == record["presence_continuation"]["initial"]
         assert host.work(child_ref).json() == child.json()  # independent work survives the author's end
         (tmp_path / "late-child-facts.json").write_text(json.dumps({
             "mode": mode, "ending": ending, "initial": initial, "second_park": pending.json(),
@@ -454,7 +453,7 @@ def test_terminal_poll_precedes_author_teardown_but_cleanup_must_finish(tmp_path
     """Deterministically expose the stop/advisory race; never infer cleanup from HTTP 200."""
     host = Host(tmp_path, 1, "advisory", "late_child_close_barrier")
     try:
-        initial, record, _ = second_park_with_late_child(host)
+        initial, record = second_park_with_late_child(host)
         ref = initial["continuation_ref"]
         assert host.client.post("/fixture/stop", json={"task_id": ref}).status_code == 200
         marker = tmp_path / "before-author-close.json"
@@ -485,7 +484,7 @@ def test_terminal_poll_precedes_author_teardown_but_cleanup_must_finish(tmp_path
 def test_killed_second_park_author_preserves_late_child_for_tcp_consumer(tmp_path, mode):
     first_host = Host(tmp_path, 1, mode, "late_child")
     try:
-        initial, record, record_path = second_park_with_late_child(first_host)
+        initial, record = second_park_with_late_child(first_host)
         ref = initial["continuation_ref"]
         # Physical process death drops the author stack and all in-memory refs.
         first_host.proc.kill()
@@ -511,7 +510,7 @@ def test_killed_second_park_author_preserves_late_child_for_tcp_consumer(tmp_pat
             assert second_host.work(child_ref).json() == child.json()
         assert len(second_host.inputs()) == 4  # no original author restart or event regeneration
         assert second_host.client.get("/fixture/live").json() == []
-        assert json.loads(record_path.read_text())["presence_continuation"] == record["presence_continuation"]
+        assert read_result(second_host.root / "data", ref)["presence_continuation"] == record["presence_continuation"]
         (tmp_path / "late-child-facts.json").write_text(json.dumps({
             "mode": mode, "death": "SIGKILL", "initial": initial,
             "interrupted": interrupted.json(), "independent_child": child.json(),

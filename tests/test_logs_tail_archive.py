@@ -162,7 +162,7 @@ def test_logs_tail_task_filter_counts_toward_backfill_quota(tmp_path):
     )
     (data / "task_results").mkdir()
     seed_result(data, "target", {"task_id": "target", "status": "completed", "result": "done"})
-    (data / "state").mkdir()
+    (data / "state").mkdir(exist_ok=True)
     (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
 
     payload = TestClient(_app(data)).get("/api/logs/progress?task_id=target&limit=2").json()
@@ -224,7 +224,7 @@ def test_logs_tail_task_discovery_does_zero_artifact_work(tmp_path, monkeypatch)
     )
     (data / "task_results").mkdir()
     seed_result(data, "target", {"task_id": "target", "status": "completed", "result": "done"})
-    (data / "state").mkdir()
+    (data / "state").mkdir(exist_ok=True)
     (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
     calls = []
     monkeypatch.setattr(artifacts_mod, "collect_task_artifact_records", lambda *a, **k: calls.append("collect") or [])

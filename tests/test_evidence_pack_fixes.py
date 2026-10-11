@@ -127,6 +127,39 @@ def test_presence_reentry_projection_reads_loose_and_packed_source(root, monkeyp
     assert reentry_source_projection(root, "presence", ref["sha256"])["reason"] == "source_unreadable"
 
 
+@pytest.mark.parametrize("placement", ["valid", "missing", "corrupt"])
+def test_historical_focus_distinguishes_missing_and_corrupt_handles(root, placement):
+    from ouroboros.task_finalization import focus_source_projection
+
+    _, ref = _task(root, "focus", blobs=0)
+    loose = _handle_path(root, "focus", ref)
+    if placement == "missing":
+        loose.unlink()
+    elif placement == "corrupt":
+        loose.write_bytes(b"damaged")
+    result = focus_source_projection(root, "focus", {}, sha256=ref["sha256"])
+    if placement == "valid":
+        assert result["historical"] and result["complete_sha256"] == ref["sha256"]
+    else:
+        assert result["reason"] == ("source_unavailable" if placement == "missing" else "source_identity_mismatch")
+
+
+def test_host_acceptance_distinguishes_verified_and_corrupt_retained_source(root):
+    from ouroboros.task_finalization import host_acceptance_source
+
+    child = root / "task_drives" / "author"
+    _result(root, "author", child_drive_root=str(child))
+    raw = json.dumps({"authority": "host_root", "request": {
+        "surface": "task_acceptance", "task_id": "author"}}).encode()
+    ref = store_actor_source_bytes(child, "author", category="context_checkpoints",
+                                   source_id="acceptance", data=raw, extension="json")
+    stored, actual = host_acceptance_source(root, "author", ref["sha256"])
+    assert stored["sha256"] == ref["sha256"] and actual == raw
+    _handle_path(child, "author", ref).write_bytes(b"damaged")
+    with pytest.raises(packs.EvidenceCorrupt, match="verification"):
+        host_acceptance_source(root, "author", ref["sha256"])
+
+
 @pytest.mark.parametrize("blocker", ["delivery", "obligation"])
 def test_outbox_and_owner_changes_wake_skipped_tasks(root, blocker):
     from ouroboros import obligations

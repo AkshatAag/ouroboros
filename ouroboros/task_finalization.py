@@ -490,8 +490,14 @@ def focus_source_projection(
         if len(matches) != 1:
             return {**unavailable, "reason": "source_unavailable", "requested_sha256": wanted}
         selected_handle_path = f"source_handles/context_checkpoints/{matches.pop()}"
+        try:
+            info = handle_info(drive_root, str(task_id), selected_handle_path) or {}
+        except ValueError:
+            return {**unavailable, "reason": "source_identity_mismatch"}
+        except OSError:
+            return {**unavailable, "reason": "source_unavailable"}
         handle = {"kind": "task_source", "root": "artifact_store", "path": selected_handle_path,
-                  "size": (handle_info(drive_root, str(task_id), selected_handle_path) or {}).get("size", 0), "sha256": wanted}
+                  "size": info.get("size", 0), "sha256": wanted}
         focus = None  # a historical selector carries no current source_ref/authored_at claim
     if not isinstance(handle, dict):
         return {**unavailable, "reason": "source_unavailable"}

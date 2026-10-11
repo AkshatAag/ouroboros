@@ -180,8 +180,10 @@ def test_historical_terminal_never_overrides_current_result_authority(tmp_path, 
     result.parent.mkdir(exist_ok=True)
     if current == "malformed":
         result.write_text("{broken", encoding="utf-8")
+    elif current == "future":
+        result.write_text(json.dumps({"_schema_version": 2, "task_id": "old-task", "status": "running"}), encoding="utf-8")
     elif current != "missing":
-        seed_result(tmp_path, "old-task", {"_schema_version": 2 if current == "future" else 1,
+        seed_result(tmp_path, "old-task", {"_schema_version": 1,
                                       "task_id": "old-task", "status": "completed" if current == "finalizing" else "running",
                                       **({"root_phase_checkpoint": {"post_task_synthesis": "running"}}
                                          if current == "finalizing" else {})})

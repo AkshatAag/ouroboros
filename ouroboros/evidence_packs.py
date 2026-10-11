@@ -454,20 +454,25 @@ def handle_bytes(root: Any, task_id: str, rel_path: str) -> bytes:
 
 
 def handle_info(root: Any, task_id: str, rel_path: str) -> Optional[Dict[str, Any]]:
-    """Handle metadata from a digest-verified loose file or its packed placement, else ``None``."""
+    """Verified placement metadata; ``None`` only for absence, corruption stays explicit."""
     rel = pathlib.PurePosixPath(str(rel_path))
     loose = _handle_path(root, task_id, rel.as_posix())
+    failure = None
     try:
         if loose.is_file() and not loose.is_symlink():
             raw, digest = loose.read_bytes(), rel.stem.rsplit("-", 1)[-1]
             if hashlib.sha256(raw).hexdigest() == digest:
                 return {"size": len(raw), "sha256": digest, "loose": True}
-    except OSError:
-        pass
-    if rel.parts[:2] != CHECKPOINTS_REL.parts:
-        return None
-    located = _locate(pathlib.Path(root), task_id=str(task_id), rel_path=rel.as_posix())
-    return None if located is None else {"size": int(located[1]["size"]), "sha256": located[1]["sha256"], "loose": False}
+            failure = EvidenceCorrupt(f"evidence_corrupt: loose handle {rel.name} failed sha256 verification")
+    except OSError as exc:
+        failure = exc
+    if rel.parts[:2] == CHECKPOINTS_REL.parts:
+        located = _locate(pathlib.Path(root), task_id=str(task_id), rel_path=rel.as_posix())
+        if located is not None:
+            return {"size": int(located[1]["size"]), "sha256": located[1]["sha256"], "loose": False}
+    if failure is not None:
+        raise failure
+    return None
 
 
 def packed_handle_names(root: Any, task_id: str) -> List[str]:
