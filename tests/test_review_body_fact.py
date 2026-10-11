@@ -119,6 +119,19 @@ def test_the_managed_url_is_the_installs_configured_source_not_a_fixed_official_
     assert (foreign.body, foreign.how) == ("false", "remote_chain")
 
 
+@pytest.mark.parametrize("legacy", ["https://github.com/joi-lab/ouroboros-desktop",
+                                    "https://github.com/joi-lab/ouroboros"])
+def test_a_former_official_home_in_the_manifest_resolves_like_the_updater(system, tmp_path, legacy):
+    """Owner 2026-10-11 №3=A: builds before v6.8.0 keep an archived joi-lab address
+    in their manifest while the updater follows the official repository, so a
+    clone of the official repository is the body; a custom mirror still is not."""
+    official = _repo(tmp_path / "official-clone", remote=MANAGED_URL)
+    fact = _fact(official, system, manifest={"managed_remote_url": legacy})
+    assert (fact.body, fact.how) == ("true", "managed_remote")
+    mirror = _repo(tmp_path / "mirror-clone", remote="https://mirror.example.org/forks/ouro.git")
+    assert _fact(mirror, system, manifest={"managed_remote_url": legacy}).body == "false"
+
+
 def test_a_remote_at_the_installs_own_origin_is_the_body_as_install_fork(system, tmp_path):
     root = _repo(tmp_path / "fork-clone", remote="https://github.com/someone/ouroboros-fork")
 

@@ -50,6 +50,11 @@ def is_legacy_official_repo(value: str) -> bool:
     return text.startswith(_GITHUB_URL_PREFIXES) and normalize_repo_slug(text) in LEGACY_OFFICIAL_REPOS
 
 
+def follow_former_official_home(url: str) -> str:
+    """The source an install follows: a former official home is the official repository."""
+    return f"https://github.com/{OFFICIAL_REPO}" if is_legacy_official_repo(url) else str(url or "")
+
+
 def _git_output(repo_dir: pathlib.Path, args: list[str]) -> tuple[int, str, str]:
     result = subprocess.run(["git", *args], cwd=str(repo_dir), capture_output=True, text=True)
     return result.returncode, (result.stdout or "").strip(), (result.stderr or "").strip()
