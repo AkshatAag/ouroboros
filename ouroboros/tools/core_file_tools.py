@@ -18,6 +18,7 @@ from ouroboros.contracts.task_constraint import normalize_task_constraint, resol
 from ouroboros.project_facts import filter_out_project_store as _filter_out_project_store
 from ouroboros.project_facts import project_store_access_block as _project_store_access_block
 from ouroboros.protected_artifacts import block_reason_for_path
+from ouroboros import store
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
     UserFilesPathBlockedError,
@@ -298,12 +299,12 @@ def _read_source_text(target: pathlib.Path, extent: Optional[Dict[str, Any]]) ->
     only to hash could bind a delivered view to a different concurrent revision.
     """
     try:
-        raw = target.read_bytes()
+        raw = store.read_file_bytes(target)
     except FileNotFoundError:
         from ouroboros.evidence_packs import materialize_path
         if materialize_path(target) is None:  # a packed checkpoint handle is written back first
             raise
-        raw = target.read_bytes()
+        raw = store.read_file_bytes(target)
     content = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     if extent is not None:
         extent.update(source_revision=hashlib.sha256(raw).hexdigest(), source_bytes=len(raw))

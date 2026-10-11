@@ -19,6 +19,7 @@ import errno
 import json
 import os
 import pathlib
+import shutil
 import sqlite3
 import threading
 import time
@@ -137,6 +138,61 @@ def _read_header(path: pathlib.Path) -> bytes:
             opened = os.fstat(fd)  # the path may name a newer file than the stat did: key what was opened
             _HEADER_FDS.setdefault((opened.st_dev, opened.st_ino), fd)
         return os.pread(fd, 100, 0)
+
+
+def held_descriptor(path: Any) -> Optional[int]:
+    """The descriptor this process keeps on a store file it uses through SQLite, else ``None``."""
+    if os.name == "nt":
+        return None
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    with _HEADER_GUARD:
+        return _HEADER_FDS.get((info.st_dev, info.st_ino))
+
+
+def iter_file_bytes(path: Any, *, limit: Optional[int] = None, chunk: int = 1 << 20) -> Iterator[bytes]:
+    """A file's bytes (the first ``limit``, or all) for any reader in a process that may hold a
+    store: a held store file is read through its kept descriptor, never a new one that a close
+    would turn into a lock release; any other file is opened and closed as usual."""
+    fd = held_descriptor(path)
+    if fd is None:
+        with open(path, "rb") as handle:
+            while limit is None or limit > 0:
+                data = handle.read(chunk if limit is None else min(chunk, limit))
+                if not data:
+                    return
+                if limit is not None:
+                    limit -= len(data)
+                yield data
+        return
+    offset = 0
+    while limit is None or offset < limit:
+        data = os.pread(fd, chunk if limit is None else min(chunk, limit - offset), offset)
+        if not data:
+            return
+        offset += len(data)
+        yield data
+
+
+def read_file_bytes(path: Any, *, limit: Optional[int] = None) -> bytes:
+    return b"".join(iter_file_bytes(path, limit=limit))
+
+
+def copy_file_bytes(source: Any, destination: Any) -> Any:
+    """``shutil.copy2`` that reads a held store file through its kept descriptor (a ``copytree``
+    ``copy_function``); the copy is a byte copy, not a consistent snapshot of a live store."""
+    if held_descriptor(source) is None:
+        return shutil.copy2(source, destination)
+    target = pathlib.Path(destination)
+    if target.is_dir():
+        target = target / pathlib.Path(source).name
+    with open(target, "wb") as handle:
+        for data in iter_file_bytes(source):
+            handle.write(data)
+    shutil.copystat(source, target)
+    return str(target)
 
 
 def header_tier(path: pathlib.Path, application_ids: Dict[str, int]) -> Optional[str]:

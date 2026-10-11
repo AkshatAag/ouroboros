@@ -602,10 +602,31 @@ def test_mutator_inputs_are_prepared_before_begin_and_reprepared_outside_when_th
     assert all(name in {"_read", "_persist"} for name in probes)
 
 
-def test_a_header_read_keeps_the_write_lock_another_thread_holds(tmp_path):
+def _read_store_file_in_this_process(kind, root, path):
+    import contextlib
+
+    from ouroboros.gateway import files
+    from ouroboros.tools import core_file_tools
+
+    if kind == "header":
+        store.probe(root)
+    elif kind == "preview":
+        files._read_prefix(path, 4096)
+    elif kind == "agent_read":
+        with contextlib.suppress(UnicodeDecodeError):  # a database is not text; the read itself happened
+            core_file_tools._read_source_text(path, None)
+    elif kind == "copy":
+        files._copy_path(path, root / "copied.sqlite")
+    elif kind == "stream":
+        b"".join(store.iter_file_bytes(path))
+
+
+@pytest.mark.parametrize("kind", ["header", "preview", "agent_read", "copy", "stream"])
+def test_reading_a_store_file_keeps_the_write_lock_another_thread_holds(tmp_path, kind):
     """Closing any descriptor of the store file releases every POSIX lock this process holds on
-    it (sqlite.org howtocorrupt 2.2). ``probe`` reads the header on every ``open_store``: a
-    close there freed an open transaction's lock and a second process wrote the same pages."""
+    it (sqlite.org howtocorrupt 2.2). ``probe`` read the header on every ``open_store``, and the
+    Files panel and the read tools read whole files: each close freed an open transaction's lock
+    and a second process could write the same pages."""
     import subprocess
     import sys
     import threading
@@ -627,7 +648,7 @@ def test_a_header_read_keeps_the_write_lock_another_thread_holds(tmp_path):
 
     with store.open_store(tmp_path, write=True):
         assert other_process() == "blocked"
-        reader = threading.Thread(target=store.probe, args=(tmp_path,))
+        reader = threading.Thread(target=_read_store_file_in_this_process, args=(kind, tmp_path, path))
         reader.start()
         reader.join()
         assert other_process() == "blocked"
