@@ -196,7 +196,7 @@ configured-value placeholder is never a successful reveal. Hide removes that
 text and retains the draft. Viewing changes neither the dirty state nor the
 values submitted by Save or Test. Editing, clearing, reloading or leaving the
 page closes the reveal, and a late read cannot reopen it. Built-in, custom,
-skill-requested and MCP token fields use the same interaction; loading Settings
+skill-requested and MCP header fields use the same interaction; loading Settings
 keeps saved secrets masked. Pending reads and failures are shown at the field.
 
 A segmented choice row gives every choice the same width. Up to four fill their
