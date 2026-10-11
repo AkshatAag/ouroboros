@@ -19,8 +19,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force qualification | Out-Null
           git rev-parse HEAD | Out-File qualification/commit.txt -Encoding utf8
-          git rev-parse HEAD^ | Out-File qualification/product-parent.txt -Encoding utf8
-          git diff --name-only HEAD^ HEAD | Out-File qualification/qualification-delta.txt -Encoding utf8
+          git rev-parse HEAD^2 | Out-File qualification/product-parent.txt -Encoding utf8
+          git diff --name-only HEAD^2 HEAD | Out-File qualification/qualification-delta.txt -Encoding utf8
           python -c "import sys,platform; print(sys.version); print(sys.executable); print(platform.platform())" | Out-File qualification/environment.txt -Encoding utf8
           uv --version | Out-File qualification/uv.txt -Encoding utf8
       - name: Real Windows restart cases

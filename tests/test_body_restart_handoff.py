@@ -138,12 +138,17 @@ def _cold_boot(tmp_path, monkeypatch, *, fault="", absent_streams=False, with_tr
         return identities[int(handle)][0]
 
     kernel = SimpleNamespace(GetProcessId=process_id, GetProcessTimes=process_times)
-    monkeypatch.setattr(ctypes, "WinDLL", lambda *_a, **_kw: kernel, raising=False)
+    proxy_ctypes = SimpleNamespace(**vars(ctypes))
+    proxy_ctypes.WinDLL = lambda *_a, **_kw: kernel
     monkeypatch.setattr(platform_layer, "ctypes", ctypes, raising=False)
-    monkeypatch.setattr(platform_layer, "_kernel32", kernel, raising=False)
+    # Double process identity only: the real recovery consumer still needs the
+    # host's LockFileEx/UnlockFileEx and CRT file handles for durable state.
+    if not hasattr(platform_layer, "_kernel32"):
+        monkeypatch.setattr(platform_layer, "_kernel32", SimpleNamespace(), raising=False)
+    monkeypatch.setattr(platform_layer._kernel32, "GetProcessId", process_id, raising=False)
+    monkeypatch.setattr(platform_layer._kernel32, "GetProcessTimes", process_times, raising=False)
     monkeypatch.setitem(sys.modules, "_winapi", api)
     crt = SimpleNamespace(get_osfhandle=lambda fd: fd + 10, locking=lambda *_a: None, LK_NBLCK=1)
-    monkeypatch.setitem(sys.modules, "msvcrt", crt)
 
     def git(command, **_kwargs):
         assert command[0] == "git"
@@ -231,7 +236,7 @@ def _cold_boot(tmp_path, monkeypatch, *, fault="", absent_streams=False, with_tr
     proxy_subprocess.Handle, proxy_subprocess.STARTUPINFO = Handle, StartupInfo
     proxy_subprocess.STARTF_USESTDHANDLES = 0x100
     imports = {"os": proxy_os, "sys": proxy_sys, "subprocess": proxy_subprocess,
-               "_winapi": api, "msvcrt": crt}
+               "ctypes": proxy_ctypes, "_winapi": api, "msvcrt": crt}
 
     def import_module(name, *args, **kwargs):
         assert not name.startswith(("ouroboros", "supervisor")), "captured helper imported mutable body code"

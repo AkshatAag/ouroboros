@@ -162,7 +162,7 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
     child = SimpleNamespace(pid=123)
     real_start, real_thread = threading.Thread.start, threading.Thread
     real_import = builtins.__import__
-    failed_writes = []
+    failed_writes, created_threads = [], []
 
     def fail(*_args, **_kwargs):
         raise RuntimeError("injected " + fault)
@@ -184,6 +184,7 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
         return real_start(thread)
 
     def thread(*args, **kwargs):
+        created_threads.append(kwargs.get("name"))
         if kwargs.get("name") == "panic-ingress" and fault == "ingress-construction":
             racing_restart()
         if kwargs.get("name") == "panic-commands" and fault == "request-thread":
@@ -205,7 +206,9 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
         monkeypatch.setattr(threading, "Thread", thread)
         if fault == "audit":
             monkeypatch.setattr(audit, "stop", fail)
-        elif fault == "model":
+        else:
+            monkeypatch.setattr(audit, "stop", lambda: calls.append("audit-stop"))
+        if fault == "model":
             monkeypatch.setattr("ouroboros.local_model.get_manager", fail)
         elif fault == "daemon":
             monkeypatch.setattr("ouroboros.claudexor_daemon.get_owned_daemon", fail)
@@ -217,6 +220,9 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
     _run_panic(monkeypatch, tmp_path, daemon_stop=lambda: True, diagnostics=diagnostics,
                children=(child,), configure=configure, ingress=fault.startswith("ingress-"))
     assert server_control._restart_stop_requested is True
+    assert "panic-startup-audit" not in created_threads
+    if fault != "audit":
+        assert calls[0 if not fault.startswith("ingress-") else 1] == "audit-stop"
     if fault != "executor-import":
         assert "successor" in calls and "child" in calls
         if fault != "bounded-all":
@@ -231,7 +237,7 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
         if fault != "executor-import":
             assert set(diagnostics[0]["requests"]) == {
                 "local-model", "daemon", "commands", "executors", "services", "companions",
-                "restart-successor", "child-123",
+                "restart-successor", "child-123", "startup-audit",
             }
     if fault in {"model", "daemon", "request-thread"}:
         owner = {"model": "local-model", "daemon": "daemon", "request-thread": "commands"}[fault]

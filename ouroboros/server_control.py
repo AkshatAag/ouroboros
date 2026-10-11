@@ -338,6 +338,9 @@ def execute_panic_stop(
             if not settle:
                 request_threads.append(thread)
 
+        from ouroboros.startup_historical_audit import audit
+
+        attempt("startup-audit", audit.stop, native=True)
         import multiprocessing
 
         from ouroboros.claudexor_daemon import get_owned_daemon
@@ -400,9 +403,6 @@ def execute_panic_stop(
         attempt("main-port", lambda: kill_process_on_port(bound_port or 8765), settle=True)
         attempt("host-port", lambda: kill_process_on_port(host_service_port()), settle=True)
 
-        from ouroboros.startup_historical_audit import audit
-
-        attempt("startup-audit", audit.stop, settle=True)
     except Exception as exc:
         requests["executor"] = {"requested": False, "error": f"{type(exc).__name__}: {exc}"}
     finally:

@@ -420,15 +420,6 @@ if failure in {"reexec", "fallback"}:
     server_control.os.execvpe = reexec_failure
 if failure == "reexec":
     process_custody.spawn_supervised = reexec_failure
-elif os.name == "nt" or failure == "fallback":
-    # Windows replaces by spawning. The successor gets its own stdio so the test
-    # sees THIS process exit first; the successor then has to survive it to report.
-    spawn = process_custody.spawn_supervised
-    def detached_spawn(*args, **kwargs):
-        log = open(receipt.with_name(receipt.name + ".successor.log"), "w", encoding="utf-8")
-        kwargs.update(stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
-        return spawn(*args, **kwargs)
-    process_custody.spawn_supervised = detached_spawn
 supervisor.update_merge.read_update_tx_strict = lambda: ("absent", {})
 sys.exit(server.main())
 ''', encoding="utf-8")
@@ -439,24 +430,30 @@ sys.exit(server.main())
     env["OUROBOROS_DATA_DIR"] = str(tmp_path / "data")  # this case's own transaction
     arguments = [str(receipt), failure, "returned" if uvicorn_returns else "held",
                  'argument with "quotes" and a trailing\\']
-    result = subprocess.run([sys.executable, str(script), *arguments], env=env,
-                            capture_output=True, text=True, timeout=15)
+    stdout, stderr = tmp_path / "stdout.log", tmp_path / "stderr.log"
+    # The real Windows handoff retains stdio. Pipe EOF therefore waits for the
+    # successor, which itself waits for caller-exited below. Files let run() wait
+    # only for the caller's physical exit, without changing the spawn boundary.
+    with stdout.open("w", encoding="utf-8") as out, stderr.open("w", encoding="utf-8") as err:
+        result = subprocess.run([sys.executable, str(script), *arguments], env=env,
+                                stdout=out, stderr=err, timeout=15)
+    errors = stderr.read_text(encoding="utf-8", errors="replace")
+    output = stdout.read_text(encoding="utf-8", errors="replace") + errors
     if failure in {"cleanup", "reexec"}:
-        assert result.returncode == 1, result.stdout + result.stderr
-        assert "Restart failed; cleanup or transfer is unconfirmed" in result.stderr
-        assert "fixture " + failure + " failure" in result.stderr
+        assert result.returncode == 1, output
+        assert "Restart failed; cleanup or transfer is unconfirmed" in errors
+        assert "fixture " + failure + " failure" in errors
         assert not receipt.exists()
         return
     spawned = os.name == "nt" or failure == "fallback"
-    assert result.returncode == (42 if spawned else 0), result.stdout + result.stderr
+    assert result.returncode == (42 if spawned else 0), output
     if spawned:
         receipt.with_name(receipt.name + ".caller-exited").write_text("", encoding="utf-8")
         deadline = time.monotonic() + 20
         while not receipt.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
-        successor_log = receipt.with_name(receipt.name + ".successor.log")
         assert receipt.exists(), "the spawned successor did not outlive its caller: " + (
-            successor_log.read_text(encoding="utf-8") if successor_log.exists() else "no successor log")
+            stdout.read_text(encoding="utf-8", errors="replace") + stderr.read_text(encoding="utf-8", errors="replace"))
     observed = json.loads(receipt.read_text(encoding="utf-8"))
     assert observed["transaction"] == "physical-handoff"
     assert observed["port"] == "9123" and observed["cleanup"] == "completed"
@@ -481,12 +478,22 @@ sys.exit(server.main())
 ])
 def test_direct_transfer_uses_platform_process_primitive(monkeypatch, tmp_path, platform, failure):
     """Windows must bypass CRT exec; POSIX keeps exec and its spawn fallback."""
-    from ouroboros import config, server_control, process_custody
+    from ouroboros import config, platform_layer, server_control, process_custody
 
     class Transferred(BaseException):
         pass
 
-    calls, captured = [], {}
+    calls, captured, handles = [], {}, []
+    startupinfo = object()
+
+    @contextmanager
+    def parent_handle():
+        handles.append("opened")
+        try:
+            yield 77, {"startupinfo": startupinfo, "close_fds": True}
+        finally:
+            handles.append("closed")
+
     argv = ["server path.py", "", 'argument with "quotes"', "trailing\\"]
     environment = {"OUROBOROS_SERVER_HOST": "127.0.0.1", "S1_TOKEN": "same generation",
                    "OUROBOROS_MANAGED_BY_LAUNCHER": "1", "OUROBOROS_MANAGED_REPO_DIR": "old"}
@@ -514,6 +521,7 @@ def test_direct_transfer_uses_platform_process_primitive(monkeypatch, tmp_path, 
     monkeypatch.setattr(config, "load_settings", lambda: {})
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(process_custody, "spawn_supervised", spawn)
+    monkeypatch.setattr(platform_layer, "inheritable_self_handle", parent_handle)
     logger = SimpleNamespace(info=lambda *a: None, exception=lambda *a: None)
 
     def transfer():
@@ -528,9 +536,13 @@ def test_direct_transfer_uses_platform_process_primitive(monkeypatch, tmp_path, 
     else:
         transfer()
     assert calls == (["spawn"] if platform == "nt" else ["exec"] + (["spawn"] if failure else []))
+    assert handles == (["opened", "closed"] if platform == "nt" else [])
     assert captured["argv"] == ["python", *argv]
     assert captured["env"] == {"OUROBOROS_SERVER_HOST": "127.0.0.1",
-                               "S1_TOKEN": "same generation", "OUROBOROS_SERVER_PORT": "9123"}
+                               "S1_TOKEN": "same generation", "OUROBOROS_SERVER_PORT": "9123",
+                               **({"OUROBOROS_PLANNED_RESTART_PARENT_HANDLE": "77"} if platform == "nt" else {})}
+    if platform == "nt":
+        assert captured["startupinfo"] is startupinfo and captured["close_fds"] is True
     if "spawn" in calls:
         # Windows keeps the console group (CTRL+C); POSIX isolates the fallback's session.
         assert captured["new_process_group"] is (platform != "nt")
