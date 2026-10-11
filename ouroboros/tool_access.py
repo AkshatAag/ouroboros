@@ -578,7 +578,7 @@ def _select_process_target(
          for _label, root, _source, _name in candidate_records]
     )
     if aliased := docker_process_alias_target(ctx, operation, text, candidate_records, physical_candidates[0]):
-        return _finish(*aliased)  # Only BackendPathNoMatch resumes host-root selection below.
+        return _finish(*aliased)  # Identity mounts and unmapped host paths use normal roots below.
     for target in physical_candidates:
         for record in candidate_records:
             label, base, _source, _name = record

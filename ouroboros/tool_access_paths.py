@@ -92,8 +92,8 @@ def docker_process_alias_target(ctx: Any, operation: str, text: str, records: li
 
     Only shell/service (all four process tools) bind aliases; copy/write keep
     host targets. A real host address inside active_workspace outranks an alias.
-    None (no Docker executor, or ``BackendPathNoMatch``) resumes host-root
-    selection; a matched alias that is invalid or outside active_workspace refuses.
+    Identity mounts keep normal host-root checks; only ``BackendPathNoMatch``
+    falls back for an alias. Invalid or outside-active aliases refuse.
     """
     if operation not in {"shell", "service"} or not _tool_access().is_absolute_path_text(text):
         return None
@@ -112,6 +112,8 @@ def docker_process_alias_target(ctx: Any, operation: str, text: str, records: li
         mapped = map_backend_path(executor, text)
     except BackendPathNoMatch:
         return None
+    if mapped == physical:
+        return None  # An identity mount grants no root; ordinary host rules decide.
     if active and path_is_relative_to(mapped, active[1]):
         return active, mapped
     raise ValueError(f"backend cwd {text!r} maps to host path {mapped}, "

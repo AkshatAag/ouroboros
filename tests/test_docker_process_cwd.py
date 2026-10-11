@@ -131,14 +131,53 @@ def test_registry_refuses_matched_invalid_and_outside_alias(workspace, monkeypat
     assert "escapes executor mapping" in result or "outside active_workspace" in result
 
 
+@pytest.mark.parametrize("surface,arguments", SURFACES)
+def test_identity_mount_keeps_permitted_host_root_on_every_process_door(workspace, monkeypatch, surface, arguments):
+    from ouroboros.tools import services
+
+    ctx, active = workspace
+    scratch = active.parent / "scratch"
+    scratch.mkdir()
+    ctx.executor_ref["path_mappings"] = [
+        {"host_path": str(scratch), "backend_path": str(scratch)},
+        {"host_path": str(ctx.drive_root / "task_drives" / ctx.task_id), "backend_path": "/task"},
+    ]  # run_script also needs its existing task-drive staging mount.
+    ctx.executor_ref["type"] = "local"
+    assert bind(ctx, operation="shell", process_cwd=str(scratch)).root == "user_files"
+    ctx.executor_ref["type"] = "docker_exec"
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    calls = []
+
+    def safety(_name, _args, **kwargs):
+        binding = kwargs["resolved_binding"]
+        assert binding.root == "user_files"
+        assert binding.target_path == scratch.resolve()
+        return True, ""
+
+    def effect(_ctx, cmd, cwd, timeout_sec, **kwargs):
+        assert cwd == scratch.resolve()
+        assert executor.map_host_path(executor.executor_ref_from_ctx(ctx), cwd) == scratch.as_posix()
+        calls.append(cwd)
+        return executor.ExecutorResult(0, "bound\n", operation_outcome="completed")
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", safety)
+    monkeypatch.setattr("ouroboros.tools.shell.executor_execute", effect)
+    monkeypatch.setattr(executor, "execute", effect)
+    monkeypatch.setattr(services, "executor_start_service", lambda _ctx, **kw: (
+        effect(_ctx, kw["cmd"], kw["host_cwd"], 5) and {"state": "running", "service_id": "cwd-test:preview"}))
+    result = registry.execute(surface, {**arguments, "cwd": str(scratch)})
+    assert calls == [scratch.resolve()], result
+
+
 def test_host_workspace_precedence_and_other_host_roots_do_not_bypass_alias(workspace):
     ctx, active = workspace
     ctx.executor_ref["workspace_backend_path"] = active.parent.as_posix()
     physical = bind(ctx, operation="shell", process_cwd=str(active / "sub"))
     assert physical.target_path == (active / "sub").resolve()
-    # A textual match in another host root is still a matched backend alias.
+    # An identity mount cannot grant process access to the runtime data root.
     ctx.executor_ref["path_mappings"] = [{"host_path": str(ctx.drive_root), "backend_path": str(ctx.drive_root)}]
-    with pytest.raises(ValueError, match="outside active_workspace"):
+    with pytest.raises(ValueError):
         bind(ctx, operation="shell", process_cwd=str(ctx.drive_root))
     # copy_apply_refusal uses operation=write: its physical copy target is unchanged.
     copy_target = active.parent / "physical-copy"
