@@ -1,10 +1,12 @@
-"""Operation baselines for the facts move; no wall-clock performance gates."""
+"""Real-reader counts for filtered storage reads; no wall-clock gates."""
 
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+from ouroboros import swarm_rollup, task_status, task_store
 from ouroboros.task_finalization import build_swarm_efficiency
 from ouroboros.task_results import list_task_results, write_task_result
 from ouroboros.task_status import find_child_tasks
@@ -13,54 +15,43 @@ from ouroboros.utils import append_jsonl
 pytestmark = pytest.mark.scale
 
 
-@pytest.fixture(autouse=True)
-def runtime_journal(tmp_path, monkeypatch):
-    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
-
-
-def observations(root, operation):
-    rows = [json.loads(line) for line in (root / "logs/events.jsonl").read_text(encoding="utf-8").splitlines()]
-    return [row for row in rows if row.get("type") == "storage_read_timing" and row["operation"] == operation]
-
-
 @pytest.mark.parametrize("count", [1, 64, 256])
-def test_listing_decodes_only_the_rows_the_status_prefilter_selects(tmp_path, count):
+def test_listing_decodes_only_the_rows_the_status_prefilter_selects(tmp_path, monkeypatch, count):
     for index in range(count):
         write_task_result(tmp_path, f"task-{index}", "completed")
+    decode = Mock(wraps=task_store._decode)
+    monkeypatch.setattr(task_store, "_decode", decode)
     assert list_task_results(tmp_path, statuses=["running"]) == []
-    first = observations(tmp_path, "list_task_results")[-1]
-    assert first["operations"] == {"rows": 0}  # the WHERE discards before any body is decoded
-    assert first["calls"] == 1 and first["seconds"] >= 0 and not first["failed"]
-    assert first["caller"].endswith(":test_listing_decodes_only_the_rows_the_status_prefilter_selects")
+    assert [len(call.args[0]) for call in decode.call_args_list] == [0]
     assert len(list_task_results(tmp_path)) == count
-    full = observations(tmp_path, "list_task_results")
-    assert len(full) == 2 and full[-1]["operations"] == {"rows": count}
+    assert [len(call.args[0]) for call in decode.call_args_list] == [0, count]
 
 
-def test_child_lookup_selects_only_the_lineage_rows_on_every_call(tmp_path):
+def test_child_lookup_selects_only_the_lineage_rows_on_every_call(tmp_path, monkeypatch):
     for index in range(32):
         write_task_result(tmp_path, f"task-{index}", "completed", delegation_role="subagent",
                           parent_task_id="parent" if index == 0 else "other", root_task_id="parent" if index == 0 else "other")
+    decode = Mock(wraps=task_store._decode)
+    monkeypatch.setattr(task_store, "_decode", decode)
     for _ in range(2):
         assert [row["task_id"] for row in find_child_tasks(tmp_path, parent_task_id="parent", materialize_artifacts=False)] == ["task-0"]
-    first, second = observations(tmp_path, "find_child_tasks")
-    for row in (first, second):  # no cold/warm memo: the indexed WHERE selects the one row each time
-        assert row["operations"] == {"selected_rows": 1}
-        assert set(row["phases"]) == {"select", "effective", "queue_overlay"}
-        assert all(phase["calls"] == 1 and phase["seconds"] >= 0 for phase in row["phases"].values())
+    assert [len(call.args[0]) for call in decode.call_args_list] == [1, 1]
 
 
-def test_swarm_scan_and_depth_are_separate_observations(tmp_path):
+def test_swarm_rollup_reads_one_event_and_resolves_depth_once(tmp_path, monkeypatch):
     append_jsonl(tmp_path / "logs/events.jsonl", {"type": "swarm_fanout", "parent_task_id": "parent", "task_ids": ["child"]})
+    decode = Mock(wraps=json.loads)
+    children = Mock(wraps=task_status.find_child_tasks)
+    monkeypatch.setattr(swarm_rollup, "json", SimpleNamespace(loads=decode))
+    monkeypatch.setattr(task_status, "find_child_tasks", children)
     rollup = build_swarm_efficiency(SimpleNamespace(drive_root=tmp_path), {"id": "parent"})
     assert rollup["subagent_count"] == 1
-    row = observations(tmp_path, "build_swarm_efficiency")[-1]
-    assert row["operations"]["event_rows"] == 1
-    assert set(row["phases"]) == {"fanout_scan", "depth"}
-    assert observations(tmp_path, "find_child_tasks")[-1]["calls"] == 1
+    assert decode.call_count == 1
+    children.assert_called_once_with(tmp_path, parent_task_id="parent", root_task_id="parent",
+                                     scope="subtree", materialize_artifacts=False)
 
 
-def test_failure_is_counted_without_changing_exception_and_next_call_is_clean(tmp_path, monkeypatch):
+def test_reader_failure_propagates_and_next_call_succeeds(tmp_path, monkeypatch):
     from ouroboros import task_results
 
     write_task_result(tmp_path, "task", "completed")
@@ -70,30 +61,20 @@ def test_failure_is_counted_without_changing_exception_and_next_call_is_clean(tm
         broken.setattr(task_results, "list_documents", refuse)
         with pytest.raises(OSError, match="fixture unreadable"):
             list_task_results(tmp_path)
-    assert observations(tmp_path, "list_task_results")[-1]["failed"]
-    assert len(list_task_results(tmp_path)) == 1
-    assert not observations(tmp_path, "list_task_results")[-1]["failed"]
-
-
-def test_journal_failure_cannot_change_listing(tmp_path, monkeypatch):
-    from ouroboros import storage_observation
-
-    write_task_result(tmp_path, "task", "completed")
-    monkeypatch.setattr(storage_observation, "append_jsonl", lambda *args: (_ for _ in ()).throw(OSError("fixture full")))
     assert len(list_task_results(tmp_path)) == 1
 
 
 @pytest.mark.parametrize("existing_journal", [False, True])
-def test_observing_another_root_does_not_write_into_it(tmp_path, existing_journal):
-    inspected = tmp_path / "inspected"
+@pytest.mark.parametrize("another_root", [False, True])
+def test_listing_does_not_write_to_runtime_or_inspected_root(tmp_path, monkeypatch, existing_journal, another_root):
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    inspected = tmp_path / "inspected" if another_root else tmp_path
     write_task_result(inspected, "task", "completed")
     if existing_journal:
         append_jsonl(inspected / "logs/events.jsonl", {"type": "original_evidence"})
-    before = {path.relative_to(inspected): (path.read_bytes(), path.stat().st_mtime_ns)
-              for path in inspected.rglob("*") if path.is_file()}
+    before = {path.relative_to(tmp_path): (path.read_bytes(), path.stat().st_mtime_ns)
+              for path in tmp_path.rglob("*") if path.is_file()}
     assert len(list_task_results(inspected)) == 1
-    after = {path.relative_to(inspected): (path.read_bytes(), path.stat().st_mtime_ns)
-             for path in inspected.rglob("*") if path.is_file()}
+    after = {path.relative_to(tmp_path): (path.read_bytes(), path.stat().st_mtime_ns)
+             for path in tmp_path.rglob("*") if path.is_file()}
     assert after == before
-    row = observations(tmp_path, "list_task_results")[-1]
-    assert row["calls"] == 1 and row["operations"]["rows"] == 1

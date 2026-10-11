@@ -5,7 +5,6 @@ import json
 import pathlib
 
 from ouroboros.jsonl_tail import JsonlChainSnapshot
-from ouroboros.storage_observation import storage_count
 from ouroboros.utils import jsonl_chain_handles
 
 
@@ -52,7 +51,6 @@ def load_swarm_rollup(drive_root, task_id):
                 if not raw.strip():
                     continue
                 event = json.loads(raw)
-                storage_count("event_rows")
                 if isinstance(event, dict):
                     _accumulate(facts, children, lanes, event, task_id)
     facts.update(source_root=str(root.resolve()), through=through, child_ids=sorted(children), lanes_requested=lanes)

@@ -79,10 +79,9 @@ Apply ARCHITECTURE §10 invariant 10 to current-state readers; review and growth
 
 - **Evaluate the whole operation as the project grows:** history, object count, nested
   repetition, cold caches, shared-resource contention. Where growth can hurt
-  responsiveness, show representative-scale evidence from monotonic spans and counts
-  in the event log, never new history reads for telemetry. Remove redundant work or
-  reuse a validated view before adding a
-  projection or cache. Unknown evidence never means empty. This advisory reasoning sets
+  responsiveness, use existing spans and test spies on real readers for scale evidence;
+  telemetry adds no steady-state writes or history reads. Remove redundant work or
+  reuse a validated view before adding a projection or cache. Unknown never means empty. This reasoning sets
   no universal time limit, mandatory benchmark or extra approval gate.
 - **Passive GET.** Read handlers perform no new steady-state durable writes.
   `ouroboros/usage_store.py::read` may initialize an empty store when nothing awaits

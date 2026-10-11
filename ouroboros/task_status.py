@@ -51,7 +51,6 @@ from ouroboros.task_results import (
     validate_task_id,
 )
 from ouroboros.queue_observation import load_queue_document, queue_stamp
-from ouroboros.storage_observation import storage_count, storage_observed, storage_phase
 from ouroboros.utils import iter_jsonl_objects
 
 log = logging.getLogger(__name__)
@@ -1199,7 +1198,6 @@ def wait_for_effective_tasks(
 
 
 @cached_finalization_children
-@storage_observed
 @timed_phase("child_lookup")
 def find_child_tasks(
     drive_root: pathlib.Path,
@@ -1220,71 +1218,67 @@ def find_child_tasks(
     excluded = str(exclude_task_id or "").strip()
     direct_only = str(scope or "subtree").strip().lower() == "direct"
 
-    with storage_phase("select"):
-        # The store's WHERE: every row carrying a retry or supersession pointer (lineage any child
-        # may hang on), plus the ``subagent`` rows naming the parent or the root; ``task_id`` order,
-        # so the retry projection and the last-row-wins fold below are deterministic.
-        # Lineage-less live rows reappear through the queue overlay.
-        selected = select_lineage(pathlib.Path(drive_root), parent, root, direct_only=direct_only)
-        storage_count("selected_rows", len(selected))
-    with storage_phase("effective"):
-        events_index = _EventsTailIndex(pathlib.Path(drive_root))
-        rows: Dict[str, Dict[str, Any]] = {}
-        for row in (
-            effective_task_result(
-                pathlib.Path(drive_root), item,
-                materialize_artifacts=materialize_artifacts,
-                _events_index=events_index,
-            )
-            for item in selected
-        ):
-            tid = str(row.get("task_id") or "")
+    # The store's WHERE: every row carrying a retry or supersession pointer (lineage any child
+    # may hang on), plus the ``subagent`` rows naming the parent or the root; ``task_id`` order,
+    # so the retry projection and the last-row-wins fold below are deterministic.
+    # Lineage-less live rows reappear through the queue overlay.
+    selected = select_lineage(pathlib.Path(drive_root), parent, root, direct_only=direct_only)
+    events_index = _EventsTailIndex(pathlib.Path(drive_root))
+    rows: Dict[str, Dict[str, Any]] = {}
+    for row in (
+        effective_task_result(
+            pathlib.Path(drive_root), item,
+            materialize_artifacts=materialize_artifacts,
+            _events_index=events_index,
+        )
+        for item in selected
+    ):
+        tid = str(row.get("task_id") or "")
+        if not tid or tid == excluded:
+            continue
+        if str(row.get("delegation_role") or "") != "subagent":
+            continue
+        if parent and str(row.get("parent_task_id") or "") == parent:
+            rows[tid] = row
+        elif not direct_only and root and str(row.get("root_task_id") or "") == root:
+            rows[tid] = row
+
+    snapshot = _load_queue_snapshot(pathlib.Path(drive_root))
+    for group, status in (("pending", STATUS_SCHEDULED), ("running", STATUS_RUNNING)):
+        for item in snapshot.get(group) or []:
+            if not isinstance(item, dict):
+                continue
+            task = item.get("task") if isinstance(item.get("task"), dict) else {}
+            tid = str(item.get("id") or task.get("id") or "")
             if not tid or tid == excluded:
                 continue
-            if str(row.get("delegation_role") or "") != "subagent":
+            if str(task.get("delegation_role") or "") != "subagent":
                 continue
-            if parent and str(row.get("parent_task_id") or "") == parent:
+            if parent and str(task.get("parent_task_id") or "") == parent:
+                row = dict(task)
+            elif not direct_only and root and str(task.get("root_task_id") or "") == root:
+                row = dict(task)
+            else:
+                continue
+            row.setdefault("task_id", tid)
+            row["status"] = status
+            existing = rows.get(tid, {})
+            if not existing:
+                # Queue lineage can recover a row skipped by the prefilter;
+                # retain its disk cost, result and artifacts as well.
+                existing = load_effective_task_result(
+                    pathlib.Path(drive_root), tid, materialize_artifacts=materialize_artifacts
+                )
+            if not existing:
                 rows[tid] = row
-            elif not direct_only and root and str(row.get("root_task_id") or "") == root:
-                rows[tid] = row
-
-    with storage_phase("queue_overlay"):
-        snapshot = _load_queue_snapshot(pathlib.Path(drive_root))
-        for group, status in (("pending", STATUS_SCHEDULED), ("running", STATUS_RUNNING)):
-            for item in snapshot.get(group) or []:
-                if not isinstance(item, dict):
-                    continue
-                task = item.get("task") if isinstance(item.get("task"), dict) else {}
-                tid = str(item.get("id") or task.get("id") or "")
-                if not tid or tid == excluded:
-                    continue
-                if str(task.get("delegation_role") or "") != "subagent":
-                    continue
-                if parent and str(task.get("parent_task_id") or "") == parent:
-                    row = dict(task)
-                elif not direct_only and root and str(task.get("root_task_id") or "") == root:
-                    row = dict(task)
-                else:
-                    continue
-                row.setdefault("task_id", tid)
-                row["status"] = status
-                existing = rows.get(tid, {})
-                if not existing:
-                    # Queue lineage can recover a row skipped by the prefilter;
-                    # retain its disk cost, result and artifacts as well.
-                    existing = load_effective_task_result(
-                        pathlib.Path(drive_root), tid, materialize_artifacts=materialize_artifacts
-                    )
-                if not existing:
-                    rows[tid] = row
-                    continue
-                combined = dict(existing)
-                for key, value in row.items():
-                    if key == "status":
-                        combined["status"] = _merge_queue_status(str(existing.get("status") or ""), str(value or ""), row)
-                    elif not combined.get(key) and value:
-                        combined[key] = value
-                rows[tid] = combined
+                continue
+            combined = dict(existing)
+            for key, value in row.items():
+                if key == "status":
+                    combined["status"] = _merge_queue_status(str(existing.get("status") or ""), str(value or ""), row)
+                elif not combined.get(key) and value:
+                    combined[key] = value
+            rows[tid] = combined
     return sorted(rows.values(), key=lambda item: (str(item.get("ts") or ""), str(item.get("task_id") or "")))
 
 

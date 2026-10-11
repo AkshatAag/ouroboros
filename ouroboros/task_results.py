@@ -10,7 +10,6 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.cost_projection import COST_ALIAS_PAIRS, COST_OPENNESS_FIELDS, normalize_task_result_cost_planes
-from ouroboros.storage_observation import storage_count, storage_observed
 from ouroboros.task_store import list_documents, patch_document, read_document
 from ouroboros.utils import utc_now_iso
 # Projection owner retains read custody; this historical import remains compatible.
@@ -770,7 +769,6 @@ def _admit_stored(data: Dict[str, Any], task_id: str, *, strict: bool, noun: str
         raise ValueError(f"{noun} is unreadable or invalid: task:{task_id}")
 
 
-@storage_observed
 def list_task_results(
     drive_root: Any,
     *,
@@ -787,7 +785,6 @@ def list_task_results(
     for data in list_documents(drive_root, statuses=wanted or None):
         _admit_stored(data, str(data.get("task_id") or ""), strict=strict, noun="task result")
         results.append(_normalize_swarm_efficiency(data))
-    storage_count("rows", len(results))
     return results
 
 

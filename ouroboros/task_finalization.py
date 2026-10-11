@@ -32,7 +32,6 @@ import pathlib
 import stat
 from typing import Any, Dict, List
 
-from ouroboros.storage_observation import storage_observed, storage_phase
 from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
 from ouroboros.observability import stamp_finalization_enqueue
 
@@ -812,7 +811,6 @@ def model_execution_projection(usage: Dict[str, Any]) -> Dict[str, Any] | None:
     }
 
 
-@storage_observed
 def build_swarm_efficiency(env: Any, task: Dict[str, Any]) -> Dict[str, Any] | None:
     """Observed fan-out from the root row, plus current subtree depth.
 
@@ -831,8 +829,7 @@ def build_swarm_efficiency(env: Any, task: Dict[str, Any]) -> Dict[str, Any] | N
         drive_root = getattr(env, "drive_root", None)
         if drive_root is None:
             return None
-        with storage_phase("fanout_scan"):
-            facts = load_swarm_rollup(drive_root, task_id)
+        facts = load_swarm_rollup(drive_root, task_id)
         child_ids = facts.get("child_ids", [])
         if not child_ids:
             if swarm_intent:
@@ -855,15 +852,14 @@ def build_swarm_efficiency(env: Any, task: Dict[str, Any]) -> Dict[str, Any] | N
             from ouroboros.depth_evidence import build_depth_summary
             from ouroboros.task_status import find_child_tasks
 
-            with storage_phase("depth"):
-                canonical = pathlib.Path(task.get("budget_drive_root") or drive_root)
-                rollup["depth"] = build_depth_summary(
-                    task.get("task_contract"),
-                    find_child_tasks(
-                        canonical, parent_task_id=task_id, root_task_id=task_id,
-                        scope="subtree", materialize_artifacts=False,
-                    ),
-                )
+            canonical = pathlib.Path(task.get("budget_drive_root") or drive_root)
+            rollup["depth"] = build_depth_summary(
+                task.get("task_contract"),
+                find_child_tasks(
+                    canonical, parent_task_id=task_id, root_task_id=task_id,
+                    scope="subtree", materialize_artifacts=False,
+                ),
+            )
         except Exception:
             log.debug("swarm depth summary failed", exc_info=True)
         if swarm_intent:
