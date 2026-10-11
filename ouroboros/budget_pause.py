@@ -466,6 +466,19 @@ def budget_pause_row(root: Any, task_id: str) -> Dict[str, Any]:
     return dict(pause) if isinstance(pause, dict) else {}
 
 
+def death_returns_to_pause(row: Dict[str, Any], attempt: Any) -> bool:
+    """A live pause of this very attempt whose grant, if any, nothing consumed.
+
+    The window of ``worker_health._complete_exact_budget_pause_after_death``
+    (#1196, F4): a worker death here returns the SAME task id to its exact pause
+    (or that recovery decides the death itself), so the worker records no
+    terminal of its own for a ``handle_task`` exception inside it.
+    """
+    grant = row.get("grant") if isinstance(row.get("grant"), dict) else {}
+    return bool(str(row.get("state") or "") in LIVE_PAUSE_STATES
+                and int(row["task_attempt"]) == int(attempt) and not grant.get("consumed_at"))
+
+
 # --- the pause itself -----------------------------------------------------------------
 
 # How often a HOLD re-reads the task's EXISTING controls and re-observes its

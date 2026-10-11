@@ -374,7 +374,7 @@ jobs:
       # launch fails, and a run in which no case ran or any case skipped is refused.
       # The browser fixture runs its candidate only from an interpreter that cannot import
       # an INSTALLED ouroboros (tests/candidate_checkout.py), and this job's shared env has
-      # the checkout installed. So these two steps own a dependency-only env from the same
+      # the checkout installed. So these steps own a dependency-only env from the same
       # reviewed lock and the shared env's own base interpreter (the setup action's test
       # profile with --no-install-project, as the UI lane's); the shared env and every
       # other step of this job stay as they are.
@@ -402,6 +402,34 @@ jobs:
         run: |
           "$ATTACHMENT_PYTHON" -I -S scripts/safe_test.py -- "$ATTACHMENT_PYTHON" -m pytest tests/test_chat_attachments_browser.py -m ui_browser -k chromium -q --tb=short -rs --junitxml="$RUNNER_TEMP/ci-private/attachment-browser.xml"
           python -c "import sys, xml.etree.ElementTree as E; s = next(E.parse(sys.argv[1]).getroot().iter('testsuite')); n, k = int(s.get('tests')), int(s.get('skipped')); print(f'{n} ran, {k} skipped'); sys.exit(n == 0 or k > 0)" "$RUNNER_TEMP/ci-private/attachment-browser.xml"
+      # The message field's sizing (tests/test_chat_input_sizing_browser.py) where scrollbars
+      # take width, in the same env and Chromium, under the same no-skip rule. Its geometry
+      # and screenshots are the evidence, so a run that wrote none fails. Chromium on Windows,
+      # not the packaged WebView2 window.
+      - name: Run the message-field sizing browser test on Windows (Chromium)
+        id: composer_browser
+        timeout-minutes: 20
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.attachment_browser_install.outcome == 'success' }}
+        shell: bash
+        env:
+          OUROBOROS_RUN_UI_SMOKE: "1"
+          OUROBOROS_UI_EVIDENCE_DIR: ${{ runner.temp }}/ci-evidence/composer
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/attachment-browsers
+          ATTACHMENT_PYTHON: ${{ runner.temp }}/attachment-env/Scripts/python.exe
+        run: |
+          "$ATTACHMENT_PYTHON" -I -S scripts/safe_test.py -- "$ATTACHMENT_PYTHON" -m pytest tests/test_chat_input_sizing_browser.py -m ui_browser -k chromium -q --tb=short -rs --junitxml="$RUNNER_TEMP/ci-private/composer-browser.xml"
+          python -c "import sys, xml.etree.ElementTree as E; s = next(E.parse(sys.argv[1]).getroot().iter('testsuite')); n, k = int(s.get('tests')), int(s.get('skipped')); print(f'{n} ran, {k} skipped'); sys.exit(n == 0 or k > 0)" "$RUNNER_TEMP/ci-private/composer-browser.xml"
+          python -c "import os, sys; sys.exit(os.path.getsize(sys.argv[1]) == 0)" "$OUROBOROS_UI_EVIDENCE_DIR/composer-sizing-chromium.json"
+      - name: Upload the Windows message-field sizing evidence (geometry, screenshots)
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.attachment_browser_install.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: composer-sizing-windows
+          overwrite: true
+          path: ${{ runner.temp }}/ci-evidence/composer/
+          if-no-files-found: warn
+          retention-days: 30
       # Names the failed, crashed and in-flight tests in the job summary and as
       # annotations; a killed step still reports through its incremental journal.
       - name: Publish test evidence

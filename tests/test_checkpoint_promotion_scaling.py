@@ -151,11 +151,13 @@ def test_shared_missing_dependency_stays_unavailable_and_retry_can_recover(tmp_p
     path.unlink()
     body = {"review_evidence": {"source_refs": [ref, ref]}}
     copied, state = observability.promote_child_task_refs(parent, child, task, body)
-    assert len(state["unavailable_refs"]) == 1
-    assert all(row["availability"] == "unavailable" for row in copied["review_evidence"]["source_refs"])
+    assert len(state["unavailable_refs"]) == 1 and state["unavailable_refs"][0]["path"] == ref["path"]
+    assert copied == body  # both carriers keep their reference; the failure is a promotion fact
     path.write_bytes(b"exact source")
-    copied, state = observability.promote_child_task_refs(parent, child, task, body)
+    # The live retry walks the row the previous pass published, not the original body.
+    copied, state = observability.promote_child_task_refs(parent, child, task, copied)
     assert not state["unavailable_refs"] and not state["pending_refs"]
+    shutil.rmtree(child)
     assert artifacts.read_actor_source_bytes(parent, task, copied["review_evidence"]["source_refs"][0]) == b"exact source"
 
 

@@ -125,11 +125,13 @@ def task_result_authority_projection(
     if receipts:
         authority["verification_receipts"] = copy.deepcopy(receipts)
     if isinstance(authority.get("plan_review_state"), dict):
-        from ouroboros.tools.plan_review_artifacts import authority_state
+        from ouroboros.tools.plan_review_artifacts import projected_authority_state
 
-        authority["plan_review_state"] = authority_state(
+        authority["plan_review_state"], gap = projected_authority_state(
             drive_root, str(row.get("task_id") or row.get("id") or ""), authority["plan_review_state"],
-        )
+            promotion=row.get("child_ref_promotion"))
+        # Beside the recorded state, never inside it: every projection keeps this small field whole.
+        authority.update({"plan_review_source_gap": gap} if gap else {})
     return authority
 
 
@@ -214,11 +216,9 @@ def validate_task_authority_sources(env: Any, task: Dict[str, Any]) -> Dict[str,
         }
 
     origin_ref = task.get("origin_message_ref")
+    owner_source = {"kind": "owner_message", "human_label": "originating owner message", "ref": origin_ref}
     if origin_ref not in (None, {}) and not isinstance(origin_ref, dict):
-        return _unavailable(
-            {"kind": "owner_message", "human_label": "originating owner message", "ref": origin_ref},
-            "named owner source reference is not an object",
-        )
+        return _unavailable(owner_source, "named owner source reference is not an object")
     if isinstance(origin_ref, dict) and origin_ref:
         from ouroboros.project_dialogue import (
             _text_sha256,
@@ -227,25 +227,17 @@ def validate_task_authority_sources(env: Any, task: Dict[str, Any]) -> Dict[str,
         )
 
         if not owner_message_ref_is_valid(origin_ref):
-            return _unavailable(
-                {"kind": "owner_message", "human_label": "originating owner message", "ref": origin_ref},
-                "named owner source reference has an invalid host identity shape",
-            )
+            return _unavailable(owner_source, "named owner source reference has an invalid host identity shape")
 
         origin_text = task.get("origin_message_text")
         if isinstance(origin_text, str) and origin_text:
             if _text_sha256(origin_text) != str(origin_ref.get("text_sha256") or ""):
-                return _unavailable(
-                    {"kind": "owner_message", "human_label": "originating owner message", "ref": origin_ref},
-                    "retained origin text does not match its ingress checksum",
-                )
+                return _unavailable(owner_source, "retained origin text does not match its ingress checksum")
         else:
             matching = resolve_owner_message_source(root, origin_ref)
             if matching is None:
                 return _unavailable(
-                    {"kind": "owner_message", "human_label": "originating owner message", "ref": origin_ref},
-                    "named canonical owner row is not readable and no retention-proof text is stored",
-                )
+                    owner_source, "named canonical owner row is not readable and no retention-proof text is stored")
             task["origin_message_text"] = str(matching.get("text") or "")
 
     predecessor = task.get("predecessor_authority_source")
@@ -264,7 +256,8 @@ def validate_task_authority_sources(env: Any, task: Dict[str, Any]) -> Dict[str,
             load_effective_task_result(root, predecessor_id, materialize_artifacts=False)
             if predecessor_id else None
         )
-        if not isinstance(predecessor_row, dict):
+        # A missing file reads back as ``{}``: an empty row is no predecessor either.
+        if not isinstance(predecessor_row, dict) or not predecessor_row:
             return _unavailable(predecessor, "named predecessor task result is missing or unreadable")
         # The pull pointer is written LAST: a projected row field named
         # ``source`` must not clobber the authority route the pull flow and

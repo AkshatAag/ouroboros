@@ -499,8 +499,10 @@ def test_plan_dialogue_promotion_never_reads_a_foreign_source(tmp_path, monkeypa
     opened = _record_path_reads(monkeypatch, foreign)
     copied = copy_child_task_result(parent, {'id': 'source', 'drive_root': str(child)})
     copied = retry_child_task_refs(parent, child, 'source')
-    assert copied['plan_review_state']['waves'][0]['dialogue_source_ref']['availability'] == 'unavailable'
-    assert copied['child_ref_promotion']['unavailable_refs']
+    # The carrier keeps its own reference; the refusal is a promotion fact.
+    assert copied['plan_review_state']['waves'][0]['dialogue_source_ref'] == ref
+    assert [(row['path'], row['reason']) for row in copied['child_ref_promotion']['unavailable_refs']] == [
+        (ref['path'], 'invalid_scope' if link else 'invalid_ref')]
     assert not (artifacts.task_artifact_dir_path(parent, 'sibling') / ref['path']).exists()
     assert foreign not in opened
     # Positive control: the same guard intercepts the source reader on this very file.

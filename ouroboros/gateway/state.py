@@ -471,7 +471,8 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 (
                     str(task_id),
                     {**(meta.get("task") or {}), "_attempt": int(meta.get("attempt")
-                        or (meta.get("task") or {}).get("_attempt") or 1)} if isinstance(meta, dict) else {},
+                        or (meta.get("task") or {}).get("_attempt") or 1),
+                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity")} if isinstance(meta, dict) else {},
                     _epoch_or_zero(meta.get("started_at")) if isinstance(meta, dict) else 0.0,
                 )
                 for task_id, meta in queue_mod.RUNNING.items()
@@ -514,6 +515,8 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                 "task_attempt": int(row.get("_attempt") or 1),
                 **{key: row[key] for key in ("timeout_retry_from", "original_task_id") if row.get(key)},
                 **({"model_waits": row["model_waits"]} if row.get("model_waits") else {}),
+                **({"model_activity": row["model_activity"]} if row.get("model_activity")
+                   and row["model_activity"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
                 **({"project_admission_hold": project_hold_fact(row)}
                    if row.get("_project_admission_restore_hold") else {}),
             }

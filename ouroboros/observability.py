@@ -483,22 +483,22 @@ def promote_call_manifest_ref(source_drive_root, canonical_drive_root, ref, *, t
     return _retain_single_ref(source_drive_root, canonical_drive_root, ref, task_id=task_id)
 
 
-_PUBLISHED_CHILD_REF_FIELDS = frozenset(
-    {
-        "trace_refs",
-        "loop_outcome",
-        "review_evidence",
-        "review_projection",
-        "completion_observations",
-        "acceptance_debt",
-        "owner_wait",
-        "verification_ledger",
-        "root_phase_checkpoint",
-        "plan_review_state",
-        "artifacts",
-        "artifact_bundle",
-        "task_contract", "attachment_manifest", "attachment_manifest_ref",
-    }
+# A tuple in written order, never a set: every process walks these fields in the
+# same order (a frozenset of str follows the per-process hash seed).
+_PUBLISHED_CHILD_REF_FIELDS = (
+    "trace_refs",
+    "loop_outcome",
+    "review_evidence",
+    "review_projection",
+    "completion_observations",
+    "acceptance_debt",
+    "owner_wait",
+    "verification_ledger",
+    "root_phase_checkpoint",
+    "plan_review_state",
+    "artifacts",
+    "artifact_bundle",
+    "task_contract", "attachment_manifest", "attachment_manifest_ref",
 )
 _SOURCE_HANDLES_SUBDIR = "source_handles"
 _TASK_SOURCE_MARKERS = ("FULL_RESULT_SOURCE_JSON=", "PRODUCER_RESULT_SOURCE_JSON=")
@@ -541,6 +541,49 @@ def _typed_unavailable_ref(ref: Any, reason: str) -> Dict[str, Any]:
     }
 
 
+def restore_recorded_task_source_gaps(value: Any, promotion: Any, owner_task_id: str) -> Any:
+    """Give a legacy path-less task_source gap the address its own row recorded.
+
+    Retention once replaced whole ``task_source`` carriers with the
+    ``_typed_unavailable_ref`` shape while the promotion fact kept the path. A gap
+    regains its compact handle only when this owner's ``unavailable_refs`` record
+    exactly one relative path for its sha256 and size; the ordinary reader then
+    verifies the bytes. Nothing is guessed, scanned or written here, and ``value``
+    itself returns when the row records no candidate path.
+    """
+    facts = promotion.get("unavailable_refs") if isinstance(promotion, dict) else None
+    recorded: Dict[tuple, set] = {}
+    for fact in facts if isinstance(facts, list) else ():
+        try:
+            if (fact.get("kind") == "task_source" and fact.get("sha256") and fact.get("path")
+                    and str(fact.get("owner_task_id") or "") == str(owner_task_id)
+                    and not pathlib.PurePosixPath(str(fact["path"])).is_absolute()):
+                recorded.setdefault((str(fact["sha256"]), int(fact["size"])), set()).add(str(fact["path"]))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue  # a malformed fact records no address
+    if not recorded:
+        return value
+
+    def restore(item: Any) -> Any:
+        if isinstance(item, list):
+            return [restore(child) for child in item]
+        if not isinstance(item, dict):
+            return item
+        if (item.get("kind") != "task_source" or item.get("availability") != "unavailable"
+                or item.get("source") != "child_task_storage" or item.get("path")):
+            return {key: restore(child) for key, child in item.items()}
+        try:
+            paths = recorded.get((str(item.get("sha256") or ""), int(item["size"])), set())
+        except (KeyError, TypeError, ValueError):
+            paths = set()
+        if len(paths) != 1:
+            return item  # no recorded path, or several: the gap stays a gap
+        return {"kind": "task_source", "root": item.get("root") or "artifact_store",
+                "path": next(iter(paths)), "size": int(item["size"]), "sha256": item["sha256"]}
+
+    return restore(value)
+
+
 def _is_blob_ref(value: Any) -> bool:
     return bool(
         isinstance(value, dict)
@@ -564,20 +607,6 @@ def _is_manifest_ref(value: Any) -> bool:
 def _is_task_source_ref(value: Any) -> bool:
     return bool(isinstance(value, dict) and value.get("kind") == "task_source"
                 and value.get("availability") != "unavailable")
-
-
-def _task_source_contract_valid(ref: Dict[str, Any]) -> bool:
-    read = ref.get("read") if isinstance(ref.get("read"), dict) else {}
-    arguments = (
-        read.get("arguments") if isinstance(read.get("arguments"), dict) else {}
-    )
-    path = str(ref.get("path") or "")
-    return bool(
-        ref.get("root") == "artifact_store"
-        and read.get("tool") == "read_file"
-        and arguments.get("root") == ref.get("root")
-        and str(arguments.get("path") or "") == path
-    )
 
 
 def _task_source_failure_reason(exc: Exception) -> str:
@@ -637,7 +666,7 @@ def _rewrite_service_result(
     return text if walk is not None and walk.discovering else prefix + json.dumps(parsed, ensure_ascii=False, indent=2)
 
 
-def _rewrite_task_source_markers(
+def _retain_task_source_markers(
     text: str,
     parent_root: pathlib.Path,
     child_root: pathlib.Path,
@@ -645,44 +674,29 @@ def _rewrite_task_source_markers(
     state: Dict[str, Any],
     *, tool_call_id: str,
 ) -> str:
-    """Promote only the host tool envelope's own call-bound result sources."""
+    """Retain only the host tool envelope's own call-bound result sources.
 
-    rewritten_lines: List[str] = []
+    The text returns byte-identical: a marker carries the reference exactly as
+    its producer wrote it (spacing, key order, line ending), never re-serialized.
+    """
     for line in str(text).splitlines(keepends=True):
         body = line.rstrip("\r\n")
         marker = next((prefix for prefix in _TASK_SOURCE_MARKERS if body.startswith(prefix)), None)
         if marker is None:
-            rewritten_lines.append(line)
             continue
         try:
             ref = json.loads(body[len(marker):])
         except (TypeError, ValueError):
-            rewritten_lines.append(line)
             continue
         # Text alone is not authority. The enclosing host tool message binds
         # this envelope to the source writer's exact task/call identity. A
         # marker quoted by another call, user, assistant or argument is data.
         source_id = tool_call_id + (".producer" if marker == "PRODUCER_RESULT_SOURCE_JSON=" else "")
         source_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", source_id).strip("._")[:160]
-        if (not _is_task_source_ref(ref) or not tool_call_id
-                or ref.get("path") != f"source_handles/tool_results/{source_id}-{ref.get('sha256')}.txt"):
-            rewritten_lines.append(line)
-            continue
-        promoted = _promote_task_source_ref(
-            parent_root, child_root, task_id, ref, state
-        )
-        rewritten_lines.append(
-            marker
-            + json.dumps(
-                promoted,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + line[len(body):]
-        )
-    from ouroboros.source_retention import active_walk
-    return text if active_walk() and active_walk().discovering else "".join(rewritten_lines)
+        if (_is_task_source_ref(ref) and tool_call_id
+                and ref.get("path") == f"source_handles/tool_results/{source_id}-{ref.get('sha256')}.txt"):
+            _promote_task_source_ref(parent_root, child_root, task_id, ref, state)
+    return text
 
 
 def _rewrite_service_payload(
@@ -733,7 +747,7 @@ def _rewrite_child_ref_tree(
         return _promote_task_source_ref(parent_root, child_root, task_id, value, state)
     if isinstance(value, dict):
         if carrier == "message" and value.get("role") == "tool" and isinstance(value.get("content"), str):
-            return {**value, "content": _rewrite_task_source_markers(value["content"], parent_root,
+            return {**value, "content": _retain_task_source_markers(value["content"], parent_root,
                 child_root, task_id, state, tool_call_id=str(value.get("tool_call_id") or ""))}
         if carrier == "contract":
             original = value.get("attachment_manifest_ref")
@@ -788,8 +802,10 @@ def promote_child_task_refs(
             if key in rewritten:
                 from ouroboros.review_source_closure import source_carrier
 
+                # A legacy gap regains the address its own facts recorded; the walk verifies the bytes.
                 rewritten[key] = _rewrite_child_ref_tree(
-                    rewritten[key], parent_root, child_root, task_id, state,
+                    restore_recorded_task_source_gaps(rewritten[key], child_result.get("child_ref_promotion"), task_id),
+                    parent_root, child_root, task_id, state,
                     carrier=source_carrier(rewritten, key, 'task_result'),
                 )
         artifacts = rewritten.get("artifacts")

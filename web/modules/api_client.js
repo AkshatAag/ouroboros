@@ -436,6 +436,16 @@ export const apiClient = {
     projectDelete: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/delete`, {}),
     /** @returns {Promise<import('./api_types.js').FsDirsResponse>} */
     fsDirs: (path = '') => fetchJson(`/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
+    /**
+     * Dashboard storage: the server's last measurement, read passively (no walk, no write).
+     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     */
+    storage: (init = {}) => fetchJson('/api/storage', { cache: 'no-store', ...init }),
+    /**
+     * Start one bounded measurement, or join the running one (202 either way).
+     * @returns {Promise<import('./storage_types.js').StorageResponse>}
+     */
+    measureStorage: () => jsonPost('/api/storage/measure', {}),
     updateStatus: () => fetchJson('/api/update/status', { cache: 'no-store' }),
     updateCheck: () => jsonPost('/api/update/check', {}),
     /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */

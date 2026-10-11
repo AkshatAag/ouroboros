@@ -55,6 +55,7 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { chooseAndSendReview } from './review_command.js';
 import { bindEnterSubmit } from './ui_interactions.js';
 import { createComposerOwnerControls } from './composer_owner_controls.js';
+import { attachChatInputSizing } from './chat_input_sizing.js';
 import { effortFact } from './effort_chip.js';
 import { mountEmptyChatWelcome } from './welcome_preference.js';
 import {
@@ -2876,12 +2877,10 @@ export function createChatInstance({
         inputDraft = '';
     }
 
+    // The field's height follows its text up to the stylesheet cap (chat_input_sizing.js).
+    const inputSizing = attachChatInputSizing(input);
     function resizeChatInput() {
-        const caretAtEnd = input.selectionEnd >= input.value.length - 1;
-        const previousScrollTop = input.scrollTop;
-        input.style.height = 'auto';
-        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-        input.scrollTop = caretAtEnd ? input.scrollHeight : previousScrollTop;
+        inputSizing.sync();
         updateMessagesPadding();
     }
 
@@ -3900,6 +3899,7 @@ export function createChatInstance({
             if (documentKeydownHandler) document.removeEventListener('keydown', documentKeydownHandler);
             chatResizeObserver?.disconnect();
             chatResizeObserver = null;
+            inputSizing.dispose();
             historyResyncScheduler.cancel();
             if (headerControlInterval) { clearInterval(headerControlInterval); headerControlInterval = null; }
             for (const id of liveCardRecords.keys()) disposeLiveCard(id);
