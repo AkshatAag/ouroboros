@@ -108,6 +108,28 @@ def _live_cmd_sha256(pid: int) -> str:
     return hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
 
 
+def process_fingerprint(pid: int, cmd: Any = None) -> Dict[str, str]:
+    """The measured birth/command identity of a live PID, as custody rows record it."""
+    return {
+        # DOWNGRADE-SAFE split: the unversioned field keeps the legacy ``ps``
+        # spelling an N-1 reader still understands (a rollback that reads a
+        # boot-qualified token here would mismatch every row and prune it
+        # WITHOUT killing, orphaning the process forever), while the current
+        # reader prefers the boot-qualified sibling below. One extra ``ps``
+        # per SPAWN (the write path always paid it before /proc-first); the
+        # hot sweep path stays subprocess-free.
+        "start_time": (legacy_start := process_start_time_legacy(pid)),
+        **(
+            {"start_time_boot": boot_start}
+            if (boot_start := process_start_time(pid)) and boot_start != legacy_start
+            else {}
+        ),
+        # The LIVE command line (what the OS reports) is the reap-time
+        # comparison anchor; the argv we passed may differ cosmetically.
+        "cmd_sha256": _live_cmd_sha256(pid) or _cmd_sha256(cmd),
+    }
+
+
 def record_process(
     drive_root: pathlib.Path,
     *,
@@ -129,24 +151,7 @@ def record_process(
         "ts": utc_now_iso(),
         "pid": int(pid),
         "pgid": int(pgid or 0) if reap_process_group else 0,
-        "fingerprint": {
-            # DOWNGRADE-SAFE split: the unversioned field keeps the legacy ``ps``
-            # spelling an N-1 reader still understands (a rollback that reads a
-            # boot-qualified token here would mismatch every row and prune it
-            # WITHOUT killing, orphaning the process forever), while the current
-            # reader prefers the boot-qualified sibling below. One extra ``ps``
-            # per SPAWN (the write path always paid it before /proc-first); the
-            # hot sweep path stays subprocess-free.
-            "start_time": (legacy_start := process_start_time_legacy(pid)),
-            **(
-                {"start_time_boot": boot_start}
-                if (boot_start := process_start_time(pid)) and boot_start != legacy_start
-                else {}
-            ),
-            # The LIVE command line (what the OS reports) is the reap-time
-            # comparison anchor; the argv we passed may differ cosmetically.
-            "cmd_sha256": _live_cmd_sha256(pid) or _cmd_sha256(cmd),
-        },
+        "fingerprint": process_fingerprint(pid, cmd),
         "purpose": str(purpose or "")[:200],
         "scope": scope,
         "owner_task": str(owner_task_id or ""),

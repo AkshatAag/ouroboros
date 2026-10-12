@@ -64,10 +64,10 @@ Public installer naming and links ride the same projection: `ouroboros/tools/rel
 
 ### Docker
 
-Docker runs the web and server runtime without PyWebView. The image binds `0.0.0.0` and sets no network password by default: a missing password only warns, and `NetworkAuthGate` then permits requests, so publishing the container port without `OUROBOROS_NETWORK_PASSWORD` exposes the owner surface. Set the password or keep the port unpublished; packaging adds no stronger boundary of its own.
+Docker runs the web and server runtime without PyWebView, bound to `0.0.0.0` (exposure, passwords and both modes: DEPLOYMENT); `--target managed` hosts the common launcher over a released seed, body and `--runtime-venv` on volumes (§2 Packaged seed).
 
-The root `.dockerignore` filters `COPY . .`: secrets, host virtualenvs, `node_modules`, caches and runtime/review/operator state stay out of image layers; `.git`, `tests/` and sources stay in, because CI runs pytest inside the image.
+The root `.dockerignore` keeps secrets, host environments, caches and runtime/review/operator state out of `COPY . .` layers; `.git`, `tests/` and sources stay, because CI runs pytest inside the image.
 
-The image is one self-contained `Dockerfile`: `python:3.10-slim` with the pinned `uv`, git plus Playwright's native libraries and the Chromium/WebKit binaries of the Playwright version `uv.lock` pins installed into `/ms-playwright` (the `PLAYWRIGHT_BROWSERS_PATH` the runtime honors as-is), then `uv sync --locked` into `/app/.venv`, then the sources. Browsers and apt packages sit above the lock copy because every release rewrites `pyproject.toml`/`uv.lock`. No runtime `UV_PROJECT_ENVIRONMENT` is baked, because a baked one would let an agent's `uv sync` in a task workspace rewrite the runtime venv; the tag-only `docker-ui-smoke` and `docker-portable-test` lanes exercise the shipped browsers without a download. No trust anchor is baked in: a deployment needing an extra CA sets `OUROBOROS_EXTRA_CA_BUNDLE` (§7; `docs/DEPLOYMENT.md`).
+The image is one self-contained `Dockerfile`: `python:3.10-slim` with the pinned `uv`, git, Playwright's native libraries and the Chromium/WebKit of the `uv.lock` Playwright in `/ms-playwright` (the `PLAYWRIGHT_BROWSERS_PATH` the runtime honors as-is), then `uv sync --locked` into `/app/.venv`, then the sources; browsers and apt packages sit above the lock copy that every release rewrites. No runtime `UV_PROJECT_ENVIRONMENT` is baked, or an agent's `uv sync` in a task workspace would rewrite the runtime venv; the tag-only `docker-ui-smoke` and `docker-portable-test` lanes exercise the shipped browsers without a download. No trust anchor is baked in (`OUROBOROS_EXTRA_CA_BUNDLE`: DEPLOYMENT).
 
 ---

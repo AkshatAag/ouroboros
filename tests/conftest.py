@@ -698,6 +698,19 @@ def _clear_server_stop_flags_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def _release_server_admission_between_tests():
+    """``server.main()`` and an in-process lifespan hold their data root's admission lock
+    until the process exits — production's contract. One pytest process plays many servers
+    over many temporary roots; a held root would refuse a later test's real server there."""
+    yield
+    import sys
+
+    entrypoint = sys.modules.get("ouroboros.server_entrypoint")
+    if entrypoint is not None:
+        entrypoint.release_admission_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _keep_process_logging_out_of_the_pytest_process(monkeypatch):
     """Restart and shutdown tests run ``server.main()`` in this process and launcher tests import
     ``launcher``; each would run the per-process logging bootstrap here, leaving root handlers

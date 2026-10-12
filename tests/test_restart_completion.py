@@ -73,7 +73,7 @@ def test_restart_waits_for_cleanup_and_transfers_once(monkeypatch, tmp_path, man
     monkeypatch.setattr(server, "load_settings", lambda: {})
     monkeypatch.setattr(server, "verify_settings_integrity", lambda: None)
     monkeypatch.setattr(server, "parse_server_args", lambda *a: SimpleNamespace(host="127.0.0.1", port=9123, host_explicit=False))
-    monkeypatch.setattr(server, "find_free_port", lambda host, port: port)
+    monkeypatch.setattr(server, "find_free_port", lambda host, port, **_: port)
     monkeypatch.setattr(server, "get_network_auth_startup_warning", lambda host: "")
     monkeypatch.setattr(server, "validate_network_auth_configuration", lambda host: "")
     monkeypatch.setattr(server, "bound_service_socket", listener)
@@ -104,7 +104,7 @@ def test_restart_waits_for_cleanup_and_transfers_once(monkeypatch, tmp_path, man
         release_server.set()
         main.join(5)
     assert not main.is_alive() and failures == []
-    assert calls == [("cleanup", {"port_sweep": False}), ("cleanup_finished", None),
+    assert calls == [("cleanup", {}), ("cleanup_finished", None),
                      *([] if managed else [("reexec", None)]), ("exit", server.RESTART_EXIT_CODE)]
 
 
@@ -124,7 +124,7 @@ def test_restart_fallback_runs_pin_handoff_before_retained_executor_cleanup(monk
     monkeypatch.setattr("multiprocessing.active_children", lambda: [])
     monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: calls.append(("companions", {})))
     monkeypatch.setattr("ouroboros.platform_layer.kill_process_on_port", lambda port: pytest.fail("restart must not kill an unrelated listener by port"))
-    server._emergency_process_cleanup(port_sweep=False)
+    server._emergency_process_cleanup()
     assert [name for name, kw in calls] == ["workers", "pin", "owned-stop", "companions"]
     assert calls[0][1]["preserve_pending"] is True
     assert calls[2][1] == {"root": tmp_path}
@@ -185,7 +185,7 @@ class HeldServer:
 def listener(*args, **kwargs):
     yield SimpleNamespace(getsockname=lambda: ("127.0.0.1", 9123))
 def cleanup(**kwargs):
-    assert kwargs == {"port_sweep": False}
+    assert kwargs == {}
     if failure == "cleanup":
         raise OSError("fixture cleanup failure")
     os.environ["OURO_TEST_CLEANUP"] = "completed"
@@ -201,7 +201,7 @@ server._planned_delegate_restart_transaction_id = "physical-handoff"
 server.verify_settings_integrity = lambda: None
 server.load_settings = lambda: {}
 server.parse_server_args = lambda *args: SimpleNamespace(host="127.0.0.1", port=9123, host_explicit=False)
-server.find_free_port = lambda host, port: port
+server.find_free_port = lambda host, port, **_: port
 server.get_network_auth_startup_warning = lambda host: ""
 server.validate_network_auth_configuration = lambda host: ""
 server.bound_service_socket = listener

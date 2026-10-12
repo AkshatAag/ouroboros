@@ -205,14 +205,12 @@ def execute_panic_stop(
     data_dir: pathlib.Path,
     panic_exit_code: int,
     log: Any,
-    bound_port: int | None = None,
 ) -> None:
     """Request owned emergency stops, write panic flag, hard-exit; disclose unknowns.
 
-    ``bound_port`` is the main port the server actually bound. The caller owns
-    that fact and passes it in; this leaf does not reach back into the server
-    module for it. Omitted (or falsy), the sweep falls back to the default
-    install port — see the sweep below.
+    The main and Host Service listeners belong to this process: the final hard
+    exit closes them, so no port is swept and an unrelated listener on a
+    default port survives.
 
     Owner-local request-only APIs signal captured children before settlement.
     Normal admission pins attested daemon identities; ``stop_outcome`` later
@@ -262,9 +260,7 @@ def execute_panic_stop(
 
     from ouroboros.claudexor_daemon import get_owned_daemon
     from ouroboros.extension_companion import panic_kill_all
-    from ouroboros.gateway.host_service import host_service_port
     from ouroboros.local_model import get_manager
-    from ouroboros.platform_layer import kill_process_on_port
     from ouroboros.tools.services import kill_all_services
     from ouroboros.tools.shell import kill_all_tracked_subprocesses
     from ouroboros.workspace_executor import kill_all_foreground
@@ -292,8 +288,8 @@ def execute_panic_stop(
     for thread in request_threads:
         thread.join(timeout=max(0, request_deadline - time.monotonic()))
 
-    # Complete bounded native requests BEFORE settlement helpers can kill this
-    # server via its ports. Worker cooperation is never the root-stop authority.
+    # Complete bounded native requests BEFORE settlement. Worker cooperation is
+    # never the root-stop authority.
     backstop_deadline = time.monotonic() + 1
     for child in children:
         backstop = getattr(child, "_ouroboros_stop_backstop", None)
@@ -315,8 +311,6 @@ def execute_panic_stop(
     # Workers received private lifeline requests above. Root-first tree cleanup
     # here would destroy their local child ownership before those requests run.
     # Queue/custody reconciliation belongs to the following supervisor boot.
-    attempt("main-port", lambda: kill_process_on_port(bound_port or 8765), settle=True)
-    attempt("host-port", lambda: kill_process_on_port(host_service_port()), settle=True)
 
     flag_written = _bounded(lambda: _write_panic_flag(data_dir), 2.0)
     controls_written = _bounded(lambda: _persist_panic_controls(data_dir), 2.0)
