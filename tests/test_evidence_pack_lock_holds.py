@@ -107,7 +107,7 @@ def test_a_section_that_cannot_get_the_publication_lock_defers_the_rest(root, mo
             def holder():
                 with store.name_lock(root, packs.PUBLICATION_LOCK_NAME, timeout_sec=5):
                     taken.set()
-                    time.sleep(3 * packs.UNLINK_SECTION_SEC)
+                    time.sleep(4 * packs.UNLINK_SECTION_SEC)  # the pass's journal close waits 5 s
 
             threading.Thread(target=holder, daemon=True).start()
             assert taken.wait(10)
@@ -154,13 +154,11 @@ def test_the_phase_barrier_releases_without_waiting_for_readers(root):
     _task(root, "t1", blobs=1)  # a published store
     reader = _held_reader(root)
     try:
-        started = time.monotonic()
-        with store.open_store(root, write=True, wait_sec=0.5, barrier=True):
-            pass
-        assert time.monotonic() - started < 0.4  # ROLLBACK: no reader drain
+        with store.open_store(root, write=True, wait_sec=0, barrier=True):
+            pass  # ROLLBACK: no reader drain, so no busy wait at all is needed
         with pytest.raises(store.StoreBusy):
-            with store.open_store(root, write=True, wait_sec=0.5):
-                pass  # a rowless COMMIT still waits for the reader and gives up
+            with store.open_store(root, write=True, wait_sec=0):
+                pass  # a rowless COMMIT still has to wait for the reader
     finally:
         reader.execute("ROLLBACK")
         reader.close()
