@@ -757,3 +757,54 @@ def test_a_reader_opened_before_a_transaction_keeps_its_lock_when_it_closes(tmp_
         assert other_process() == "blocked"
         assert store.held_descriptor(path) is not None  # its close waits for the connection
     assert other_process() == "acquired" and store.held_descriptor(path) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows keeps no shared descriptors")
+def test_the_registry_survives_a_failed_close_a_finalizer_and_a_closed_reader(tmp_path):
+    import threading
+
+    from ouroboros import store_import
+
+    store_import.ensure_current_store(tmp_path)
+    path = store.store_path(tmp_path)
+    conn = store.connect(path, store.TIER_ENFORCED)
+    key = (os.stat(path).st_dev, os.stat(path).st_ino)
+    failures = []
+    closer = threading.Thread(target=lambda: failures.append(_closing_raises(conn)))
+    closer.start()
+    closer.join(10)
+    assert failures == [True] and store._INODES[key].conns == 1  # a refused close keeps it counted
+    conn.close()
+    assert key not in store._INODES
+
+    reader = store.open_for_read(path)
+    done = []
+
+    def finalizer_inside_the_guard():  # a GC finalizer returning a borrow on the guard's own thread
+        with store._INODE_GUARD:
+            reader.close()
+        done.append(True)
+
+    worker = threading.Thread(target=finalizer_inside_the_guard, daemon=True)
+    worker.start()
+    worker.join(10)
+    assert done == [True] and key not in store._INODES
+    with pytest.raises(ValueError):
+        reader.read(1)  # never through a descriptor that may now name another file
+
+
+def _closing_raises(conn) -> bool:
+    try:
+        conn.close()  # another thread: sqlite3 refuses it
+    except Exception:
+        return True
+    return False
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+def test_a_fifo_is_never_opened_to_test_for_sqlite(tmp_path):
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    assert store.is_sqlite_file(fifo) is False  # returns at once: opening a FIFO would block
+    with pytest.raises(shutil.SpecialFileError):
+        store.copy_file_bytes(fifo, tmp_path / "copy")

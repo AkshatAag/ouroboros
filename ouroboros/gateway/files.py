@@ -272,7 +272,7 @@ def _guess_text_file(path: pathlib.Path) -> bool:
 def _file_response(target: pathlib.Path, *, filename: str | None = None, media_type: str | None = None) -> Response:
     """A SQLite file is streamed through store.iter_file_bytes, whose descriptor never closes under
     a store connection of this process; any other file keeps FileResponse (length, ranges, HEAD)."""
-    if not store.is_sqlite_file(target):
+    if os.name == "nt" or not store.is_sqlite_file(target):  # Windows locks belong to their handle
         return FileResponse(str(target), filename=filename, media_type=media_type)
     headers = {"Content-Disposition": f"attachment; filename*=utf-8''{quote(filename)}"} if filename else None
     return StreamingResponse(store.iter_file_bytes(target), media_type=media_type or "application/octet-stream",

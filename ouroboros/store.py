@@ -21,6 +21,7 @@ import os
 import pathlib
 import shutil
 import sqlite3
+import stat
 import threading
 import time
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
@@ -128,7 +129,9 @@ class _Inode:
 
 
 _INODES: Dict[Tuple[int, int], _Inode] = {}
-_INODE_GUARD = threading.Lock()
+# Reentrant: a reader generator finalized by the cyclic GC returns its borrow on whatever thread
+# triggered the collection, possibly inside this thread's own guarded section.
+_INODE_GUARD = threading.RLock()
 
 
 def _settle(key: Tuple[int, int], entry: _Inode) -> None:
@@ -151,11 +154,14 @@ def _borrow(path: Any) -> Tuple[Tuple[int, int], int]:
     key = _identity_key(os.stat(path))
     with _INODE_GUARD:
         entry = _INODES.get(key)
-        if entry is None or not entry.files:
-            handle = pathlib.Path(path).open("rb", buffering=0)
-            key = _identity_key(os.fstat(handle.fileno()))  # the path may name a newer file than the stat did
-            entry = _INODES.setdefault(key, _Inode())
-            entry.files.append(handle)  # never closed early: a second handle waits for the settle too
+        if entry is not None and entry.files:
+            entry.readers += 1
+            return key, entry.files[0].fileno()
+    handle = pathlib.Path(path).open("rb", buffering=0)  # outside the guard: a slow open stalls only this caller
+    key = _identity_key(os.fstat(handle.fileno()))  # the path may name a newer file than the stat did
+    with _INODE_GUARD:
+        entry = _INODES.setdefault(key, _Inode())
+        entry.files.append(handle)  # never closed early: a second handle waits for the settle too
         entry.readers += 1
         return key, entry.files[0].fileno()
 
@@ -178,16 +184,14 @@ class _StoreConnection(sqlite3.Connection):
     _store_key: Optional[Tuple[int, int]] = None
 
     def close(self) -> None:
-        try:
-            super().close()
-        finally:
-            key, self._store_key = self._store_key, None
-            if key is not None:
-                with _INODE_GUARD:
-                    entry = _INODES.get(key)
-                    if entry is not None:
-                        entry.conns -= 1
-                        _settle(key, entry)
+        super().close()  # a close that raises leaves the connection counted: its lock may still be held
+        key, self._store_key = self._store_key, None
+        if key is not None:
+            with _INODE_GUARD:
+                entry = _INODES.get(key)
+                if entry is not None:
+                    entry.conns -= 1
+                    _settle(key, entry)
 
 
 def _read_header(path: pathlib.Path) -> bytes:
@@ -220,6 +224,8 @@ def is_sqlite_file(path: Any) -> bool:
     """Whether PATH holds a SQLite database (its header magic), read without closing a descriptor
     a store connection may depend on."""
     try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return False  # never open a FIFO or a device to look
         return _read_header(pathlib.Path(path)).startswith(b"SQLite format 3\x00")
     except OSError:
         return False
@@ -243,13 +249,20 @@ class _BorrowedReader:
             self._open = False
             _return(self._key)
 
+    def _check(self) -> None:
+        if not self._open:  # the descriptor may be closed or reused by another file by now
+            raise ValueError("I/O operation on closed file")
+
     def fileno(self) -> int:
+        self._check()
         return self._fd
 
     def tell(self) -> int:
+        self._check()
         return self._offset
 
     def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        self._check()
         if whence not in (os.SEEK_SET, os.SEEK_CUR, os.SEEK_END):
             raise ValueError(f"invalid whence ({whence})")
         base = os.fstat(self._fd).st_size if whence == os.SEEK_END else (0 if whence == os.SEEK_SET else self._offset)
@@ -260,6 +273,7 @@ class _BorrowedReader:
 
     def read(self, size: Optional[int] = -1) -> bytes:
         """Up to ``size`` bytes (all that remain when negative); short ``pread``s are continued."""
+        self._check()
         wanted, parts = (-1 if size is None else size), []
         while wanted:
             data = os.pread(self._fd, wanted if wanted > 0 else 1 << 20, self._offset)
