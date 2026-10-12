@@ -987,6 +987,7 @@ from ouroboros.loop_forced_finalization import (  # noqa: E402, F401 -- intentio
     _maybe_enforce_child_absorption_gate,
     _enforce_swarm_actions,
     _finalize_forced_services,
+    _disclose_service_finalization,
     _drain_forced_owner_directives,
     _call_forced_model_once,
     _publish_model_forced_candidate,
