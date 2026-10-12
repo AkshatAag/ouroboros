@@ -152,8 +152,12 @@ class ReachedLifecycle(Exception):
     pass
 
 
-def test_the_launcher_runs_body_installs_and_handoff_in_the_runtime_venv(managed_launcher, monkeypatch, tmp_path):
+# Both PATH separators on one host: the foreign one is simulated and qualifies no native launch there.
+@pytest.mark.parametrize("separator", [":", ";"], ids=["posix", "windows-separator"])
+def test_the_launcher_runs_body_installs_and_handoff_in_the_runtime_venv(managed_launcher, monkeypatch, tmp_path,
+                                                                        separator):
     launcher = managed_launcher
+    monkeypatch.setattr(launcher.os, "pathsep", separator)
     root = tmp_path / "body" / "venv"
     prepared = RuntimeVenv(root=root, python=str(root / "bin" / "python"), bin_dir=root / "bin", ready=False)
     seen = {}
@@ -176,7 +180,7 @@ def test_the_launcher_runs_body_installs_and_handoff_in_the_runtime_venv(managed
     with pytest.raises(ReachedLifecycle):
         launcher.main(["--no-ui", "--runtime-venv", str(root)])
     assert seen["path"] == root and seen["python"] == prepared.python
-    assert seen["path_env"].split(":")[0] == str(prepared.bin_dir)
+    assert seen["path_env"] == separator.join([str(prepared.bin_dir), "/usr/bin"])
     assert seen["timeout"] == runtime_venv.PREPARATION_DEPS_TIMEOUT_SEC
     assert seen["installed"] is True and seen["ready"] is prepared
     assert launcher.EMBEDDED_PYTHON == prepared.python

@@ -86,20 +86,15 @@ def is_mount_point(path: pathlib.Path | str) -> bool:
     """Include Linux same-device bind/volume mounts that stat-based ismount misses.
 
     Linux's mountinfo names mounts in this process's namespace. An unreadable
-    table raises OSError: callers about to move a directory must not guess.
-    """
+    table raises OSError: callers about to move a directory must not guess."""
     target = pathlib.Path(path).resolve()
     if os.path.ismount(target):
         return True
-    if IS_LINUX:
-        with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as mounts:
-            for line in mounts:
-                fields = line.split()
-                if len(fields) >= 6:
-                    mount = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4])
-                    if mount == str(target):
-                        return True
-    return False
+    if not IS_LINUX:
+        return False
+    with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as mounts:
+        return any(len(fields) >= 6 and re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4]) == str(target)
+                   for fields in map(str.split, mounts))
 
 
 def is_container_env() -> bool:
@@ -592,29 +587,25 @@ def pid_lock_release(path: str) -> None:
 
 def file_lock_exclusive(fd: int) -> None:
     """Acquire an exclusive (write) lock on a file descriptor. Blocks."""
-    if IS_WINDOWS:
-        _win32_lock(fd, exclusive=True, blocking=True)
-    else:
-        import fcntl
-        fcntl.flock(fd, fcntl.LOCK_EX)
+    _file_lock(fd, exclusive=True, blocking=True)
 
 
 def file_lock_shared(fd: int) -> None:
     """Acquire a shared (read) lock on a file descriptor. Blocks."""
-    if IS_WINDOWS:
-        _win32_lock(fd, exclusive=False, blocking=True)
-    else:
-        import fcntl
-        fcntl.flock(fd, fcntl.LOCK_SH)
+    _file_lock(fd, exclusive=False, blocking=True)
 
 
 def file_lock_exclusive_nb(fd: int) -> None:
     """Try to acquire an exclusive lock, non-blocking. Raises OSError on failure."""
+    _file_lock(fd, exclusive=True, blocking=False)
+
+
+def _file_lock(fd: int, *, exclusive: bool, blocking: bool) -> None:
     if IS_WINDOWS:
-        _win32_lock(fd, exclusive=True, blocking=False)
+        _win32_lock(fd, exclusive=exclusive, blocking=blocking)
     else:
         import fcntl
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | (0 if blocking else fcntl.LOCK_NB))
 
 
 def file_unlock(fd: int) -> None:
@@ -803,22 +794,19 @@ def terminate_process_tree(proc: subprocess.Popen) -> None:
 
 def terminate_process_group_id(pgid: int, *, exclude_pids: "set[int] | None" = None) -> None:
     """Gracefully terminate a Unix process group by id."""
-    if IS_WINDOWS or _group_has_spared_process(pgid, exclude_pids):
-        return
-    try:
-        os.killpg(int(pgid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError, ValueError):
-        pass
+    _signal_process_group(pgid, "SIGTERM", exclude_pids)
 
 
 def kill_process_group_id(pgid: int, *, exclude_pids: "set[int] | None" = None) -> None:
     """Force-kill a Unix process group by id."""
+    _signal_process_group(pgid, "SIGKILL", exclude_pids)
+
+
+def _signal_process_group(pgid: int, signal_name: str, exclude_pids: "set[int] | None") -> None:
     if IS_WINDOWS or _group_has_spared_process(pgid, exclude_pids):
         return
-    try:
-        os.killpg(int(pgid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError, ValueError):
-        pass
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError, ValueError):
+        os.killpg(int(pgid), getattr(signal, signal_name))  # by name: Windows has no SIGKILL
 
 
 def process_group_id(pid: int) -> int:
@@ -1038,14 +1026,12 @@ def collect_descendant_pids(pid: int, *, exclude_pids: "set[int] | None" = None)
     if exclude_pids:
         targets, _ = _tree_kill_targets(int(pid), exclude_pids)
         return [target for target in targets if target != int(pid)]
-    if IS_WINDOWS:
-        return _snapshot_descendants(int(pid), _process_children())
-    result: List[int] = []
     try:
-        result = _snapshot_descendants(int(pid), _process_children())
+        return _snapshot_descendants(int(pid), _process_children())
     except (TypeError, ValueError):
-        pass
-    return result
+        if IS_WINDOWS:
+            raise
+        return []
 
 
 def tcp_keepalive_socket_options() -> List[tuple]:
@@ -1269,17 +1255,17 @@ def get_system_memory() -> str:
             return subprocess.check_output(
                 ["awk", '/MemTotal/ {print $2/1024/1024 " GB"}', "/proc/meminfo"]).strip().decode()
         elif os_name == "Windows":
-            out = _hidden_run(
-                ["wmic", "ComputerSystem", "get", "TotalPhysicalMemory", "/value"],
-                capture_output=True, text=True, timeout=10, check=True,
-            ).stdout.strip()
-            for line in out.splitlines():
-                if "=" in line:
-                    mem_bytes = int(line.split("=")[1])
-                    return f"{mem_bytes / (1024**3):.1f} GB"
+            mem_bytes = int(_wmic_value_line("ComputerSystem", "get", "TotalPhysicalMemory").split("=")[1])
+            return f"{mem_bytes / (1024**3):.1f} GB"
     except Exception:
         pass
     return "Unknown"
+
+
+def _wmic_value_line(*query: str) -> str:
+    """First ``key=value`` line of a Windows ``wmic ... /value`` query, or ''."""
+    out = _hidden_run(["wmic", *query, "/value"], capture_output=True, text=True, timeout=10, check=True).stdout
+    return next((line for line in out.strip().splitlines() if "=" in line), "")
 
 
 def get_cpu_info() -> str:
@@ -1290,14 +1276,8 @@ def get_cpu_info() -> str:
             return subprocess.check_output(
                 ["sysctl", "-n", "machdep.cpu.brand_string"],
             ).strip().decode()
-        elif os_name == "Windows":
-            out = _hidden_run(
-                ["wmic", "cpu", "get", "Name", "/value"],
-                capture_output=True, text=True, timeout=10, check=True,
-            ).stdout.strip()
-            for line in out.splitlines():
-                if "=" in line:
-                    return line.split("=", 1)[1].strip()
+        elif os_name == "Windows" and (line := _wmic_value_line("cpu", "get", "Name")):
+            return line.split("=", 1)[1].strip()
     except Exception:
         pass
     return platform.processor()
