@@ -501,7 +501,8 @@ def _absent(root: pathlib.Path, *, write: bool, service: bool) -> bool:
 
 
 @contextlib.contextmanager
-def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC, service: bool = False) -> Iterator["Txn"]:
+def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC, service: bool = False,
+               barrier: bool = False) -> Iterator["Txn"]:
     """One transaction on the published store: ``StoreMigrating`` while the lifespan imports or
     for a read of a never-imported root that holds facts (a read never imports; a root without
     facts, or one that does not exist, reads empty and creates nothing), a first-touch import
@@ -513,7 +514,9 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC, serv
     The one write gate: a public write (``write`` without ``service``) refuses ``StoreMigrating``
     while ROOT is in the import window and ``StoreRetired`` inside the transaction when the phase
     is not PUBLISHED. ``service`` is the importer's, the exporter's and the seam's mode (also the
-    import owner thread's, ``service_thread``): their transactions pass both checks."""
+    import owner thread's, ``service_thread``): their transactions pass both checks. A ``barrier``
+    holds the write lock and the gate without writing (the evidence packer's phase gate) and ends
+    in ROLLBACK, so its release never waits for readers to drain as a COMMIT would."""
     root = pathlib.Path(root)
     service = service or bool(getattr(_SERVICE, "active", False))
     if write and not service and _in_window(root):
@@ -539,11 +542,14 @@ def open_store(root: Any, *, write: bool, wait_sec: float = STORE_WAIT_SEC, serv
             raise _typed(exc) from exc
         stack.callback(conn.close)
         try:
-            with transaction(conn, write=write, commit_wait_sec=wait_sec if tier == TIER_ENFORCED else None):
+            with transaction(conn, write=write, commit_wait_sec=wait_sec if tier == TIER_ENFORCED else None,
+                             finish=(lambda: conn.execute("ROLLBACK")) if barrier else None):
                 txn = Txn(conn, root)
                 if write and not service and (phase := txn.phase()) != PUBLISHED:
                     raise StoreRetired(f"current store phase is {phase}: the files are the authority")
                 yield txn
+                if barrier and conn.total_changes:
+                    raise StoreError("a barrier transaction wrote rows; its ROLLBACK would discard them")
                 if write and conn.total_changes:
                     txn.set_meta("commit_seq", txn.revision() + 1)
         except sqlite3.Error as exc:
