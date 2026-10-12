@@ -446,7 +446,14 @@ def ensure_managed_repo(context: BootstrapContext) -> str:
     if not context.repo_dir.exists():
         return _install_managed_repo(context, manifest, reason="missing")
     if not (context.repo_dir / ".git").exists():
-        if os.path.ismount(context.repo_dir):
+        from ouroboros.platform_layer import is_mount_point
+
+        try:
+            mounted = is_mount_point(context.repo_dir)
+        except OSError as exc:
+            raise RuntimeError(f"Cannot determine whether {context.repo_dir} is a mount point; "
+                               f"nothing was moved: {exc}") from exc
+        if mounted:
             # Archiving renames the directory away, which a mount point refuses
             # halfway through a cross-device copy: refuse before touching it.
             raise RuntimeError(

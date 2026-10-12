@@ -82,6 +82,26 @@ def local_zoneinfo():
     return datetime.datetime.now().astimezone().tzinfo or datetime.timezone.utc
 
 
+def is_mount_point(path: pathlib.Path | str) -> bool:
+    """Include Linux same-device bind/volume mounts that stat-based ismount misses.
+
+    Linux's mountinfo names mounts in this process's namespace. An unreadable
+    table raises OSError: callers about to move a directory must not guess.
+    """
+    target = pathlib.Path(path).resolve()
+    if os.path.ismount(target):
+        return True
+    if IS_LINUX:
+        with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as mounts:
+            for line in mounts:
+                fields = line.split()
+                if len(fields) >= 6:
+                    mount = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4])
+                    if mount == str(target):
+                        return True
+    return False
+
+
 def is_container_env() -> bool:
     """Return whether explicit env or Docker sentinel indicates a container."""
     # /.dockerenv is Docker's Linux sentinel.

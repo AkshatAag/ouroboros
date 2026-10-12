@@ -19,8 +19,10 @@ runs from. Set `OUROBOROS_DATA_DIR` explicitly in every new recipe: with only
 `OUROBOROS_SERVER_PORT` is the requested main port for a direct server and for
 the launcher (default 8765); when it is taken the server falls back to the next
 free port, skipping this installation's Host Service and local-model ports, and
-the CLI, Settings, extensions and the launcher read the port it actually
-published. A container publishes a fixed port: keep the request free inside it.
+the source CLI, Settings, extensions and the launcher read the port it actually
+published. The packaged desktop CLI deliberately uses `~/Ouroboros/data` and
+scrubs path overrides (including `OUROBOROS_PORT_FILE`) before starting its
+inner CLI; select a relocated server with `--url` or `OUROBOROS_URL`. A container publishes a fixed port: keep the request free inside it.
 
 Exactly one server runs on one data directory. Each server holds a kernel lock on
 `<data>/state/server.lock` for its lifetime, whatever repository, PID file or

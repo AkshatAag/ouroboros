@@ -23,6 +23,20 @@ Opt-in only, and never against an implicit Docker daemon (exactly one target):
     OUROBOROS_CONTAINER_EVIDENCE=<file>   (optional: JSON lines of every observed fact)
     OUROBOROS_CONTAINER_KEEP=1            (optional: keep this run's containers and volumes)
 
+Run from the repository root; set test controls AFTER safe_test's environment isolation:
+
+    python -I -S scripts/safe_test.py --temp-parent /tmp -- env \
+      OUROBOROS_E2E_DEEP=container \
+      OUROBOROS_CONTAINER_DOCKER_CONTEXT=ouroboros-qa \
+      OUROBOROS_CONTAINER_IMAGE=ouroboros-web \
+      OUROBOROS_CONTAINER_MANAGED_IMAGE=ouroboros-managed \
+      OUROBOROS_CONTAINER_SEED_MANIFEST=/absolute/seed/repo_bundle_manifest.json \
+      OUROBOROS_CONTAINER_CANDIDATE_GIT="$PWD" \
+      OUROBOROS_CONTAINER_EVIDENCE="$PWD/s39.jsonl" \
+      "$PWD/.venv/bin/python" -m pytest tests/system_e2e/test_managed_container.py \
+      -m integration --junitxml=s39.junit.xml
+
+Substitute your dedicated context and seed path; HOST/CONFIG may replace CONTEXT as above.
 No host path is mounted into a container: the candidate repository and the Update's wheel
 are streamed into a volume. Every container and volume carries this run's id and is
 removed by exact name at the end. The plumbing (relay, in-container API client, wheel,
@@ -605,7 +619,9 @@ def _consumer_flow(api, settings) -> dict:
     assert saved.get(ONBOARDING_COMPLETED_KEY), "the completion is durable"
     # Then an ordinary Settings save, to S6's keyless posture: a canned native reviewer answers
     # without the reads its coverage requires, so a task acceptance review would loop the strict tree.
-    review = _api_json(api, "POST", "/api/settings", {"OUROBOROS_TASK_REVIEW_MODE": "off"}, 120)
+    # Images bind 0.0.0.0: an ordinary web Settings save supplies its required network password.
+    review = _api_json(api, "POST", "/api/settings", {
+        "OUROBOROS_TASK_REVIEW_MODE": "off", "OUROBOROS_NETWORK_PASSWORD": f"s39-local-test-{RUN_ID}"}, 120)
     assert review.get("saved") is not False, review
     _wait_api(api, lambda: settings().get("OUROBOROS_TASK_REVIEW_MODE") == "off", 30, "the Settings save never landed")
 
@@ -762,8 +778,8 @@ def test_s39_managed_split_volumes_boot_and_a_mounted_repository_is_refused_unto
 
     repo_volume = _volume("mounted-repo")
     _helper([(repo_volume, "/v")], "echo keep > /v/keep.txt")
-    refused, _port = _run("mounted-repo", "managed", [(repo_volume, BODY_REPO), (_volume("mounted-data"), "/ouroboros/data")],
-                          restart="no")
+    refused, _port = _run("mounted-repo", "managed", [(_volume("mounted-parent"), "/ouroboros"),
+                          (repo_volume, BODY_REPO)], restart="no")
     state = _wait_exited(refused, 300)
     logs = _docker("logs", refused, check=False)
     _evidence("managed-mounted-repo", exit=state.get("ExitCode"), tail=(logs.stdout + logs.stderr)[-1500:])
@@ -856,7 +872,7 @@ def _stage_candidate(candidate: pathlib.Path, scratch: pathlib.Path) -> tuple:
     that sees none of the host's paths, so nothing is bind-mounted."""
     work, base, target = _dependency_commit(candidate, scratch)
     bundle = scratch / "candidate.bundle"
-    _git("-C", str(work), "bundle", "create", str(bundle), "HEAD", "ouroboros")
+    _git("-C", str(work), "bundle", "create", str(bundle), "HEAD", "refs/heads/ouroboros")
     volume = _volume("qa")
     with bundle.open("rb") as stream:
         _helper([(volume, "/qa")], "cat > /qa/candidate.bundle && git clone --quiet --bare /qa/candidate.bundle "

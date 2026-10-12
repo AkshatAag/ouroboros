@@ -74,6 +74,7 @@ def test_an_unrelated_directory_is_refused_untouched(tmp_path):
     ({"schema_version": 1, "python": "2.7", "state": "ready"}, "created for Python 2.7"),
     ({"schema_version": 9, "python": CURRENT, "state": "ready"}, "unknown schema"),
     ({"schema_version": 1, "python": CURRENT, "state": "rebuilding"}, "recorded state"),
+    ({"schema_version": 1, "python": CURRENT, "state": ["preparing"]}, "recorded state"),
 ])
 def test_an_established_venv_that_cannot_be_trusted_is_refused_untouched(tmp_path, marker, problem):
     root = tmp_path / "venv"
@@ -212,3 +213,106 @@ def test_bootstrap_refuses_a_mount_point_without_a_checkout_and_moves_nothing(tm
     with pytest.raises(RuntimeError, match="mount point without a checkout; nothing was moved"):
         launcher_bootstrap.ensure_managed_repo(context)
     assert _tree(repo) == before and not (tmp_path / "data" / "archive").exists()
+
+
+@pytest.mark.serial
+def test_preparing_python_without_pip_is_repaired_and_keeps_an_installed_package(tmp_path):
+    import hashlib
+    import shutil
+    import zipfile
+
+    root = tmp_path / "venv"
+    venv = prepare_runtime_venv(root)
+    wheel = tmp_path / "sentinel-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, value in {
+            "sentinel.py": "VALUE = 'keep this installed package'\n",
+            "sentinel-1.0.dist-info/METADATA": "Metadata-Version: 2.1\nName: sentinel\nVersion: 1.0\n",
+            "sentinel-1.0.dist-info/WHEEL": "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+            "sentinel-1.0.dist-info/RECORD": "",
+        }.items():
+            archive.writestr(name, value)
+    subprocess.run([venv.python, "-m", "pip", "install", "--no-index", "--no-deps", str(wheel)],
+                   check=True, capture_output=True, timeout=60)
+    site = pathlib.Path(subprocess.check_output(
+        [venv.python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], text=True).strip())
+    sentinel = site / "sentinel.py"
+    before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+    # The precise interruption: the executable/cfg and earlier packages exist,
+    # but ensurepip has not installed pip. Remove only this disposable venv's pip.
+    shutil.rmtree(site / "pip")
+    for metadata in site.glob("pip-*.dist-info"):
+        shutil.rmtree(metadata)
+    missing = subprocess.run([venv.python, "-m", "pip", "--version"], capture_output=True, text=True)
+    assert missing.returncode != 0 and "No module named pip" in missing.stderr
+    repaired = prepare_runtime_venv(root)
+    pip = subprocess.run([repaired.python, "-m", "pip", "--version"], capture_output=True, text=True)
+    assert pip.returncode == 0, pip.stderr
+    assert not repaired.ready and hashlib.sha256(sentinel.read_bytes()).hexdigest() == before
+    probe = subprocess.check_output([repaired.python, "-c", "import sentinel; from importlib.metadata import version; "
+                                    "print(sentinel.VALUE, version('sentinel'))"], text=True)
+    assert probe.strip() == "keep this installed package 1.0"
+
+
+@pytest.mark.parametrize("problem", ["cfg", "interpreter", "missing-cfg"])
+def test_a_preparing_venv_cannot_hide_incompatible_or_unknown_python(tmp_path, problem):
+    root = tmp_path / "venv"
+    bin_dir, python = runtime_venv._layout(root)
+    bin_dir.mkdir(parents=True)
+    python.write_text("interrupted python")
+    (root / MARKER_NAME).write_text(json.dumps({"schema_version": 1, "python": CURRENT, "state": "preparing"}))
+    if problem != "missing-cfg":
+        (root / "pyvenv.cfg").write_text(f"version = {'2.7' if problem == 'cfg' else CURRENT}\n")
+    before = _tree(root)
+    run = Run("2.7" if problem == "interpreter" else CURRENT)
+    with pytest.raises(RuntimeVenvRefused, match="left untouched"):
+        prepare_runtime_venv(root, run=run)
+    assert run.creations == 0 and _tree(root) == before
+
+
+def test_directory_creation_failure_is_a_typed_refusal(tmp_path):
+    parent = tmp_path / "blocked"
+    parent.write_text("a file, not a writable directory")
+    with pytest.raises(RuntimeVenvRefused, match="cannot create its directory.*may have created or changed"):
+        prepare_runtime_venv(parent / "venv")
+    assert parent.read_text() == "a file, not a writable directory"
+
+
+@pytest.mark.parametrize("state", ["preparing", "ready"])
+def test_marker_failure_reports_retained_partial_effects(tmp_path, monkeypatch, state):
+    from ouroboros import utils
+
+    root = tmp_path / "venv"
+
+    def cannot_write(*args, **kwargs):
+        raise PermissionError("read-only fixture")
+
+    monkeypatch.setattr(utils, "atomic_write_json", cannot_write)
+    if state == "ready":
+        root.mkdir()
+        (root / MARKER_NAME).write_text("preparing evidence")
+    with pytest.raises(RuntimeVenvRefused, match=f"cannot record {state}.*files; they were retained") as refused:
+        if state == "preparing":
+            prepare_runtime_venv(root)
+        else:
+            mark_ready(RuntimeVenv(root, str(root / "bin/python"), root / "bin", False))
+    assert "left untouched" not in str(refused.value) and root.is_dir()
+    if state == "ready":
+        assert (root / MARKER_NAME).read_text() == "preparing evidence"
+
+
+def test_a_failed_ready_marker_stops_the_launcher_before_starting_the_body(managed_launcher, monkeypatch, tmp_path, capsys):
+    launcher = managed_launcher
+    root = tmp_path / "venv"
+    prepared = RuntimeVenv(root, str(root / "bin/python"), root / "bin", False)
+    monkeypatch.setattr(launcher, "prepare_runtime_venv", lambda *a, **kw: prepared)
+    monkeypatch.setattr(launcher, "bootstrap_repo", lambda: True)
+    monkeypatch.setattr(launcher, "_install_deps", lambda: True)
+    def refuse(_venv):
+        raise RuntimeVenvRefused("cannot record ready; files retained")
+    monkeypatch.setattr(launcher, "mark_ready", refuse)
+    monkeypatch.setattr(launcher, "_prepare_first_run_settings", lambda: pytest.fail("no body after marker failure"))
+    with pytest.raises(SystemExit) as stopped:
+        launcher.main(["--no-ui", "--runtime-venv", str(root)])
+    assert stopped.value.code == 1
+    assert "Ouroboros did not start: cannot record ready" in capsys.readouterr().err

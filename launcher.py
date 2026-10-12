@@ -247,11 +247,11 @@ def _recorded_server_identity(record: dict) -> str:
     if pid <= 0 or pid == os.getpid() or pid_provably_gone(pid):
         return "foreign"
     if isinstance(record.get("fingerprint"), dict):
-        from ouroboros.process_custody import _fingerprint_matches
+        from ouroboros.process_custody import process_fingerprint_matches
 
-        if _fingerprint_matches(record, require_measured=True):
+        if process_fingerprint_matches(record, require_measured=True):
             return "ours"
-        return "unknown" if _fingerprint_matches(record) else "foreign"
+        return "unknown" if process_fingerprint_matches(record) else "foreign"
     expected_server = str((REPO_DIR / "server.py").resolve())
     expected_repo = str(REPO_DIR.resolve())
     if record.get("server_path") not in (None, "", expected_server) or record.get("repo_dir") not in (None, "", expected_repo):
@@ -1317,7 +1317,12 @@ def main(argv=()):
             "be missing packages (see the pip output above)."
         )
     elif _runtime_venv is not None and not _runtime_venv.ready and _install_deps():
-        _runtime_venv = mark_ready(_runtime_venv)  # a failed install stays preparing and retries next start
+        try:
+            _runtime_venv = mark_ready(_runtime_venv)  # a failed install stays preparing and retries next start
+        except RuntimeVenvRefused as refusal:
+            log.error("%s", refusal)
+            print(f"Ouroboros did not start: {refusal}", file=sys.stderr, flush=True)
+            sys.exit(1)
 
     # D-8: decide here, PRESENT after the gateway is healthy. Everything above
     # (single-instance lock, Git, managed-repo bootstrap/seed validation) is a

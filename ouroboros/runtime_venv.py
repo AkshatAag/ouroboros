@@ -79,14 +79,18 @@ def _interpreter_version(python: pathlib.Path, run: Callable[..., Any]) -> str:
 def _write_marker(root: pathlib.Path, state: str) -> None:
     from ouroboros.utils import atomic_write_json, utc_now_iso
 
-    atomic_write_json(root / MARKER_NAME, {"schema_version": SCHEMA_VERSION, "python": _major_minor(),
-                                           "state": state, "updated_at": utc_now_iso()},
-                      trailing_newline=True)
+    try:
+        atomic_write_json(root / MARKER_NAME, {"schema_version": SCHEMA_VERSION, "python": _major_minor(),
+                                               "state": state, "updated_at": utc_now_iso()},
+                          trailing_newline=True)
+    except OSError as exc:
+        raise _recovery(root, f"cannot record {state}: {exc}", modified=True) from exc
 
 
-def _recovery(root: pathlib.Path, problem: str) -> RuntimeVenvRefused:
+def _recovery(root: pathlib.Path, problem: str, *, modified: bool = False) -> RuntimeVenvRefused:
+    effect = "Preparation may have created or changed files; they were retained" if modified else "It was left untouched"
     return RuntimeVenvRefused(
-        f"Runtime venv {root} is not usable: {problem}. It was left untouched. To recover, stop "
+        f"Runtime venv {root} is not usable: {problem}. {effect}. To recover, stop "
         f"Ouroboros, move that directory aside yourself (or pass another absolute --runtime-venv), "
         f"then start again: a fresh venv is prepared and the current dependency lock installed into it. "
         f"Code and data are unaffected; packages installed only into the old venv are not carried over.")
@@ -114,22 +118,38 @@ def prepare_runtime_venv(path: "pathlib.Path | str", *, run: Callable[..., Any] 
     elif root.exists() and (not root.is_dir() or any(root.iterdir())):
         raise _recovery(root, "the path holds something Ouroboros did not create")
     else:
-        root.mkdir(parents=True, exist_ok=True)
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise _recovery(root, f"cannot create its directory: {exc}", modified=True) from exc
         _write_marker(root, "preparing")  # before any provisioning, so an interruption is recognizable
         state = "preparing"
-    if state not in {"preparing", "ready"}:
+    if state not in ("preparing", "ready"):
         raise _recovery(root, f"its recorded state {state!r} is unknown")
-    if state == "preparing" and not python.exists():
+    if state == "preparing":
+        # A retry must not overwrite evidence of a different ABI. The cfg is
+        # written before Python's executable; either may be absent after interruption.
+        cfg = root / "pyvenv.cfg"
+        if cfg.exists() and _pyvenv_version(root) != current:
+            raise _recovery(root, f"pyvenv.cfg reports Python {_pyvenv_version(root) or 'unavailable'}, expected {current}")
+        if python.exists() and (not cfg.exists() or _interpreter_version(python, run) != current):
+            raise _recovery(root, "its interpreter or pyvenv.cfg cannot prove the preparing Python version")
         if log is not None:
-            log.info("Creating runtime venv %s (Python %s)", root, current)
-        created = run([sys.executable, "-m", "venv", str(root)], capture_output=True, text=True, timeout=600)
+            log.info("Preparing runtime venv %s (Python %s)", root, current)
+        # bin/python can exist before ensurepip completes. Re-run venv without
+        # --clear: ensurepip repairs missing pip while installed packages stay.
+        try:
+            created = run([sys.executable, "-m", "venv", str(root)], capture_output=True, text=True, timeout=600)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise _recovery(root, f"preparation failed: {exc}", modified=True) from exc
         if getattr(created, "returncode", 1) != 0:
             output = str(getattr(created, "stderr", "") or getattr(created, "stdout", "") or "").strip()
             raise RuntimeVenvRefused(f"Creating runtime venv {root} failed: {output[-600:]}; "
                                      "the preparing venv is retried additively on the next start")
     for observed, label in ((_pyvenv_version(root), "pyvenv.cfg"), (_interpreter_version(python, run), "its interpreter")):
         if observed != current:
-            raise _recovery(root, f"{label} reports Python {observed or 'unavailable'}, expected {current}")
+            raise _recovery(root, f"{label} reports Python {observed or 'unavailable'}, expected {current}",
+                            modified=state == "preparing")
     return RuntimeVenv(root=root, python=str(python), bin_dir=bin_dir, ready=state == "ready")
 
 

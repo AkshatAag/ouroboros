@@ -253,6 +253,11 @@ def _legacy_start_matches(pid: int, recorded: str, current: str) -> bool:
     return bool(recorded) and process_start_time_legacy(pid) == recorded
 
 
+def process_fingerprint_matches(entry: Dict[str, Any], *, require_measured: bool = False) -> bool:
+    """Prove a captured process identity using the custody owner's matching rules."""
+    return _fingerprint_matches(entry, require_measured=require_measured)
+
+
 def _fingerprint_matches(entry: Dict[str, Any], *, require_measured: bool = False) -> bool:
     """STRICT identity: the live process must still BE the recorded one.
 
