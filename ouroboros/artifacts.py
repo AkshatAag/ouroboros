@@ -1299,9 +1299,7 @@ def store_task_artifact_bytes(
 
 
 def _register_task_artifact_records(artifact_dir: pathlib.Path, records: Iterable[Dict[str, Any]]) -> None:
-    """Merge registrations under the manifest lock, after copy/hash; no result
-    lock is taken here, preserving artifact-then-result lock order.
-    """
+    """Merge registrations under the manifest lock, after copy/hash; no result lock is taken here, preserving artifact-then-result lock order."""
     additions = {pathlib.Path(str(row.get("path") or row.get("name") or "")).name: dict(row)
                  for row in records}
 
@@ -1509,9 +1507,7 @@ def collect_task_artifact_records(
     drive_root: Union[pathlib.Path, str], task_id: str, *, measure: bool = True, strict: bool = False,
     require_registered: bool = False,
 ) -> List[Dict[str, Any]]:
-    """List deliverables (nested ones carry ``relpath``), excluding metadata/inputs/task sources.
-    ``measure=False`` uses lstat/recorded identities, with ``measured: False``. Strict
-    listing raises on unreadable files; review's ``require_registered`` requires all entries."""
+    """List deliverables (nested ones carry ``relpath``), excluding metadata/inputs/task sources. ``measure=False`` uses lstat/recorded identities, with ``measured: False``. Strict listing raises on unreadable files; review's ``require_registered`` requires all entries."""
     try:
         artifact_dir = task_artifact_dir_path(pathlib.Path(drive_root), validate_task_id(task_id), create=False)
     except ValueError:
