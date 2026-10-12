@@ -343,7 +343,7 @@ ouroboros/ — agent core and shared runtime (§6)
   protected_artifacts.py — Execute-only black-box policy for protected artifacts
   shell_parse.py — Shared command/argv normalization and POSIX wrapper grammar; observed targets, not permission judgments (§6 Safety and runtime mode)
   argv_budget.py — Argv admission counts encoded bytes of argv plus environment, because ARG_MAX charges both; asked by skill_exec before exec
-  workspace_executor.py, docker_process_observer.py — Workspace process backends: `local` and network-none `docker_exec`; container `/proc` liveness (§9)
+  workspace_executor.py, docker_process_observer.py — `local` and network-none `docker_exec`; Docker liveness needs `sh`, `cat`, readable `/proc` (§9)
   deliverables_paths.py — Lexical and case-folded deliverables path views
   tool_capabilities.py — SSOT for the core, parallel-safe, untruncated and stateful-browser tool sets and the cognitive-memory tool class every Presence ceiling carries
   tool_access.py — ToolProfile × ResourceRoot × Operation matrix, affordance map, closed-enum `required_capabilities` check

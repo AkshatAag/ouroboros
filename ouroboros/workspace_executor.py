@@ -1085,7 +1085,7 @@ def service_logs(ctx: Any, name: str, tail: int) -> dict[str, Any] | None:
 
 def _stop_service_record(record: _ExecutorService, *, wait: bool = True) -> dict[str, Any]:
     """Stop one owned process and finalize its local log before forgetting env.
-    Unconfirmed termination keeps the record for later cleanup; Docker records only dispatch cleanup."""
+    Unconfirmed termination keeps the record; Docker cleanup confirms group quiescence."""
     def failed(message: str) -> dict[str, Any]:
         payload = _service_payload(record)
         payload.update(stop_failed=True, cleanup_dispatched=False,

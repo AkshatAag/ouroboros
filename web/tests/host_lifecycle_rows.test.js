@@ -147,6 +147,11 @@ test('unconfirmed service cleanup is visible without claiming stopped', () => {
     const live = summarizeChatLiveEvent(pending);
     assert.equal(live.visible, true);
     assert.equal(live.headline, 'Background service cleanup unconfirmed');
+    assert.equal(live.phase, 'warn');
+    assert.equal(summarizeLogEvent(pending).phase, 'warn');
+    const stopped = { ...pending, checkpoint_kind: 'services_stopped' };
+    assert.equal(summarizeChatLiveEvent(stopped).phase, 'thinking');
+    assert.equal(summarizeLogEvent(stopped).phase, 'thinking');
     assert.equal(live.terminal, false);
     assert.equal(live.promote, false);
     assert.notEqual(live.dedupeKey, summarizeChatLiveEvent({ ...pending,
