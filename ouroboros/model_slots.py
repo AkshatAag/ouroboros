@@ -349,14 +349,13 @@ def parse_fallback_chain() -> list[str]:
     """Parse the raw ordered cross-model fallback chain — SSOT for every consumer
     (resilience walk, pricing categorization, credentialed-model resolution).
 
-    Reads OUROBOROS_MODEL_FALLBACKS, then the legacy singular OUROBOROS_MODEL_FALLBACK
-    (env-only back-compat). No dedup, no active-model drop, and NO SETTINGS_DEFAULTS
-    injection: an EXPLICITLY empty Fallbacks slot means "no cross-model fallback". The
-    shipped default reaches a default install through apply_settings_to_env."""
-    raw = (
-        str(runtime_setting("OUROBOROS_MODEL_FALLBACKS", "") or "").strip()
-        or str(runtime_setting("OUROBOROS_MODEL_FALLBACK", "") or "").strip()
-    )
+    Reads OUROBOROS_MODEL_FALLBACKS; only a process where it is absent (never projected)
+    reads the legacy singular OUROBOROS_MODEL_FALLBACK (env-only back-compat, never a
+    settings value). No dedup, no active-model drop, and NO SETTINGS_DEFAULTS injection:
+    an EXPLICITLY empty Fallbacks slot means "no cross-model fallback" and stays projected
+    as blank (``config.apply_settings_to_env``), so the alias cannot revive behind it."""
+    modern = runtime_setting("OUROBOROS_MODEL_FALLBACKS")
+    raw = str((runtime_setting("OUROBOROS_MODEL_FALLBACK", "") if modern is None else modern) or "").strip()
     return [m.strip() for m in _parse_model_list(raw) if str(m or "").strip()]
 
 

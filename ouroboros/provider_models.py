@@ -6,7 +6,7 @@ deep_self_review.py)."""
 from __future__ import annotations
 
 
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ouroboros.model_slots import ResolvedModelTarget, parse_fallback_chain
 from ouroboros.settings_defaults import OPENROUTER_DEFAULTS, OPENROUTER_REVIEW_DEFAULTS, SETTINGS_DEFAULTS  # noqa: F401
@@ -273,6 +273,24 @@ def fallback_candidate_targets(active_model: str = "", *, preserve_slots: bool =
     )
 
 
+def compatible_endpoint(value: Callable[[str], str]) -> tuple[str, str]:
+    """``(api_key, base_url)`` of the OpenAI-compatible lane, one pair on every path.
+
+    A dedicated ``OPENAI_COMPATIBLE_BASE_URL`` travels only with its own key (blank = an
+    endpoint without auth); without it the legacy ``OPENAI_BASE_URL`` travels only with
+    ``OPENAI_API_KEY``. Neither pair borrows the other's key. ``value`` reads one stripped setting."""
+    if base := value("OPENAI_COMPATIBLE_BASE_URL"):
+        return value("OPENAI_COMPATIBLE_API_KEY"), base
+    return value("OPENAI_API_KEY"), value("OPENAI_BASE_URL")
+
+
+def compatible_endpoint_configured(value: Callable[[str], str]) -> bool:
+    """Readiness of that pair: the dedicated endpoint (its key optional), or the legacy endpoint
+    with its key. A dedicated key without its endpoint configures nothing."""
+    key, base = compatible_endpoint(value)
+    return bool(base and (key or value("OPENAI_COMPATIBLE_BASE_URL")))
+
+
 def provider_has_credentials(provider: str) -> bool:
     """Whether a route is configured; a managed engine's live readiness is separate."""
     if provider == "claudexor":
@@ -280,10 +298,7 @@ def provider_has_credentials(provider: str) -> bool:
     if provider == "local":
         return True
     if provider == "openai-compatible":
-        compat = str(runtime_setting("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
-        legacy_key = str(runtime_setting("OPENAI_API_KEY", "") or "").strip()
-        legacy_base = str(runtime_setting("OPENAI_BASE_URL", "") or "").strip()
-        return bool(compat or (legacy_key and legacy_base))
+        return compatible_endpoint_configured(lambda key: str(runtime_setting(key, "") or "").strip())
     if provider == "gigachat":
         creds = str(runtime_setting("GIGACHAT_CREDENTIALS", "") or "").strip()
         user = str(runtime_setting("GIGACHAT_USER", "") or "").strip()
@@ -304,10 +319,7 @@ def provider_has_credentials_in_settings(provider: str, settings: dict) -> bool:
     if provider == "local":
         return bool(get("LOCAL_MODEL_SOURCE"))
     if provider == "openai-compatible":
-        return bool(
-            get("OPENAI_COMPATIBLE_BASE_URL")
-            or (get("OPENAI_API_KEY") and get("OPENAI_BASE_URL"))
-        )
+        return compatible_endpoint_configured(get)
     if provider == "gigachat":
         return bool(
             get("GIGACHAT_CREDENTIALS")
