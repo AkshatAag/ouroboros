@@ -292,7 +292,12 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
     deadline_at = str(binding.get("deadline_at") or "")
     text = work_order_text(predecessor, verdict["cause"], sources, deadline_at=deadline_at,
                            authority_source=authority_source, checkout=recorded_system_checkout(result))
-    title = str(result.get("title") or result.get("suggested_name") or result.get("objective") or predecessor)[:80]
+    title = str(result.get("title") or result.get("suggested_name") or result.get("objective") or predecessor)
+    # A chain keeps the work's own name: the link is metadata.continuation, so a
+    # predecessor's own "Continue: " prefixes are dropped instead of stacked (#1717).
+    while title.startswith("Continue: "):
+        title = title[len("Continue: "):]
+    title = (title or predecessor)[:80]
     original = sources.get("original") or {}
     origin_ref = original.get("origin_message_ref")
     from ouroboros.settings_scales import EFFORT_SCALE
