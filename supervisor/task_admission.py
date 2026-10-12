@@ -554,6 +554,7 @@ def revalidate_project_holds() -> None:
     from supervisor.update_merge import assisted_resume_authorizes
     from ouroboros.projects_registry import _load_bindings, project_binding_for_task
     from ouroboros.owner_wait import restore_owner_wait_allowed
+    from ouroboros.delegate_recovery import planned_handoff_resume_allowed
 
     held = [task for task in queue.PENDING if task.get("_project_admission_restore_hold")]
     if not held:
@@ -605,9 +606,14 @@ def revalidate_project_holds() -> None:
             # old RUNNING mirror was best-effort. Fresh queue admission supplies
             # positive 'none'; canonical possible handoff always vetoes that row.
             stored = load_task_result(queue.DRIVE_ROOT, tid, strict=True) or {}
+            # A pre-adopted planned handoff authorizes only a row the loop resumes from no
+            # carrier of its own: it never stands in for an owner wait, pause or saved work.
             granted = (owner_resume or _exact_resume_granted(task, queue.DRIVE_ROOT)
                        or _working_resume_granted(task, queue.DRIVE_ROOT, existing=stored)
-                       or assisted_resume_authorizes(task, stored))
+                       or assisted_resume_authorizes(task, stored)
+                       or not (task.get("_owner_wait_resume") or task.get("_budget_pause_resume")
+                               or "_working_recovery" in task)
+                       and planned_handoff_resume_allowed(queue.DRIVE_ROOT, task))
             if (stored.get("admission_outcome") == "never_admitted"
                     or not granted and (
                         stored.get("status") != STATUS_SCHEDULED or stored.get("started_at")

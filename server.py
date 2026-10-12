@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
 import uvicorn
-from ouroboros.server_control import (PanicIngress, execute_panic_stop as _execute_panic_stop_impl,
+from ouroboros.server_control import (PanicIngress, execute_panic_stop as _execute_panic_stop_impl, exit_after_restart,
                                       restart_current_process as _restart_current_process_impl)
 from ouroboros.owned_shutdown import (begin_owned_stop, finish_unconfirmed_stops, start_inherited_import,
                                        stop_owned_work)
@@ -1655,14 +1655,17 @@ def _emergency_process_cleanup(*, port_sweep: bool = True) -> dict:
     return {"worker_exits": worker_exits, "live_children": multiprocessing.active_children() + packer.live_children(), "owned_stop": owned_stop}
 
 def main() -> int:
-    # The server process is the single writer of logs/server.log; a test run on the
-    # real default data root keeps the stream handler only.
+    # Sole server.log writer; tests on the real default data root retain only the stream handler.
     configure_process_logging(drive_logs=None if _pytest_default_real_data_dir else DATA_DIR / "logs")
+    from ouroboros.delegate_recovery import observe_restart_parent
+    # A Windows direct successor first waits for its parent's exit; a Panic exit ends it before it serves.
+    if observe_restart_parent().get("exit_code") == PANIC_EXIT_CODE:
+        log.critical("The previous server generation exited by Panic; its restart successor stops")
+        return PANIC_EXIT_CODE
     if not automatic_launch_allowed(os.environ.get("OUROBOROS_LAUNCH_INTENT", "owner"), DATA_DIR, log):
         return 0
-    # A benchmark-owned child may receive an integrity pin from its parent.
-    # Verify the exact bytes before even resolving the saved bind host; a
-    # malformed/replaced snapshot must not be converted into product defaults.
+    # Verify a benchmark parent's exact integrity pin before resolving the saved bind host;
+    # a malformed/replaced snapshot must never become product defaults.
     try:
         verify_settings_integrity()
     except SettingsIntegrityError:
@@ -1740,8 +1743,8 @@ def main() -> int:
                 _restart_current_process(args.host, actual_port)
         except Exception:
             log.exception("Restart failed; cleanup or transfer is unconfirmed, custody retained")
-            return os._exit(1)  # A watcher exception must not silently return success or leave main hung.
-        os._exit(RESTART_EXIT_CODE)
+            return exit_after_restart(1)  # Panic retains termination even when cleanup/transfer failed.
+        exit_after_restart(RESTART_EXIT_CODE)
 
     restart_thread = threading.Thread(target=_check_restart, daemon=True)
     restart_thread.start()
