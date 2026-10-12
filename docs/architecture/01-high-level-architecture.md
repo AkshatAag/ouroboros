@@ -82,7 +82,7 @@ ouroboros/ — agent core and shared runtime (§6)
   settings_defaults.py, settings_scales.py, model_slots.py, review_model_routes.py, runtime_limits.py — the settings vocabularies `config.py` re-exports: keys and defaults, closed scales, model-slot resolution, reviewer routes, clamped limits (§7; §10 invariant 3)
   version.py — version string from VERSION, importlib.metadata fallback
   secret_masking.py — Settings/MCP wire placeholders and secret repair before env overlay and persistence (§7)
-  settings_integrity.py — task-local settings view and the strict snapshot pin (`OUROBOROS_SETTINGS_SHA256`) (§7)
+  settings_integrity.py — task-local settings view, strict snapshot pin (`OUROBOROS_SETTINGS_SHA256`) and proposal echo (`OUROBOROS_PROJECTED_PROPOSALS`) (§7)
   credential_shapes.py — credential leaf names and physical locations (§6 Credential mutation and diagnostic redaction)
   update_channels.py — Stable/QA/Development channel mapping (§8)
   update_letter.py — the update letter: `base..target` commit material from one accounted light-slot call, shared by the Updates payload and the Runtime-context `official_update` fact (§7; §3 Updates)
