@@ -244,49 +244,49 @@ Enter as a line break.
 
 ### Composer owner controls
 
-Two controls in the composer's pill row write a global owner setting rather than
-a fact about the next message: the Nano/Low/Max context mode and the **effort
-range**. Both save at once through their owner endpoint, show the server's refusal
-as a toast and read the one saved value back from `/api/state`, so Main and every
-Project composer show the same thing; the composer is the only place the range is
-shown or edited (Settings has no effort section).
+Two controls in the composer's pill row write a global owner setting rather than a
+fact about the next message: the context mode and the **effort range**. Both save at
+once through their owner endpoint, show the server's refusal as a toast and read the
+one saved value back from `/api/state`, so Main and every Project composer agree;
+Settings has no effort section.
 
-The effort range is a round button (the pills' height) wearing a ring glyph — a
-300° arc whose band is the minimum..maximum and whose dot is the recommended
-level. It opens **inline**, never as a dropdown, into the seven-level strip (None ·
-Low · Medium · High · X-High · Max · Ultra) with two brackets and the recommended
-pill, and nothing else: no title word, no reset. A segment is its word plus
-`--effort-seg-pad` on each side; the pill covers its whole segment with the word
-centred, and the band, the pill and the brackets share one vertical inset, so their
-edges meet. Every handle pushes the ones it meets: a bracket carries the
-recommended level along, the pill carries a bracket past which it moves, a pushed
-bracket stays where it was pushed, and the brackets never cross. A tap inside the
-range sets the recommended level, a tap outside moves the nearer bracket; a drag
-keeps the grab offset and shows whole levels throughout. A stored tier outside the
-seven (`minimal`) shows at the nearest owner tier and is rewritten only when its own
-handle moves.
+Each is a **capsule** of the pills' height — ring, name, value: `Context Max`,
+`Effort X-High`. Closed, Effort names only the recommended level; its ring (a 300°
+arc: band minimum..maximum, dot recommended) and the button's name carry the range.
+Context's ring is three arcs, the chosen one lit: one of three modes, never a fill
+level or capacity. A capsule opens **inline**, never as a dropdown, one at a time;
+its value yields to the strip. Context's is Nano · Low · Max under a glass thumb; a
+choice posts at once and the strip waits for the answer (lowering only while idle,
+outside Cyber Pro). Effort's: seven levels, two brackets, the recommended pill. A
+segment is its word plus `--capsule-seg-pad` a side; the pill covers its segment;
+band, pill and brackets share one vertical inset. Every handle pushes the ones it
+meets, a pushed bracket stays, the brackets never cross. A tap inside the range sets
+the recommended level, outside it the nearer bracket; a drag keeps the grab offset
+on whole levels. A stored `minimal` shows at Low until its handle moves.
 
-**The open strip stays on the composer's line.** It sits beside the pills when it
-fits there (the padding may tighten to `--space-1`); otherwise Swarm and
-Nano/Low/Max step aside while it is open, and it appears and leaves at once with
-them (the padding may tighten to 3 px, the pill's corners tightening with it so it
-still covers its word); only when
-even that does not fit does the strip scroll inside itself, fading on the side that
-hides levels, while the round button stays put. The fit is measured from the row,
-so a Project pane, a phone and a translation need no breakpoint.
+**A mark keeps from a rounded end the clearance it keeps from the straight edges.**
+A pill (the thumb, the recommended pill) is concentric with the capsule, so the band
+inset suffices; a square bracket at the last level would graze the curve, so
+Effort's end gutter also clears it. The gutter is measured into the fit and outlasts
+scrolling and dragging.
 
-**Hover is an accelerator; the press always works.** With a hovering fine pointer
-the strip opens about 160 ms after the pointer arrives and closes a second after it
-leaves a 32 px zone around the control, unless a press pinned it; the same press
-unpins. Touch and keyboard use the press alone: Enter or Space opens and focuses the
-recommended handle, arrows and PageUp/PageDown step a handle, Home and End take it
-to the ends, Esc closes and returns focus to the button, an outside press closes.
-The three handles are sliders whose value text names the level; closed, they leave
-the tab order and the button's name states the range. A change saves when the
-gesture ends, saves run one after another with the last winning, and Send waits
-for a pending save so the next root starts at the level the owner just chose; a
-refused save keeps the draft, says why and returns the control to the saved value —
-unsaved values are never shown as saved.
+**The open strip stays on the composer's line**: beside the others when it fits
+(padding down to `--space-1`), else alone while they step aside (down to 3 px, the
+pill's corners tightening; the name and divider yield first), last scrolling inside
+itself, faded where levels hide. A closed line too narrow drops the names, then
+ellipsizes the longest values, never rings. All is measured, so no breakpoint.
+
+**Hover is an accelerator; the press always works.** With a hovering fine pointer a
+capsule opens ~160 ms after arrival (not while the other is open) and closes a
+second after it leaves a 32 px zone unless a press pinned it; the press unpins.
+Touch and keyboard use the press: Enter or Space opens onto the recommended handle
+or the chosen mode; arrows step a handle (PageUp/PageDown too) or choose the next
+mode, Home/End reach the ends; Esc closes and returns focus to the head; an outside
+press closes. Handles are sliders naming their level; closed, they leave the tab
+order. An effort change saves when the gesture ends, saves run in order (last wins),
+and Send waits for a pending one so the next root starts at that level; a refused
+save keeps the draft, says why and returns to the saved value — unsaved values are
+never shown as saved.
 
 ### `.muted`
 

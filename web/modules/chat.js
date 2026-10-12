@@ -270,8 +270,8 @@ export function createChatInstance({
                 <div class="chat-toolbar-row">
                     <div class="chat-composer-pills" id="chat-composer-pills">
                         <button class="chat-swarm" id="chat-swarm" type="button" data-armed="false" title="Swarm: route your next message into a new managed task, run a deep plan review with plan_task, then delegate when parallel work helps. Auto-disarms after sending.">Swarm</button>
-                        <div class="chat-context-mode" id="chat-context-mode" data-context-mode="max" role="group" aria-label="Context size mode" title="Context mode (owner setting). Nano is the compact owner window, Low fits ~250K / local models, Max is full. Saves immediately; lowering requires Ouroboros to be idle."><button class="chat-seg" type="button" data-mode="nano">Nano</button><button class="chat-seg" type="button" data-mode="low">Low</button><button class="chat-seg" type="button" data-mode="max">Max</button></div>
                     </div>
+                    <div class="chat-context-mode" id="chat-context-mode" data-context-mode="max"></div>
                 </div>
                 <div class="chat-text-row">
                     <button class="chat-attach-btn" id="chat-attach" type="button" title="Attach file">
@@ -561,10 +561,6 @@ export function createChatInstance({
         if (moreSummary) {
             const anyActive = !!data?.evolution_enabled || !!data?.bg_consciousness_enabled;
             moreSummary.classList.toggle('has-active', anyActive);
-        }
-        const ctxBtn = byId('context-mode');
-        if (ctxBtn && typeof data?.context_mode === 'string') {
-            ctxBtn.dataset.contextMode = ['nano', 'low', 'max'].includes(data.context_mode) ? data.context_mode : 'max';
         }
         ownerControls?.syncState(data);
         const budget = headerBudgetPresentation(data);
