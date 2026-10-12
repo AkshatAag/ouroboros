@@ -1,0 +1,56 @@
+name: PR1500 native Windows qualification
+on:
+  push:
+    branches: ['qualification/pr1500-final-20261012']
+permissions:
+  contents: read
+jobs:
+  restart:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Record exact subject and native environment
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force qualification | Out-Null
+          git rev-parse HEAD | Out-File qualification/commit.txt -Encoding utf8
+          git rev-parse HEAD^ | Out-File qualification/product-parent.txt -Encoding utf8
+          git diff --name-only HEAD^ HEAD | Out-File qualification/qualification-delta.txt -Encoding utf8
+          python -c "import sys,platform; print(sys.version); print(sys.executable); print(platform.platform())" | Out-File qualification/environment.txt -Encoding utf8
+          uv --version | Out-File qualification/uv.txt -Encoding utf8
+      - name: Real Windows restart cases
+        shell: pwsh
+        run: |
+          $py = (Get-Command python).Source
+          $xml = Join-Path $pwd 'qualification/native.xml'
+          & $py -I -S scripts/safe_test.py --temp-parent $env:RUNNER_TEMP -- $py -m pytest -o addopts='' -p no:cacheprovider -v -rA --timeout=300 --junitxml=$xml tests/test_windows_restart_native.py *> qualification/native.log
+          $code = $LASTEXITCODE
+          Get-Content qualification/native.log
+          if ($code -ne 0) { exit $code }
+          [xml]$report = Get-Content $xml
+          $cases = @($report.SelectNodes('//testcase'))
+          $nonpassing = @($report.SelectNodes('//testcase/failure | //testcase/error | //testcase/skipped'))
+          if ($cases.Count -lt 14 -or $nonpassing.Count -ne 0) { throw 'Native qualification requires at least fourteen executed passing cases and no skips.' }
+      - name: Targeted continuation and Panic consumers
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $py = (Get-Command python).Source
+          $xml = Join-Path $pwd 'qualification/consumers.xml'
+          & $py -I -S scripts/safe_test.py --temp-parent $env:RUNNER_TEMP -- $py -m pytest -o addopts='' -p no:cacheprovider -rA --timeout=300 --junitxml=$xml tests/test_restart_completion.py tests/test_windows_restart_proof.py tests/test_windows_restart_handles.py tests/test_body_restart_handoff.py tests/test_direct_restart_saved_work.py tests/test_planned_delegate_assignment.py tests/test_owner_wait_restart.py tests/test_platform_guard.py tests/test_panic_live_ingress.py tests/test_server_control_panic_daemon.py tests/test_process_custody.py tests/test_server_admission.py tests/test_shutdown_signal_1142.py tests/test_runtime_venv.py *> qualification/consumers.log
+          $code = $LASTEXITCODE
+          Get-Content qualification/consumers.log
+          exit $code
+      - name: Retain raw evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr1500-windows-${{ github.sha }}
+          path: qualification/
+          if-no-files-found: error
+          retention-days: 14
