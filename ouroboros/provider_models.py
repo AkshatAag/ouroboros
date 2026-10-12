@@ -675,6 +675,19 @@ def compute_direct_review_models_fallback(
     review_runs: int = 3,
 ) -> list[str]:
     """Compile a direct-provider review panel from declarative role names."""
+    return [model for _role, model in compute_direct_review_seats(
+        provider, main_model, light_model, review_runs=review_runs)]
+
+
+def compute_direct_review_seats(
+    provider: str,
+    main_model: str,
+    light_model: str = "",
+    *,
+    review_runs: int = 3,
+) -> list[tuple[str, str]]:
+    """The same panel as ``(role, model)`` seats: ``role`` is the owner slot a seat runs (``main``,
+    or ``light`` for a Light of this provider), '' where the provider's shipped Light stands in."""
     if provider not in DIRECT_PROVIDER_DEFAULTS:
         return []
     provider_prefix = f"{provider}::"
@@ -683,10 +696,10 @@ def compute_direct_review_models_fallback(
         return []
     light = migrate_model_value(provider, light_model) if light_model else ""
     default_light = migrate_model_value(provider, DIRECT_PROVIDER_DEFAULTS[provider].get("light", ""))
-    light_slot = light if light.startswith(provider_prefix) else default_light
-    role_models = {"main": main, "light": light_slot or main}
+    seats = {"main": ("main", main), "light": ("light", light) if light.startswith(provider_prefix)
+             else ("", default_light) if default_light else ("main", main)}
     roles = DIRECT_PROVIDER_REVIEW_ROLES.get(provider, ("main", "light", "light"))
-    compiled = [role_models.get(role, main) for role in roles]
+    compiled = [seats.get(role, seats["main"]) for role in roles]
     count = max(1, int(review_runs or 3))
     return [compiled[index % len(compiled)] for index in range(count)]
 

@@ -384,7 +384,8 @@ def _owner_update_settings(
     context/safety ratchets against the value ON DISK) runs while that lock is held rather
     than before it, and ``boundary`` flips the instant the bytes land. A model slot the document
     never authored and the transform left as read is not written (``unedited_unauthored_slots``),
-    unless the caller hands over a ``whole_document`` it authored (Settings save, onboarding)."""
+    unless the caller names it in ``authored_keys`` (a wait card's explicit choice, default-equal
+    included) or hands over a ``whole_document`` it authored (Settings save, onboarding)."""
     from ouroboros import config as _config
 
     _config._guard_live_settings_write()
@@ -415,7 +416,7 @@ def _owner_update_settings(
         if not whole_document:
             from ouroboros.server_runtime import unedited_unauthored_slots
 
-            for key in unedited_unauthored_slots(document, to_write, shown):
+            for key in unedited_unauthored_slots(document, to_write, shown) - set(authored_keys):
                 to_write.pop(key, None)
         write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
         if boundary is not None:

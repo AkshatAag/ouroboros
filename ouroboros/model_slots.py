@@ -187,6 +187,20 @@ def task_processing_preference(task: dict, *, model_role: str = "",
     return resolve_processing_preference(role)
 
 
+def _persisted_role(role: str) -> tuple[str, str]:
+    """``role`` as a wait card persists it: ``(family, identity)``. ``/review`` runs on the direct
+    Main row when the call names no reviewer (deep_self_review.main_review_row, decision 3A): there
+    is no catalog row behind ``reviewer:main``, so its card persists as Main's own role."""
+    family, _, identity = role.partition(":")
+    return ("main", "") if (family, identity) == ("reviewer", "main") else (family, identity)
+
+
+def model_role_setting_keys(role: str) -> tuple[str, ...]:
+    """The settings key a wait card's persistence of ``role`` authors (none for a catalog row's role)."""
+    key = MODEL_ROLE_SETTINGS.get(_persisted_role(role)[0], "")
+    return (key,) if key else ()
+
+
 def apply_model_role_override(settings: dict, *, role: str, model: str,
                               credential_profile_id: str, use_local: bool) -> dict:
     """Apply explicit wait-card persistence to one role; never infer it from a model.
@@ -209,12 +223,7 @@ def apply_model_role_override(settings: dict, *, role: str, model: str,
     if pin and not subscription:
         raise ValueError("An account pin requires a managed model source")
     result = copy.deepcopy(settings)
-    family, _, identity = role.partition(":")
-    if family == "reviewer" and identity == "main":
-        # ``/review`` runs on the direct Main row when the call names no reviewer
-        # (deep_self_review.main_review_row, decision 3A): there is no catalog row
-        # behind that seat, so its wait card persists as Main's own role.
-        family, identity = "main", ""
+    family, identity = _persisted_role(role)
     if family in MODEL_ROLE_SETTINGS:
         key = MODEL_ROLE_SETTINGS[family]
         accounts, _ = normalize_model_role_options(MODEL_ACCOUNTS_KEY, result.get(MODEL_ACCOUNTS_KEY))

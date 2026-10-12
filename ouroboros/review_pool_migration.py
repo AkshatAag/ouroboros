@@ -801,14 +801,14 @@ def environment_overridable_keys(document: Any) -> frozenset:
     """The keys whose read-seam value for ``document`` stands in for an ABSENT key, so a
     reader that merges the environment over the document lets an environment value win.
 
-    One key: the factory reviewer rows ``apply_at_read_seam`` mints into
-    ``OUROBOROS_SUBAGENTS`` when the document authored NO review lanes (the key absent, or
-    the ``""`` every 6.90+ document saved for "the default lanes ran" — retired comma keys
-    never entered the panel, canon 11) and holds no catalog text are a default, not the
-    owner's disk value — a catalog the environment carries (a container's roster, a
-    benchmark's; explicit configuration) wins over them exactly as it won over the absence
-    before the mint existed. Rows minted from the owner's own lanes, and a catalog the owner
-    saved (marked or not), are the document's decision and shadow the environment like every
+    One key: ``OUROBOROS_SUBAGENTS`` of a document that authored NO review lanes (the key absent, or the ``""``
+    every 6.90+ document saved for "the default lanes ran" — retired comma keys never entered the panel, canon 11)
+    and holds no catalog text. Its factory reviewer rows are a default, not the owner's disk value: a catalog the
+    environment carries (a container's roster, a benchmark's; explicit configuration) wins over the rows the raw
+    stage mints for an old document (``config.normalize_settings_raw``) exactly as it won over the absence before
+    the mint existed; a never-configured document mints only over the effective input, environment included
+    (``apply_at_read_seam(merged=True)``), so that catalog is what runs. Rows minted from the owner's own lanes, and
+    a catalog the owner saved (marked or not), are the document's decision and shadow the environment like every
     disk-authored key. A missing or unreadable document has no keys at all.
     """
     if not isinstance(document, Mapping):

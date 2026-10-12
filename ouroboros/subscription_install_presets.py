@@ -485,7 +485,9 @@ def factory_review_rows(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
 
     The panel follows the Main the document runs (owner 4A), whatever other access sits beside
     it: a reachable OpenRouter Main → OpenRouter's three ``OPENROUTER_REVIEW_DEFAULTS``; a
-    reachable direct Main → its provider's ``DIRECT_PROVIDER_REVIEW_ROLES`` panel; any other
+    reachable direct Main → its provider's ``DIRECT_PROVIDER_REVIEW_ROLES`` panel, each seat in
+    its ROLE's whole binding (a Light seat runs Light's, never Main's by a shared model name; a
+    blank or another provider's Light leaves the provider's shipped Light standing in, plain); any other
     reachable Main (compatible, local, managed) → as many twin rows of it, in its whole binding
     (``role_route_binding``: ``(local)`` label, account pin, processing), as the shipped panel
     has seats (three runs, quorum 2 of 3). With no configured access at all the shipped
@@ -500,38 +502,38 @@ def factory_review_rows(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
     reviewer template.
     """
     from ouroboros.config import EFFORT_SCALE
-    from ouroboros.provider_models import compute_direct_review_models_fallback, provider_for_model
+    from ouroboros.provider_models import compute_direct_review_seats, provider_for_model
     from ouroboros.server_runtime import has_startup_ready_provider
     from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
 
     settings = _factory_settings(doc)
     main, light = settings["OUROBOROS_MODEL"], str(settings.get("OUROBOROS_MODEL_LIGHT") or "")
     router_panel = list(OPENROUTER_REVIEW_DEFAULTS["triad"])
-    binding = role_route_binding(settings)
-    main = binding["route"]["target_id"] if binding else main
+    bindings = {role: role_route_binding(settings, role) for role in ("main", "light")}
+    main = bindings["main"]["route"]["target_id"] if bindings["main"] else main
     router_main = provider_for_model(main) == "openrouter"
-    if binding and not router_main:
-        models = (compute_direct_review_models_fallback(provider_for_model(main), main, light)
-                  or [main] * len(router_panel))
+    if bindings["main"] and not router_main:
+        seats = (compute_direct_review_seats(provider_for_model(main), main, light)
+                 or [("main", main)] * len(router_panel))
     else:  # a router Main reviews on the diverse router panel, never as twins of itself
-        models = router_panel if router_main and (binding or not has_startup_ready_provider(settings)) else []
-        binding = {}
+        reachable = router_main and (bindings["main"] or not has_startup_ready_provider(settings))
+        seats = [("", model) for model in router_panel] if reachable else []
     effort = str(settings.get("OUROBOROS_EFFORT_REVIEW") or "").strip().lower()
     if effort not in EFFORT_SCALE:
         effort = "high"
     used = _document_catalog_ids(settings)
     rows: List[Dict[str, Any]] = []
-    for model in models:
+    for role, model in seats:
         row_id = _free_review_id(used, "review-")
         used.add(row_id)
-        follows_main = bool(binding) and model == main
+        binding = bindings.get(role) or {}
         rows.append({
             "subagent_id": row_id,
             "recommended_use": _REVIEW_SEAT_RECOMMENDATION,
-            "route": dict(binding["route"]) if follows_main else {"kind": ROUTE_KIND_API_MODEL, "target_id": model},
+            "route": dict(binding["route"]) if binding else {"kind": ROUTE_KIND_API_MODEL, "target_id": model},
             "effort": effort,
             **({"processing_preference": binding["processing_preference"]}
-               if follows_main and "processing_preference" in binding else {}),
+               if "processing_preference" in binding else {}),
             "review_eligible": True,
             "minted_from": MINTED_FROM_FACTORY_DEFAULT,
         })
