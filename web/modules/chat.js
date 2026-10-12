@@ -5,6 +5,7 @@ import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
 import { tx } from './i18n.js';
 import { hostRowDisplayText } from './host_notice_text.js';
+import { childRowPlacement, replayConcludesTask } from './chat_row_placement.js';
 import { decorateProjectRow, syncSavedProjectContext } from './project_answer.js';
 import { createProjectHandoffs, receiptNotice } from './project_handoff.js';
 import { bindComposerFileTargets, cleanupUploadedAttachments, createChatMedia, showTaskIncidentToast } from './chat_media.js';
@@ -16,7 +17,7 @@ import { clientSurfaceField } from './client_surface.js';
 import { syncSettledItems } from './settled_card.js';
 import { createChatReadingPosition } from './chat_reading_position.js';
 import { createChatHistoryPager, historyCoverage, historyIslandAtEdge } from './chat_history.js';
-import { createProjectReadReceipt, isAtNewestMessage } from './project_read_state.js';
+import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset } from './project_read_state.js';
 import { mergeHistoricalTimelineItem, historyNodeIsProtected, historyRowIds, historyStamps, stampHistoryNode, compareHistoryPosition } from './chat_history_replay.js';
 import { apiClient, apiFetch, fetchTaskDetail, fetchTaskDetailStrict, isStoreMigrating } from './api_client.js';
 import { syncHistoryRetentionItem } from './history_retention.js';
@@ -2041,7 +2042,7 @@ export function createChatInstance({
     }
 
     // A known child's own (non-lifecycle) progress updates the linked child card.
-    function routeSubagentProgressToCard(childId, msg) {
+    function routeSubagentProgressToCard(childId, msg, ownLine = false) {  // ownLine: the child's own words
         const info = subagentChildParents.get(childId);
         if (!info) return false;
         const { parentId, role } = info;
@@ -2050,7 +2051,7 @@ export function createChatInstance({
         const rawTs = msg?.ts || new Date().toISOString();
         reanchorTaskCard(getLiveCardRecord(parentId), rawTs);
         const record = getSubagentCardRecord(childId, parentId, role);
-        const preserveTerminal = Boolean(record?.finished && subagentTerminalChildren.has(childId));
+        const preserveTerminal = Boolean(record?.finished && (ownLine || subagentTerminalChildren.has(childId)));
         const summary = summarizeSubagentCardFrame(msg, childId, {
             content,
             text: content,
@@ -2061,7 +2062,8 @@ export function createChatInstance({
             status: preserveTerminal ? '' : (msg?.status || ''),
         }, rawTs);
         if (!summary) return false;
-        if (!summary.activity) summary.dedupeKey = `subagent-progress:${childId}`;
+        // Same frame adopts one speech occurrence; progress replaces a line.
+        if (!summary.activity) summary.dedupeKey = ownLine ? `subagent-line:${childId}:${rawTs}:${content}` : `subagent-progress:${childId}`;
         if (preserveTerminal && !_historyReplayActive) {
             summary.phase = String(record.phaseEl?.dataset?.phase || 'done');
             summary.terminal = true;
@@ -2558,17 +2560,10 @@ export function createChatInstance({
                         else appendMediaBubble(msg);
                         continue;
                     }
-                    // Replay conclusion: a typed terminal fact OR a plain
-                    // untyped final (replay has no later task_done frame, so
-                    // the bare final is the task's last word; marked rows —
-                    // system_type/msg_type — still never conclude).
-                    const plainUntypedFinal = !msg.system_type && !msg.msg_type && msg.task_phase !== 'unfinished';
-                    if (
-                        taskId
-                        && (msg.role === 'assistant' || msg.role === 'system')
-                        && (positiveTaskTerminalFact(msg) || plainUntypedFinal)
-                        && !isNonTerminalMediaHistoryRow(msg)
-                    ) {
+                    if (subagentChildParents.has(taskId) && childRowPlacement(msg) === 'line') {
+                        insertCardIfNeeded(taskId); routeSubagentProgressToCard(taskId, msg, true); continue;
+                    }
+                    if (taskId && replayConcludesTask(msg)) {
                         if (subagentChildParents.has(taskId)) {
                             insertCardIfNeeded(taskId);
                             routeSubagentFinalMessageToCard(taskId, msg);
@@ -2821,6 +2816,8 @@ export function createChatInstance({
 
     // A new revision needs a read begun after it: one in flight is awaited, never
     // joined; the sticky hydration answers a covered one (project_read_state.js).
+    const newestFacts = { delivered: id => retainedHistoryIds().has(id), nodes: id => historyNodes(id),
+        viewport: messagesDiv, header: pageHeader, composer: inputArea };
     const readReceipt = createProjectReadReceipt({
         read: async (fresh) => {
             if (!fresh && initialHydrationPromise) await initialHydrationPromise;
@@ -2834,10 +2831,10 @@ export function createChatInstance({
         isShown: () => !destroyed && !page.hidden,
         // A place still being restored is not where the reader is.
         isReadingLatest: latest => !destroyed && !reading.pending && isInstanceVisible() && isAtNewestMessage(latest, {
-            delivered: id => retainedHistoryIds().has(id), nodes: historyNodes, viewport: messagesDiv, header: pageHeader, composer: inputArea,
-            atBottom: () => isNearBottom() && !historyPager.getState().canNewer,
+            ...newestFacts, atBottom: () => isNearBottom() && !historyPager.getState().canNewer,
         }),
         onReadingLatest,
+        land: latest => reading.land(() => newestMessageOffset(latest, newestFacts)),
     });
 
     (async () => {
@@ -3021,10 +3018,6 @@ export function createChatInstance({
         }
     });
     // Dynamic CSS reserve keeps the absolute composer from covering messages.
-    function scrollToBottom() {
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        updateScrollButton();
-    }
 
     // Scroll events observe position; only positive navigation changes follow intent.
     messagesDiv?.addEventListener('scroll', () => { reading.scroll(); settleHistoryViewport(); readReceipt.note(); }, { passive: true });
@@ -3053,9 +3046,9 @@ export function createChatInstance({
         scrollBottomBtn.classList.toggle('visible', isInstanceVisible() && (!isNearBottom() || (!reading.stick && historyWindow?.gaps)));
     }
     // The one way to the present: ↓, and returning to the room (owner decision
-    // 2026-10-05: a room is always reopened at its newest message).
-    async function showLatest() {
-        const current = reading.claim();
+    // 2026-10-05: a room is always reopened at its newest message), unread at what arrived last.
+    async function showLatest({ arrive = false } = {}) {
+        const current = reading.claim(arrive === true);
         if (historySyncPromise) await historySyncPromise;
         await historyPager.whenIdle();
         if (destroyed || !current()) return;
@@ -3692,9 +3685,9 @@ export function createChatInstance({
                 return settled(Boolean(changed));
             }
             // A placed host row is never a child's answer; with no card it stays a System row.
-            if (explicitTaskId && !msg.card_row && subagentChildParents.has(explicitTaskId)) {
-                return settled(Boolean(routeSubagentFinalMessageToCard(explicitTaskId, msg)));
-            }
+            const placed = explicitTaskId && !msg.card_row && subagentChildParents.has(explicitTaskId) && childRowPlacement(msg);
+            if (placed === 'line') return settled(Boolean(routeSubagentProgressToCard(explicitTaskId, msg, true)), false);
+            if (placed) return settled(Boolean(routeSubagentFinalMessageToCard(explicitTaskId, msg)));
             let changed = false;
             if (finalizing) changed = markLiveCardFinalizing(explicitTaskId, msg) || changed;
             else if (explicitTaskId && typedTerminal) {
